@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -115,6 +116,105 @@ class VisionStepResult:
     using_area_search: bool = False
     using_det_steer: bool = False
     dynamic_mode: Optional[str] = None
+
+
+class _FfmpegVideoWriter:
+    """Stream RGB frames to an H.264 mp4 via ffmpeg."""
+
+    def __init__(self, out_mp4: Path, *, fps: float) -> None:
+        out_mp4.parent.mkdir(parents=True, exist_ok=True)
+        self.path = out_mp4
+        self._fps = float(fps)
+        self._proc: Optional[subprocess.Popen] = None
+        self._size: Optional[Tuple[int, int]] = None
+        self.n_frames = 0
+
+    def write(self, rgb: np.ndarray) -> None:
+        fr = np.ascontiguousarray(np.asarray(rgb, dtype=np.uint8))
+        if fr.ndim != 3 or fr.shape[2] < 3:
+            return
+        h, w = fr.shape[:2]
+        ww, hh = w - (w % 2), h - (h % 2)
+        if self._proc is None:
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-s", f"{ww}x{hh}", "-r", str(self._fps),
+                "-i", "-",
+                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+                str(self.path),
+            ]
+            self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            self._size = (ww, hh)
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(np.ascontiguousarray(fr[:hh, :ww, :3], dtype=np.uint8).tobytes())
+        self.n_frames += 1
+
+    def close(self) -> None:
+        if self._proc is None:
+            return
+        assert self._proc.stdin is not None
+        self._proc.stdin.close()
+        err = self._proc.stderr.read().decode("utf-8", errors="replace") if self._proc.stderr else ""
+        rc = self._proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"ffmpeg failed rc={rc}\n{err[-2000:]}")
+        logger.info("Wrote %d frames → %s", self.n_frames, self.path)
+        self._proc = None
+
+
+def _draw_vgoal_demo_frame(
+    rgb: np.ndarray,
+    *,
+    step: int,
+    max_steps: int,
+    target_class: str,
+    vstep: VisionStepResult,
+    d_vis: Optional[float],
+) -> np.ndarray:
+    import cv2
+
+    bgr = cv2.cvtColor(np.asarray(rgb, dtype=np.uint8), cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
+    perc = vstep.perception or {}
+    bbox = perc.get("bbox")
+    if bbox and len(bbox) >= 4:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in bbox[:4]]
+        color = (0, 220, 80) if vstep.det_hit else (80, 80, 220)
+        cv2.rectangle(bgr, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+        label = f"{target_class} {perc.get('conf', 0):.2f}"
+        if perc.get("d_fused_m") is not None:
+            label += f" d={perc['d_fused_m']:.1f}m"
+        cv2.putText(bgr, label, (x1, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+    overlay = bgr.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 52), (15, 23, 42), -1)
+    cv2.addWeighted(overlay, 0.72, bgr, 0.28, 0, bgr)
+    mode = vstep.tracker_state
+    if vstep.using_det_steer:
+        mode += " +det-steer"
+    dist_s = f"{d_vis:.1f}m" if d_vis is not None and np.isfinite(d_vis) else "—"
+    cv2.putText(
+        bgr,
+        f"VGoal demo | {target_class} | step {step + 1}/{max_steps} | {mode}",
+        (12, 22),
+        cv2.FONT_HERSHEY_DUPLEX,
+        0.55,
+        (0, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        bgr,
+        f"det={'Y' if vstep.det_hit else 'N'}  vision={'Y' if vstep.using_vision else 'N'}  d_vis={dist_s}",
+        (12, 44),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (200, 255, 200),
+        1,
+        cv2.LINE_AA,
+    )
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
 def bbox_det_steer_yaw_rate(
@@ -237,6 +337,7 @@ def _raw_perception_record(
     if det is None:
         return rec
     bb = [float(x) for x in det.bbox]
+    rec["bbox"] = bb
     rec["bbox_w_px"] = round(bb[2] - bb[0], 1)
     d_direct = float(getattr(det, "direct_depth", 0.0) or 0.0)
     if d_direct > 0.0:
@@ -273,6 +374,28 @@ def _build_detector(args: argparse.Namespace, vgoal_repo: Path) -> Any:
             fov_deg=float(args.camera_fov_deg),
             img_w=int(args.capture_w),
             img_h=int(args.capture_h),
+        )
+    if kind == "humen_bridge":
+        from experiments.aerial.scripts.humen_bridge_detector import HumenBridgeDetector
+
+        prompt = str(args.visual_prompt or args.target_class or "bridge")
+        return HumenBridgeDetector(
+            model_path=str(args.yolo_model),
+            conf_threshold=float(args.yolo_conf),
+            imgsz=int(args.yolo_imgsz),
+            device=str(args.yolo_device),
+            visual_prompt=prompt,
+        )
+    if kind == "humen_corridor":
+        from experiments.aerial.scripts.humen_corridor_detector import HumenCorridorDetector
+
+        prompt = str(args.visual_prompt or args.target_class or "bridge")
+        return HumenCorridorDetector(
+            model_path=str(args.yolo_model),
+            conf_threshold=float(args.yolo_conf),
+            imgsz=int(args.yolo_imgsz),
+            device=str(args.yolo_device),
+            visual_prompt=prompt,
         )
     if kind in ("open_vocab", "semantic"):
         prompt = str(args.visual_prompt or args.target_class or "car")
@@ -417,6 +540,7 @@ def _vision_step(
     search_det_steer_gain: float = 1.0,
     search_det_steer_fwd: float = 0.0,
     search_det_steer_max_yaw: float = 0.314,
+    search_area_priority: bool = False,
 ) -> VisionStepResult:
     from vgoal.geometry import CameraIntrinsics
     from vgoal.tracker import TargetState
@@ -514,6 +638,10 @@ def _vision_step(
         measured_gr = None
 
     dynamic_mode: Optional[str] = None
+    tracker_state_str = str(TargetState.SEARCHING.value)
+    vision_would_lock = False
+    vision_g_rel: Optional[np.ndarray] = None
+    vision_target: Optional[np.ndarray] = None
 
     if dynamic_tracker is not None:
         from vgoal.dynamic_tracker import TrackingMode
@@ -527,23 +655,25 @@ def _vision_step(
             dt,
             min_meas_conf=float(dynamic_min_meas_conf),
         )
-        tracker_state = str(mode.value)
-        dynamic_mode = tracker_state
+        tracker_state_str = str(mode.value)
+        dynamic_mode = tracker_state_str
         if cur_goal_rel is not None and mode not in (TrackingMode.SEARCHING, TrackingMode.LOST):
-            g_rel = np.asarray(cur_goal_rel, dtype=np.float64)
-            target_world = _body_to_world(pos, yaw, g_rel)
-            return VisionStepResult(
-                goal_rel=g_rel,
-                target_world=target_world,
-                tracker_state=tracker_state,
-                det_hit=det_hit,
-                using_vision=True,
-                using_fallback=False,
-                using_area_search=False,
-                search_action=None,
-                perception=perception_rec,
-                dynamic_mode=dynamic_mode,
-            )
+            vision_would_lock = True
+            vision_g_rel = np.asarray(cur_goal_rel, dtype=np.float64)
+            vision_target = _body_to_world(pos, yaw, vision_g_rel)
+            if not search_area_priority:
+                return VisionStepResult(
+                    goal_rel=vision_g_rel,
+                    target_world=vision_target,
+                    tracker_state=tracker_state_str,
+                    det_hit=det_hit,
+                    using_vision=True,
+                    using_fallback=False,
+                    using_area_search=False,
+                    search_action=None,
+                    perception=perception_rec,
+                    dynamic_mode=dynamic_mode,
+                )
     else:
         tracker_state = tracker.update(
             measured_gr,
@@ -552,22 +682,28 @@ def _vision_step(
             ego_delta_yaw=dyaw,
             confidence=det_conf,
         )
+        tracker_state_str = str(tracker_state.value)
         cur_goal_rel = tracker.goal_rel
         if cur_goal_rel is not None and tracker_state != TargetState.SEARCHING:
-            g_rel = np.asarray(cur_goal_rel, dtype=np.float64)
-            target_world = _body_to_world(pos, yaw, g_rel)
-            return VisionStepResult(
-                goal_rel=g_rel,
-                target_world=target_world,
-                tracker_state=str(tracker_state.value),
-                det_hit=det_hit,
-                using_vision=True,
-                using_fallback=False,
-                using_area_search=False,
-                search_action=None,
-                perception=perception_rec,
-                dynamic_mode=None,
-            )
+            vision_would_lock = True
+            vision_g_rel = np.asarray(cur_goal_rel, dtype=np.float64)
+            vision_target = _body_to_world(pos, yaw, vision_g_rel)
+            if not search_area_priority:
+                return VisionStepResult(
+                    goal_rel=vision_g_rel,
+                    target_world=vision_target,
+                    tracker_state=tracker_state_str,
+                    det_hit=det_hit,
+                    using_vision=True,
+                    using_fallback=False,
+                    using_area_search=False,
+                    search_action=None,
+                    perception=perception_rec,
+                    dynamic_mode=None,
+                )
+
+    if measured_gr is not None and det_hit:
+        perception_rec["bridge_goal_rel"] = [round(float(x), 4) for x in measured_gr]
 
     if allow_fallback and fallback_intent is not None:
         d_fwd_hat = obs.info.get("depth_min_pred")
@@ -629,13 +765,14 @@ def _vision_step(
         return VisionStepResult(
             goal_rel=g_rel,
             target_world=target_world,
-            tracker_state=str(TargetState.SEARCHING.value),
+            tracker_state=tracker_state_str if vision_would_lock else str(TargetState.SEARCHING.value),
             det_hit=det_hit,
             using_vision=False,
             using_fallback=False,
             using_area_search=True,
             search_action=None,
             perception=perception_rec,
+            dynamic_mode=dynamic_mode,
         )
 
     search_action = np.array([search_fwd_step, 0.0, 0.0, search_yaw_rate], dtype=np.float64)
@@ -689,6 +826,17 @@ def main() -> int:  # noqa: C901
     parser.add_argument("--out", default="artifacts/wam_vgoal_eval_result.json")
     parser.add_argument("--spawn-tol-m", type=float, default=12.0)
     parser.add_argument("--traj-out", default=None)
+    parser.add_argument(
+        "--video-out",
+        default=None,
+        help="Ego FPV mp4 path or directory (uses rgb_yolo when fan-out enabled)",
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=float,
+        default=None,
+        help="Video fps (default: --step-hz)",
+    )
     parser.add_argument(
         "--perception-log",
         default=None,
@@ -763,7 +911,7 @@ def main() -> int:  # noqa: C901
     )
     parser.add_argument(
         "--detector",
-        choices=("yolo", "open_vocab", "semantic", "mock", "gt"),
+        choices=("yolo", "open_vocab", "semantic", "humen_bridge", "humen_corridor", "mock", "gt"),
         default="yolo",
         help="Perception frontend (default: yolo pure vision)",
     )
@@ -848,9 +996,38 @@ def main() -> int:  # noqa: C901
     )
     parser.add_argument(
         "--search-pattern",
-        choices=("scan", "lawnmower", "spiral"),
+        choices=("scan", "lawnmower", "spiral", "corridor"),
         default="lawnmower",
-        help="SEARCHING: scan=fwd+yaw; lawnmower/spiral=AreaSearchPlanner (M3)",
+        help="SEARCHING: scan=fwd+yaw; lawnmower/spiral/corridor=AreaSearchPlanner (M3)",
+    )
+    parser.add_argument(
+        "--corridor-yaw-sweep-interval",
+        type=int,
+        default=0,
+        help="Corridor search: repeat hover yaw sweep every N steps (0=off).",
+    )
+    parser.add_argument("--corridor-yaw-sweep-steps", type=int, default=12)
+    parser.add_argument("--corridor-yaw-sweep-deg", type=float, default=60.0)
+    parser.add_argument("--corridor-yaw-sweep-step-deg", type=float, default=5.0)
+    parser.add_argument(
+        "--search-area-priority",
+        action="store_true",
+        help="M3 SEARCH: keep flying area waypoints even when tracker locks (log det/bridge_goal_rel).",
+    )
+    parser.add_argument(
+        "--no-shield",
+        action="store_true",
+        help=(
+            "Disable the three_zone safety shield entirely (e.g. Humen open-water depth "
+            "hallucination causes near-100% intervention_rate and blocks forward progress "
+            "during SEARCH/APPROACH, same issue --no-shield already works around in "
+            "wam_phase2_long_eval for SURVEY)."
+        ),
+    )
+    parser.add_argument(
+        "--search-direct-area",
+        action="store_true",
+        help="M3 SEARCH: drive toward area waypoints with cruise body deltas (skip π during area search).",
     )
     parser.add_argument(
         "--search-area-half-m",
@@ -971,6 +1148,15 @@ def main() -> int:  # noqa: C901
     env_cfg["width"] = int(args.capture_w)
     env_cfg["height"] = int(args.capture_h)
     env_cfg["wam_encode_size"] = int(args.wam_encode_size)
+    # Humen / multi-scene: aerial_inspect sets AIRSIM_* — override yaml default :41451.
+    if os.environ.get("AIRSIM_HOST"):
+        env_cfg["host"] = os.environ["AIRSIM_HOST"]
+    if os.environ.get("AIRSIM_PORT"):
+        env_cfg["port"] = int(os.environ["AIRSIM_PORT"])
+    if os.environ.get("AIRSIM_VEHICLE"):
+        env_cfg["vehicle"] = os.environ["AIRSIM_VEHICLE"]
+    if os.environ.get("AIRSIM_CAMERA"):
+        env_cfg["camera"] = os.environ["AIRSIM_CAMERA"]
     env = _build_env(env_cfg)
 
     wm_cfg = cfg.get("world_model") or {}
@@ -1043,22 +1229,26 @@ def main() -> int:  # noqa: C901
 
     policy = LatentActorDeployPolicy(dynamics, actor_ac, deterministic=True, stream_latent=True)
 
-    safety_cfg = dict(cfg.get("safety") or {})
-    if str(safety_cfg.get("kind", "null")) in ("null", "none", "None"):
-        safety_cfg["kind"] = "three_zone"
-    safety_cfg["v_cruise_m_s"] = float(args.cruise_speed)
-    safety_cfg["tti_coeff"] = float(args.tti_coeff)
-    safety_cfg.pop("schedule_margin_l1_m", None)
-    safety_cfg.pop("schedule_margin_l2_m", None)
-    safety_cfg.pop("disc_lag_steps", None)
-    shield = _build_safety(safety_cfg)
-    if hasattr(shield, "zone"):
-        logger.info(
-            "three_zone v_cruise=%.1f engage_outer=%.1fm tti_coeff=%.1f",
-            float(shield.zone.v_cruise_m_s),
-            float(shield.zone.engage_outer_m),
-            float(shield.tti_coeff),
-        )
+    shield = None
+    if bool(args.no_shield):
+        logger.info("shield disabled (--no-shield)")
+    else:
+        safety_cfg = dict(cfg.get("safety") or {})
+        if str(safety_cfg.get("kind", "null")) in ("null", "none", "None"):
+            safety_cfg["kind"] = "three_zone"
+        safety_cfg["v_cruise_m_s"] = float(args.cruise_speed)
+        safety_cfg["tti_coeff"] = float(args.tti_coeff)
+        safety_cfg.pop("schedule_margin_l1_m", None)
+        safety_cfg.pop("schedule_margin_l2_m", None)
+        safety_cfg.pop("disc_lag_steps", None)
+        shield = _build_safety(safety_cfg)
+        if hasattr(shield, "zone"):
+            logger.info(
+                "three_zone v_cruise=%.1f engage_outer=%.1fm tti_coeff=%.1f",
+                float(shield.zone.v_cruise_m_s),
+                float(shield.zone.engage_outer_m),
+                float(shield.tti_coeff),
+            )
 
     fallback_intent = (
         TowardGoalIntent(r_m=100.0, mode="toward_g", cruise_speed=float(args.cruise_speed))
@@ -1123,7 +1313,8 @@ def main() -> int:  # noqa: C901
         ref_len = float(np.sum(np.linalg.norm(pts[1:] - pts[:-1], axis=1)))
 
         policy.reset()
-        shield.reset()
+        if shield is not None:
+            shield.reset()
         tau_pred.reset()
         if depth_pred is not None:
             depth_pred.reset()
@@ -1240,6 +1431,18 @@ def main() -> int:  # noqa: C901
             _pp = Path(args.perception_log).with_suffix("") / f"route{ep_idx:02d}_perception.jsonl"
             _pp.parent.mkdir(parents=True, exist_ok=True)
             perception_writer = _pp.open("w")
+        video_writer: Optional[_FfmpegVideoWriter] = None
+        if args.video_out:
+            _vp = Path(args.video_out)
+            if _vp.suffix.lower() == ".mp4":
+                video_path = _vp
+            else:
+                _vp.mkdir(parents=True, exist_ok=True)
+                video_path = _vp / f"route{ep_idx:02d}_ego.mp4"
+            video_writer = _FfmpegVideoWriter(
+                video_path,
+                fps=float(args.video_fps if args.video_fps is not None else args.step_hz),
+            )
 
         arrived = False
         collided = False
@@ -1299,7 +1502,29 @@ def main() -> int:  # noqa: C901
                 obs.info["tau_pred"] = float(tau_v)
 
             spawn_acquire_yaw = 0.0
-            if acquire_steps > 0 and step < acquire_steps and not had_vision_lock:
+            corridor_interval = max(0, int(args.corridor_yaw_sweep_interval))
+            if (
+                corridor_interval > 0
+                and str(args.search_pattern) == "corridor"
+                and not had_vision_lock
+            ):
+                corridor_steps = max(1, int(args.corridor_yaw_sweep_steps))
+                corridor_half = max(
+                    1,
+                    int(
+                        math.ceil(
+                            float(args.corridor_yaw_sweep_deg)
+                            / max(float(args.corridor_yaw_sweep_step_deg), 1.0)
+                        )
+                    ),
+                )
+                corridor_yaw_step = math.radians(float(args.corridor_yaw_sweep_step_deg))
+                cycle_pos = step % corridor_interval
+                if cycle_pos < corridor_steps:
+                    phase = cycle_pos % (2 * corridor_half)
+                    sign = 1.0 if phase < corridor_half else -1.0
+                    spawn_acquire_yaw = sign * corridor_yaw_step
+            elif acquire_steps > 0 and step < acquire_steps and not had_vision_lock:
                 phase = step % (2 * acquire_half)
                 sign = 1.0 if phase < acquire_half else -1.0
                 spawn_acquire_yaw = sign * acquire_yaw_step
@@ -1345,6 +1570,7 @@ def main() -> int:  # noqa: C901
                 search_det_steer_gain=float(args.search_det_steer_gain),
                 search_det_steer_fwd=float(args.search_det_steer_fwd),
                 search_det_steer_max_yaw=det_steer_max_yaw,
+                search_area_priority=bool(args.search_area_priority),
             )
             p_prev_tracker = p_curr.copy()
             prev_yaw_tracker = curr_yaw
@@ -1353,6 +1579,24 @@ def main() -> int:  # noqa: C901
                 min_d_measured = min(min_d_measured, float(vstep.perception["measured_dist_m"]))
             if vstep.perception and vstep.perception.get("far_lock_rejected"):
                 far_lock_rejects += 1
+
+            if video_writer is not None:
+                rgb_vid = getattr(obs, "rgb_yolo", None)
+                if rgb_vid is None:
+                    rgb_vid = obs.rgb
+                if rgb_vid is not None:
+                    d_vis_hud = None
+                    if vstep.target_world is not None:
+                        d_vis_hud = float(_goal_dist(p_curr, vstep.target_world))
+                    frame = _draw_vgoal_demo_frame(
+                        np.asarray(rgb_vid, dtype=np.uint8),
+                        step=step,
+                        max_steps=int(args.max_steps),
+                        target_class=str(args.target_class or "target"),
+                        vstep=vstep,
+                        d_vis=d_vis_hud,
+                    )
+                    video_writer.write(frame)
 
             if vstep.det_hit:
                 detections_hit += 1
@@ -1379,7 +1623,8 @@ def main() -> int:  # noqa: C901
 
             if vstep.target_world is not None:
                 vision_target_last = vstep.target_world.copy()
-                had_vision_lock = True
+                if vstep.using_vision:
+                    had_vision_lock = True
                 d_vis = _goal_dist(p_curr, vstep.target_world)
                 min_d_vision = min(min_d_vision, d_vis)
                 d_final_vision = d_vis
@@ -1391,7 +1636,13 @@ def main() -> int:  # noqa: C901
                     ):
                         arrived = True
                         arrived_follow = True
-                elif d_vis <= float(args.success_dist) or vstep.tracker_state == TS.ARRIVED.value:
+                elif (
+                    not vstep.using_area_search
+                    and (
+                        d_vis <= float(args.success_dist)
+                        or vstep.tracker_state == TS.ARRIVED.value
+                    )
+                ):
                     arrived = True
 
             d_annot = _goal_dist(p_curr, annot_goal)
@@ -1421,7 +1672,7 @@ def main() -> int:  # noqa: C901
             else:
                 assert vstep.goal_rel is not None and vstep.target_world is not None
                 g_vis = np.asarray(vstep.target_world, dtype=np.float64)
-                if (vstep.using_vision or vstep.using_area_search) and visual_intent is not None:
+                if vstep.using_vision and visual_intent is not None:
                     g_rel_body, s_info = visual_intent.compute(
                         curr_pos=p_curr,
                         curr_yaw=curr_yaw,
@@ -1430,6 +1681,10 @@ def main() -> int:  # noqa: C901
                     )
                     target_world = np.array(s_info["target_world"], dtype=np.float64)
                     safe_v = float(s_info.get("safe_speed_limit", args.cruise_speed))
+                elif vstep.using_area_search:
+                    g_rel_body = np.asarray(vstep.goal_rel, dtype=np.float64)
+                    target_world = g_vis
+                    safe_v = float(args.cruise_speed)
                 else:
                     g_rel_body = np.asarray(vstep.goal_rel, dtype=np.float64)
                     target_world = g_vis
@@ -1442,9 +1697,40 @@ def main() -> int:  # noqa: C901
                 obs.info["goal_rel"] = g_rel_body.tolist()
                 if planner is not None:
                     planner.set_goal(target_world)
-                action = policy.act(obs)
-                if planner is not None:
-                    action = planner.plan(obs, action, latent=policy._latent)
+                if (
+                    bool(args.search_direct_area)
+                    and vstep.using_area_search
+                    and vstep.goal_rel is not None
+                ):
+                    gr = np.asarray(vstep.goal_rel, dtype=np.float64)
+                    vx_step_limit = float(min(float(args.cruise_speed) / float(args.step_hz), float(phys[0])))
+                    cur_limits = np.array(
+                        [vx_step_limit, float(phys[1]), float(phys[2]), float(phys[3])],
+                        dtype=np.float64,
+                    )
+                    fwd = float(np.clip(gr[0], 0.0, cur_limits[0]))
+                    if fwd < 0.05 * cur_limits[0] and float(gr[3]) > 1.0:
+                        fwd = 0.25 * cur_limits[0]
+                    left = float(np.clip(gr[1], -cur_limits[1], cur_limits[1]))
+                    z_cmd = float(np.clip(gr[2], -cur_limits[2], cur_limits[2]))
+                    if ep_z_hold is not None:
+                        z_err = float(ep_z_hold) - float(p_curr[2])
+                        z_cmd = float(
+                            np.clip(z_err * float(args.search_z_gain), -cur_limits[2], cur_limits[2])
+                        )
+                    yaw_cmd = float(
+                        np.clip(
+                            math.atan2(float(gr[1]), max(float(gr[0]), 0.5)) * 0.5,
+                            -cur_limits[3],
+                            cur_limits[3],
+                        )
+                    )
+                    action = clip_body_delta(np.array([fwd, left, z_cmd, yaw_cmd], dtype=np.float64), cur_limits)
+                    wm_out = None
+                else:
+                    action = policy.act(obs)
+                    if planner is not None:
+                        action = planner.plan(obs, action, latent=policy._latent)
                 if vstep.using_area_search and float(args.search_yaw_hold_deg) > 0.0:
                     hold_rad = math.radians(float(args.search_yaw_hold_deg))
                     yaw_err = float(curr_yaw - start_yaw)
@@ -1491,9 +1777,13 @@ def main() -> int:  # noqa: C901
             traj.append(p_curr.copy())
 
             if traj_writer is not None:
+                bridge_gr = None
+                if vstep.perception and vstep.perception.get("bridge_goal_rel"):
+                    bridge_gr = vstep.perception["bridge_goal_rel"]
                 traj_writer.write(json.dumps({
                     "step": step,
                     "pos": p_curr.tolist(),
+                    "yaw": round(float(curr_yaw), 4),
                     "tracker_state": vstep.tracker_state,
                     "det_hit": vstep.det_hit,
                     "using_vision": vstep.using_vision,
@@ -1501,6 +1791,7 @@ def main() -> int:  # noqa: C901
                     "dynamic_mode": vstep.dynamic_mode,
                     "using_fallback": vstep.using_fallback,
                     "goal_rel": None if vstep.goal_rel is None else [round(float(x), 3) for x in vstep.goal_rel],
+                    "bridge_goal_rel": bridge_gr,
                 }) + "\n")
 
             if perception_writer is not None and vstep.perception is not None:
@@ -1533,10 +1824,15 @@ def main() -> int:  # noqa: C901
             traj_writer.close()
         if perception_writer is not None:
             perception_writer.close()
+        if video_writer is not None:
+            video_writer.close()
+            ep_result_video = str(video_writer.path)
+        else:
+            ep_result_video = None
 
         actual_len = float(np.sum(np.linalg.norm(np.diff(np.array(traj), axis=0), axis=1))) if len(traj) > 1 else 0.0
         prog_ratio = float(np.clip(s_prog / max(1e-3, ref_len), 0.0, 1.0))
-        ep_spl = (ref_len / max(ref_len, actual_len)) if arrived else 0.0
+        ep_spl = (ref_len / max(ref_len, actual_len, 1e-6)) if arrived else 0.0
         goal_closure = _goal_closure(d0_annot, min_d_annot)
         n_steps = max(1, len(traj))
 
@@ -1574,6 +1870,7 @@ def main() -> int:  # noqa: C901
             "detection_frac": round(detections_hit / n_steps, 4),
             "det_recall_early": bool(det_early),
             "far_lock_rejects": far_lock_rejects,
+            "video": ep_result_video,
             "steps_spawn_acquire": steps_spawn_acquire,
             "steps_det_steer": steps_det_steer,
             "vision_frac": round(steps_vision / n_steps, 4),
