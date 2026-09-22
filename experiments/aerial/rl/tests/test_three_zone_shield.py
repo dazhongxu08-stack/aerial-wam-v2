@@ -407,3 +407,176 @@ def test_tti_forward_hysteresis_holds_cap_near_boundary():
     out3, ch3 = shield.apply_action(action.copy(), obs_clear, limits=limits)
     assert not ch3
     assert out3[0] == pytest.approx(min(1.2, limits[0]))
+
+
+def test_exclusion_forward_only_ignores_peripheral_full_fov_min():
+    """Peripheral full-FOV min must not trigger exclusion when forward cone is open."""
+    limits = body_delta_limits(0.2)
+    obs = _obs(
+        depth=2.0,
+        v_fwd=5.0,
+        info={
+            "depth_min_pred": 2.0,
+            "depth_cones_pred": {
+                "forward": 8.0,
+                "left": 2.0,
+                "right": 20.0,
+                "up": 20.0,
+                "down": 20.0,
+            },
+        },
+    )
+    shield_full = ThreeZoneSpeedShield(exclusion_forward_only=False)
+    out_full, ch_full = shield_full.apply_action(np.array([1.0, 0, 0, 0]), obs, limits=limits)
+    assert ch_full
+    assert out_full[0] < 0
+
+    shield_fwd = ThreeZoneSpeedShield(exclusion_forward_only=True)
+    out_fwd, ch_fwd = shield_fwd.apply_action(np.array([1.0, 0, 0, 0]), obs, limits=limits)
+    assert not ch_fwd or out_fwd[0] >= 0
+
+
+def test_emergency_retreat_is_speed_only_no_heading_decision():
+    """Shield contract: clamp forward speed; preserve policy yaw/lateral.
+
+    Clearer-cone retreat dyaw was a pilot decision (2026-09-18), then caused
+    reverse-flight spins (2026-09-21). Default must not invent heading."""
+    limits = body_delta_limits(0.2)
+
+    obs_left_clear = _obs(
+        depth=2.0,
+        info={"depth_cones_pred": {"forward": 2.0, "left": 20.0, "right": 3.0, "up": 20.0, "down": 20.0}},
+    )
+    shield = ThreeZoneSpeedShield()
+    assert shield.retreat_max_dyaw_rad == pytest.approx(0.0)
+    out, changed = shield.apply_action(np.array([1.0, 0.2, -0.1, 0.25]), obs_left_clear, limits=limits)
+    assert changed
+    assert out[0] <= 0.0  # no forward into danger
+    assert out[1] == pytest.approx(0.2, abs=1e-6)  # preserve lateral
+    assert out[2] == pytest.approx(-0.1, abs=1e-6)
+    assert out[3] == pytest.approx(0.25, abs=1e-6)  # preserve policy yaw
+    assert obs_left_clear.info.get("shield_hard_brake") is True
+
+    obs_right_clear = _obs(
+        depth=2.0,
+        info={"depth_cones_pred": {"forward": 2.0, "left": 3.0, "right": 20.0, "up": 20.0, "down": 20.0}},
+    )
+    out2, changed2 = ThreeZoneSpeedShield().apply_action(
+        np.array([1.0, 0.0, 0.0, -0.25]), obs_right_clear, limits=limits
+    )
+    assert changed2 and out2[0] <= 0.0 and out2[3] == pytest.approx(-0.25, abs=1e-6)
+    # Exclusion hard brake must not pretend to be the τ/p_coll emergency latch.
+    assert obs_right_clear.info.get("shield_hard_brake") is True
+    assert obs_right_clear.info.get("shield_emergency_override") is not True
+
+
+def test_shield_terminal_soft_exclusion_creeps_when_aligned():
+    """Near goal + aligned yaw: exclusion creeps instead of full hard-brake."""
+    limits = body_delta_limits(0.2)
+    shield = ThreeZoneSpeedShield()
+    obs = _obs(
+        depth=2.5,
+        info={
+            "depth_cones_pred": {
+                "forward": 2.5,
+                "left": 10.0,
+                "right": 10.0,
+                "up": 20.0,
+                "down": 20.0,
+            },
+            "d_to_g": 12.0,
+            "yaw_err_rad": 0.1,
+        },
+    )
+    out, changed = shield.apply_action(np.array([1.0, 0.0, 0.0, 0.0]), obs, limits=limits)
+    assert changed
+    assert out[0] > 0.0
+    assert out[0] <= shield.terminal_soft_exclusion_dx + 1e-6
+    assert obs.info.get("shield_hard_brake") is False
+    assert obs.info.get("shield_terminal_soft_exclusion") is True
+    assert obs.info.get("shield_governor_cap") is True
+
+
+def test_shield_terminal_still_hard_brakes_when_crash_imminent():
+    limits = body_delta_limits(0.2)
+    shield = ThreeZoneSpeedShield()
+    obs = _obs(
+        depth=1.0,
+        info={
+            "depth_cones_pred": {"forward": 1.0, "left": 10.0, "right": 10.0},
+            "d_to_g": 12.0,
+            "yaw_err_rad": 0.1,
+        },
+    )
+    out, changed = shield.apply_action(np.array([1.0, 0.0, 0.0, 0.0]), obs, limits=limits)
+    assert changed and out[0] <= 0.0
+    assert obs.info.get("shield_hard_brake") is True
+
+
+def test_shield_hard_brake_cleared_when_sky_opens():
+    """Sticky hard_brake must not survive a clear frame (reward contamination).
+
+    Collector carries last-step flags onto the next obs; apply_action must
+    reset before recomputing so open-sky steps do not keep charging
+    w_intervention.
+    """
+    limits = body_delta_limits(0.2)
+    shield = ThreeZoneSpeedShield()
+    obs = _obs(
+        depth=2.0,
+        info={
+            "depth_cones_pred": {
+                "forward": 2.0,
+                "left": 20.0,
+                "right": 3.0,
+                "up": 20.0,
+                "down": 20.0,
+            },
+            "shield_hard_brake": True,  # stale carry from prior step
+            "shield_governor_cap": True,
+            "shield_emergency_override": True,
+        },
+    )
+    out, changed = shield.apply_action(np.array([1.0, 0.0, 0.0, 0.1]), obs, limits=limits)
+    assert changed and out[0] <= 0.0
+    assert obs.info.get("shield_hard_brake") is True  # still in exclusion
+
+    obs_clear = _obs(
+        depth=40.0,
+        info={
+            "depth_cones_pred": {
+                "forward": 40.0,
+                "left": 40.0,
+                "right": 40.0,
+                "up": 40.0,
+                "down": 40.0,
+            },
+            "shield_hard_brake": True,
+            "shield_governor_cap": True,
+            "shield_emergency_override": True,
+        },
+    )
+    out2, changed2 = shield.apply_action(
+        np.array([1.0, 0.2, 0.0, 0.1]), obs_clear, limits=limits
+    )
+    assert not changed2
+    assert out2[0] == pytest.approx(1.0, abs=1e-6)
+    assert obs_clear.info.get("shield_hard_brake") is False
+    assert obs_clear.info.get("shield_governor_cap") is False
+    assert obs_clear.info.get("shield_emergency_override") is False
+
+
+def test_retreat_dyaw_opt_in_ablation_still_gated():
+    """Explicit retreat_max_dyaw_rad>0 keeps clearer-cone ablation + cum gate."""
+    limits = body_delta_limits(0.2)
+    cones = {"forward": 2.0, "left": 3.0, "right": 20.0, "up": 20.0, "down": 20.0}
+    shield = ThreeZoneSpeedShield(retreat_max_dyaw_rad=0.35, retreat_max_cum_yaw_rad=0.70)
+    dyaws = []
+    for _ in range(8):
+        obs = _obs(depth=2.0, info={"depth_cones_pred": cones, "goal": [50.0, 0.0, 0.0]})
+        out, changed = shield.apply_action(np.array([1.0, 0.0, 0.0, 0.0]), obs, limits=limits)
+        assert changed and out[0] <= 0.0  # forward cancelled / braked
+        dyaws.append(float(out[3]))
+    assert dyaws[0] < 0
+    assert abs(sum(dyaws)) <= 0.70 + 1e-6
+    assert any(abs(d) < 1e-9 for d in dyaws[2:])

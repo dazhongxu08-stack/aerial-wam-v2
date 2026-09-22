@@ -263,3 +263,57 @@ def test_scene_planner_uses_left_cone_for_left_candidate():
     assert info["chosen_idx"] == 0, (
         "left candidates should be penalised by left-cone depth; forward candidate wins"
     )
+
+
+def test_stuck_escape_triggers_after_prolonged_no_progress():
+    """Diagnosed hard134 route 0 (2026-09-18): a vehicle pinned in a corner
+    stays within a few metres of the same distance-to-goal indefinitely — the
+    ±75-105° fan + progress-weighted scoring keeps snapping back toward the
+    blocked direct bearing. After ``stuck_escape_after_s`` seconds of no real
+    progress, the planner must widen the fan (including near-reverse
+    headings) and pick by clearance alone, ignoring goal progress."""
+    pl = SceneIntentPlanner(
+        r_m=25.0,
+        d_danger=3.0,
+        d_clear=40.0,
+        step_hz=5.0,
+        stuck_escape_after_s=2.0,  # short window for a fast test
+        stuck_escape_hold_s=1.0,
+    )
+    pl.reset()
+    p = np.zeros(3)
+    goal = np.array([100.0, 0.0, 0.0])
+    # Forward is blocked; the only real opening is far to the side (>90°,
+    # beyond the base ±75° fan) — modelled as a much deeper "left" cone once
+    # the bearing is >90°, which only the wide escape offsets can reach.
+    cones = {"forward": 2.0, "left": 3.0, "right": 3.0}
+    saw_escape = False
+    for _ in range(40):  # 8s at 5 Hz — past the 2s no-progress threshold
+        _, info = pl.compute(
+            curr_pos=p,
+            curr_yaw=0.0,
+            goal=goal,
+            d_fwd_hat=2.0,
+            depth_cones=cones,
+        )
+        if info["in_escape"]:
+            saw_escape = True
+            break
+    assert saw_escape, "expected stuck-escape to trigger after prolonged no-progress"
+    assert pl.escape_count >= 1
+
+
+def test_stuck_escape_disabled_by_default_zero():
+    """stuck_escape_after_s=0 must fully preserve legacy behaviour (never
+    widen the fan / override progress-based scoring)."""
+    pl = SceneIntentPlanner(stuck_escape_after_s=0.0)
+    pl.reset()
+    p = np.zeros(3)
+    goal = np.array([100.0, 0.0, 0.0])
+    cones = {"forward": 2.0, "left": 3.0, "right": 3.0}
+    for _ in range(200):
+        _, info = pl.compute(
+            curr_pos=p, curr_yaw=0.0, goal=goal, d_fwd_hat=2.0, depth_cones=cones
+        )
+        assert not info["in_escape"]
+    assert pl.escape_count == 0

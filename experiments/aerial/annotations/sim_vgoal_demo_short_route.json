@@ -1,0 +1,27 @@
+{
+  "version": "sim_vgoal_demo_short_v2",
+  "description": "Interior urban demo (~42m): R09-validated spawn in city blocks, yaw along street into denser blocks",
+  "n_routes": 1,
+  "routes": [
+    {
+      "route_id": "demo_short_interior_01",
+      "route_idx": 0,
+      "category": "demo_short_interior",
+      "template": "R09_smoke_validated_interior",
+      "nominal_length_m": 42.0,
+      "start_pos": [-927.488, 101.323, 12.0],
+      "goal_pos": [-945.488, 64.146, 12.0],
+      "pos": [
+        [-927.488, 101.323, 12.0],
+        [-939.488, 80.538, 12.0],
+        [-943.988, 72.744, 12.0],
+        [-945.488, 70.146, 12.0],
+        [-945.488, 64.146, 12.0]
+      ],
+      "yaw": [-2.0944, -2.0944, -2.0944, -1.5708, -1.5708],
+      "gpt_instruction": "Approach a car among the city blocks ahead using visual navigation.",
+      "urban_region_ids": ["urban_west_north"],
+      "selection_basis": "urban_interior_inland"
+    }
+  ]
+}

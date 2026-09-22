@@ -37,6 +37,13 @@ from experiments.aerial.rl.collector import RolloutCollector
 from experiments.aerial.rl.env.action import DEFAULT_STEP_HZ
 from experiments.aerial.rl.reward import DEFAULT_ONLINE_SUCCESS_DIST_M, RewardConfig
 from experiments.aerial.rl.safety import NullSafetyShield
+from experiments.aerial.phase3_unified.region_geometry import (
+    DEFAULT_REGIONS_PATH,
+    classify_spawn_xy,
+    load_regions,
+    path_inland_metrics,
+)
+from experiments.aerial.rl.spawn_utils import collect_episode_with_spawn_retries, lift_episode_z
 from experiments.aerial.rl.train_rl import _build_env, _load_episodes
 
 logger = logging.getLogger(__name__)
@@ -82,6 +89,35 @@ def _write_episode_npz(
     return path
 
 
+def _parse_route_indices(raw: str) -> List[int]:
+    out: List[int] = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        if part:
+            out.append(int(part))
+    return out
+
+
+def _next_episode_index(out_dir: Path) -> int:
+    nums: List[int] = []
+    for path in out_dir.glob("episode_*.npz"):
+        try:
+            nums.append(int(path.stem.split("_")[1]))
+        except (IndexError, ValueError):
+            continue
+    return (max(nums) + 1) if nums else 0
+
+
+def _load_existing_manifest(out_dir: Path) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    path = out_dir / "manifest.json"
+    if not path.is_file():
+        return [], {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        return list(data.get("episodes", [])), dict(data.get("meta", {}))
+    return list(data), {}
+
+
 def build_collector(args: argparse.Namespace) -> RolloutCollector:
     env_cfg: Dict[str, Any] = {
         "backend": args.backend,
@@ -97,6 +133,7 @@ def build_collector(args: argparse.Namespace) -> RolloutCollector:
             camera=args.camera,
             vehicle=args.vehicle,
             grab_depth=bool(args.grab_depth),
+            health_check=False,  # avoid flaky depth-sanity aborts mid-batch on 4090
         )
     env = _build_env(env_cfg)
     reward_cfg = RewardConfig(success_dist_m=float(args.success_dist_m))
@@ -147,6 +184,63 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Also write non-arrived / collided eps (marked arrived=false).",
     )
+    p.add_argument(
+        "--min-spawn-z",
+        type=float,
+        default=0.0,
+        help="Lift episode z uniformly so spawn z >= this (teacher flyability).",
+    )
+    p.add_argument(
+        "--spawn-z-retry-m",
+        type=float,
+        default=2.0,
+        help="On spawn collision, add +this many meters per retry (0=disable).",
+    )
+    p.add_argument(
+        "--spawn-z-max-retries",
+        type=int,
+        default=4,
+        help="Spawn-collision retries after min-spawn-z lift (each +spawn-z-retry-m).",
+    )
+    p.add_argument(
+        "--min-usable-path-m",
+        type=float,
+        default=0.0,
+        help="Count episode usable (and retain with --keep-failed) if path_length_m >= this.",
+    )
+    p.add_argument(
+        "--min-usable-steps",
+        type=int,
+        default=40,
+        help="With --min-usable-path-m, also require at least this many steps.",
+    )
+    p.add_argument(
+        "--route-indices",
+        default="",
+        help="Comma-separated annotation route indices to collect (default: first N).",
+    )
+    p.add_argument(
+        "--append",
+        action="store_true",
+        help="Append new episodes after existing NPZ/manifest in --out.",
+    )
+    p.add_argument(
+        "--skip-min-ok-gate",
+        action="store_true",
+        help="Do not fail when usable count is below 50%% of --episodes (supplement runs).",
+    )
+    p.add_argument(
+        "--min-spawn-inland-m",
+        type=float,
+        default=0.0,
+        help="Reject routes whose spawn is in water or closer than this to water (0=off).",
+    )
+    p.add_argument(
+        "--min-path-inland-m",
+        type=float,
+        default=0.0,
+        help="Reject routes whose polyline min inland distance is below this (0=off).",
+    )
     p.add_argument("--config", default="", help="Optional yaml overlay (unused keys ok).")
     args = p.parse_args(argv)
 
@@ -167,17 +261,85 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[path-expert-collect] FAIL: no episodes from annotation", file=sys.stderr)
         return 1
 
+    route_indices = _parse_route_indices(args.route_indices) if args.route_indices else None
+    pool = episodes[: max(len(episodes), int(args.episodes))]
+    if route_indices:
+        work: List[tuple[int, Dict[str, Any]]] = []
+        for idx in route_indices:
+            if idx < 0 or idx >= len(pool):
+                print(
+                    f"[path-expert-collect] FAIL: route index {idx} out of range [0,{len(pool)})",
+                    file=sys.stderr,
+                )
+                return 1
+            work.append((idx, pool[idx]))
+    else:
+        work = [(i, ep) for i, ep in enumerate(pool[: int(args.episodes)])]
+
+    regions = load_regions(DEFAULT_REGIONS_PATH) if (
+        float(args.min_spawn_inland_m) > 0 or float(args.min_path_inland_m) > 0
+    ) else None
+
     collector = build_collector(args)
-    manifest: List[Dict[str, Any]] = []
+    prev_meta: Dict[str, Any] = {}
+    if args.append:
+        manifest, prev_meta = _load_existing_manifest(out_dir)
+        write_index = _next_episode_index(out_dir)
+    else:
+        manifest = []
+        write_index = 0
     reports: List[Dict[str, Any]] = []
-    n_arrived = 0
-    n_written = 0
+    n_arrived = sum(1 for m in manifest if m.get("arrived"))
+    n_new = 0
     n_skipped_fail = 0
 
     try:
-        for i, ep in enumerate(episodes[: int(args.episodes)]):
-            transitions, stats = collector.collect_episode(ep)
+        for route_idx, ep in work:
+            if regions is not None:
+                spawn = np.asarray(ep.get("pos", []), dtype=np.float64).reshape(-1, 3)
+                if len(spawn) == 0:
+                    logger.warning("route %d: empty polyline — skip", route_idx)
+                    continue
+                spawn_meta = classify_spawn_xy(float(spawn[0, 0]), float(spawn[0, 1]), regions)
+                inland = path_inland_metrics(spawn, regions)
+                min_spawn_inland = float(args.min_spawn_inland_m)
+                min_path_inland = float(args.min_path_inland_m)
+                if not spawn_meta.get("spawn_ok"):
+                    logger.warning(
+                        "route %d: spawn not urban-inland (water=%s urban=%s) — skip",
+                        route_idx,
+                        spawn_meta.get("water_region_ids"),
+                        spawn_meta.get("urban_region_ids"),
+                    )
+                    continue
+                if (
+                    min_spawn_inland > 0
+                    and float(spawn_meta.get("spawn_inland_m", 0.0)) < min_spawn_inland
+                ):
+                    logger.warning(
+                        "route %d: spawn_inland=%.1fm < %.1fm — skip (waterfront)",
+                        route_idx,
+                        float(spawn_meta.get("spawn_inland_m", 0.0)),
+                        min_spawn_inland,
+                    )
+                    continue
+                if min_path_inland > 0 and float(inland.get("path_min_inland_m", 0.0)) < min_path_inland:
+                    logger.warning(
+                        "route %d: path_min_inland=%.1fm < %.1fm — skip",
+                        route_idx,
+                        float(inland.get("path_min_inland_m", 0.0)),
+                        min_path_inland,
+                    )
+                    continue
+            ep, transitions, stats = collect_episode_with_spawn_retries(
+                collector,
+                ep,
+                min_spawn_z=float(args.min_spawn_z),
+                spawn_z_retry_m=float(args.spawn_z_retry_m),
+                spawn_z_max_retries=int(args.spawn_z_max_retries),
+            )
             if stats.skipped:
+                logger.warning("route %d: skipped (spawn collision)", route_idx)
                 continue
             if not transitions:
                 continue
@@ -188,30 +350,42 @@ def main(argv: Optional[List[str]] = None) -> int:
             elif not args.keep_failed:
                 n_skipped_fail += 1
                 logger.info(
-                    "ep %d: not arrived — skip (pass --keep-failed to retain)", i
+                    "route %d: not arrived — skip (pass --keep-failed to retain)",
+                    route_idx,
                 )
                 continue
             path = _write_episode_npz(
-                out_dir, n_written, transitions, arrived=arrived, n_waypoints=n_wp
+                out_dir, write_index, transitions, arrived=arrived, n_waypoints=n_wp
             )
             rep = ds.quality_report(transitions)
             reports.append(rep)
-            manifest.append(
-                {
-                    "file": path.name,
-                    "steps": len(transitions),
-                    "arrived": bool(arrived),
-                    "n_waypoints": int(n_wp),
-                    "path_length_m": rep.get("path_length_m"),
-                    "return": float(sum(t.reward for t in transitions)),
-                    "usable": bool(arrived) and not bool(rep.get("quarantined")),
-                    "source": "openfly_path_expert_densify",
-                }
+            path_m = float(rep.get("path_length_m") or 0.0)
+            min_path = float(args.min_usable_path_m)
+            usable = (bool(arrived) and not bool(rep.get("quarantined"))) or (
+                min_path > 0
+                and path_m >= min_path
+                and len(transitions) >= int(args.min_usable_steps)
+                and not bool(rep.get("quarantined"))
             )
-            n_written += 1
+            entry: Dict[str, Any] = {
+                "file": path.name,
+                "route_idx": int(route_idx),
+                "route_id": str(ep.get("route_id", "")),
+                "steps": len(transitions),
+                "arrived": bool(arrived),
+                "n_waypoints": int(n_wp),
+                "path_length_m": path_m,
+                "return": float(sum(t.reward for t in transitions)),
+                "usable": bool(usable),
+                "source": "openfly_path_expert_densify",
+            }
+            manifest.append(entry)
+            write_index += 1
+            n_new += 1
             logger.info(
-                "wrote %s steps=%d arrived=%s waypoints=%d",
+                "wrote %s route=%d steps=%d arrived=%s waypoints=%d",
                 path.name,
+                route_idx,
                 len(transitions),
                 arrived,
                 n_wp,
@@ -222,6 +396,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             close()
 
     meta = {
+        **prev_meta,
         "kind": "path_expert_openfly_densify",
         "backend": args.backend,
         "step_hz": float(args.step_hz),
@@ -229,8 +404,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "success_dist_m": float(args.success_dist_m),
         "grab_depth": bool(args.grab_depth),
         "annotation": str(args.annotation),
-        "n_requested": int(args.episodes),
-        "n_written": n_written,
+        "n_requested": int(len(work)),
+        "n_written": len(manifest),
+        "n_new_this_run": int(n_new),
         "n_arrived": n_arrived,
         "n_skipped_not_arrived": n_skipped_fail,
         "planner": False,
@@ -249,11 +425,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     usable = sum(1 for m in manifest if m.get("usable"))
     print(
-        f"[path-expert-collect] wrote={n_written} arrived={n_arrived} "
+        f"[path-expert-collect] new={n_new} total={len(manifest)} arrived={n_arrived} "
         f"usable={usable} skipped_fail={n_skipped_fail} out={out_dir}"
     )
+    if args.skip_min_ok_gate:
+        return 0 if n_new > 0 else 1
+    min_ok = max(1, int(round(0.5 * len(work))))
     if usable == 0:
-        print("[path-expert-collect] FAIL: 0 usable arrived episodes", file=sys.stderr)
+        print("[path-expert-collect] FAIL: 0 usable episodes", file=sys.stderr)
+        return 1
+    if usable < min_ok:
+        print(
+            f"[path-expert-collect] FAIL: usable={usable} < min_ok={min_ok}",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

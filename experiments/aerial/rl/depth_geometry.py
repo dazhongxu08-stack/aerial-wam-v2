@@ -9,7 +9,7 @@ forensics, and depth-vs-GT diagnostics — one definition, no drift.
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -108,6 +108,53 @@ def min_depth_pixel_loc(depth: Optional[np.ndarray]) -> Optional[Dict[str, float
     }
 
 
+def azimuth_clearances(
+    depth: np.ndarray,
+    *,
+    n_bins: int = 8,
+    center_frac: float = 0.5,
+    hfov_deg: float = 90.0,
+) -> Dict[str, Any]:
+    """Multi-sector horizontal clearance, coarser than pixels but finer than
+    the 2-bucket left/right split in :func:`cone_clearances`.
+
+    Diagnosed hard134 route 0 (2026-09-18): a "stuck escape" that only had
+    left/right (2 buckets) to choose from kept re-picking essentially the same
+    heading every time it triggered, because e.g. a 45° candidate and a 150°
+    candidate both read the SAME "left" clearance value — no real new spatial
+    information. This gives ``n_bins`` roughly-equal-angle column bins across
+    the camera's horizontal FOV, each with its own min-clearance, so a wide
+    escape fan can actually distinguish "open at 120°" from "open at 45°".
+
+    Returns ``{"bearings_deg": [...], "clearances_m": [...]}`` — bin ``i``'s
+    bearing is its column-bin centre mapped through ``hfov_deg`` (0 = image
+    centre = forward; + = left half of the frame, matching the ENU convention
+    used elsewhere in this module: positive bearing = left).
+    """
+    d = np.asarray(depth, dtype=np.float64)
+    if d.ndim != 2:
+        raise ValueError(f"azimuth_clearances expects 2-D depth, got shape {d.shape}")
+    h, w = d.shape
+    n = max(1, int(n_bins))
+    cf = float(np.clip(center_frac, 0.05, 1.0))
+    dh = max(1, int(h * cf))
+    r0 = (h - dh) // 2
+    band = d[r0 : r0 + dh, :]
+    edges = np.linspace(0, w, n + 1).astype(int)
+    clearances: list[float] = []
+    bearings: list[float] = []
+    half_hfov = float(hfov_deg) / 2.0
+    for i in range(n):
+        c0, c1 = int(edges[i]), max(int(edges[i]) + 1, int(edges[i + 1]))
+        clearances.append(_min_finite_positive(band[:, c0:c1]))
+        col_centre = (c0 + c1) / 2.0
+        frac = (col_centre / max(1, w)) - 0.5  # [-0.5, 0.5], 0 = centre
+        # + = left half of frame (smaller col) matches ENU "left" convention
+        # used by cone_clearances / SceneIntentPlanner bearings.
+        bearings.append(float(-frac * 2.0 * half_hfov))
+    return {"bearings_deg": bearings, "clearances_m": clearances}
+
+
 def cone_clearances(depth: np.ndarray, *, center_frac: float = 0.5) -> Dict[str, float]:
     """Five-direction min clearances on a 2-D depth map.
 
@@ -142,3 +189,76 @@ def cone_clearances(depth: np.ndarray, *, center_frac: float = 0.5) -> Dict[str,
         "up": _min_finite_positive(d[:mid_r, :]),
         "down": _min_finite_positive(d[mid_r:, :]),
     }
+
+
+def directional_clearance_m(
+    depth: np.ndarray,
+    action_xyz: np.ndarray,
+    *,
+    percentile: float = 5.0,
+    wedge_half_deg: float = 25.0,
+    hfov_deg: float = 90.0,
+    vfov_deg: float = 90.0,
+) -> float:
+    """Low-percentile depth along a body-frame action direction (offline labels only).
+
+    ``action_xyz`` is ``(dx, dy, dz)`` in body frame (fwd, left, up). Near-zero
+    displacement returns ``inf`` (no direction). Used to supervise the learned
+    obstacle cost; must not be called from ``imagine`` / planner scoring.
+    """
+    d = np.asarray(depth, dtype=np.float64)
+    if d.ndim != 2:
+        raise ValueError(f"directional_clearance_m expects 2-D depth, got {d.shape}")
+    a = np.asarray(action_xyz, dtype=np.float64).reshape(-1)[:3]
+    n = float(np.linalg.norm(a))
+    if n < 1e-8:
+        return float("inf")
+    u = a / n
+    # Bearing: +az = left (matches azimuth_clearances / cone ENU).
+    az = float(np.degrees(np.arctan2(u[1], u[0])))  # left vs fwd
+    el = float(np.degrees(np.arcsin(np.clip(u[2], -1.0, 1.0))))
+    h, w = d.shape
+    half_h = float(hfov_deg) / 2.0
+    half_v = float(vfov_deg) / 2.0
+    wedge = float(max(1.0, wedge_half_deg))
+    # Pixel grid → bearings (col 0 = left = +half_h).
+    cols = (np.arange(w, dtype=np.float64) + 0.5) / max(w, 1)
+    rows = (np.arange(h, dtype=np.float64) + 0.5) / max(h, 1)
+    az_map = (0.5 - cols) * 2.0 * half_h  # [H] broadcast via mesh
+    el_map = (0.5 - rows) * 2.0 * half_v
+    az_grid, el_grid = np.meshgrid(az_map, el_map)
+    mask = (
+        (np.abs(az_grid - az) <= wedge)
+        & (np.abs(el_grid - el) <= wedge)
+        & np.isfinite(d)
+        & (d > 0)
+    )
+    if not bool(mask.any()):
+        return float("inf")
+    vals = d[mask]
+    p = float(np.clip(percentile, 0.0, 100.0))
+    return float(np.percentile(vals, p))
+
+
+def clearance_to_obstacle_label(
+    clearance_m: float,
+    *,
+    d_near: float = 3.0,
+    d_far: float = 22.0,
+) -> float:
+    """Map directional clearance (m) → [0, 1] training label (near → 1).
+
+    Same band endpoints as the old clearance cliff, but only for **offline**
+    supervision. Online reward must not re-apply ``w_collision=10`` on top.
+    """
+    if not np.isfinite(clearance_m):
+        return 0.0
+    d = float(clearance_m)
+    lo, hi = float(d_near), float(d_far)
+    if hi <= lo:
+        return 1.0 if d <= lo else 0.0
+    if d <= lo:
+        return 1.0
+    if d >= hi:
+        return 0.0
+    return float(np.clip((hi - d) / (hi - lo), 0.0, 1.0))

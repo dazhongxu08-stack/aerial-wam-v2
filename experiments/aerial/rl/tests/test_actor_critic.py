@@ -82,3 +82,31 @@ def test_update_twice_loss_finite():
     o1 = ac.update(roll)
     o2 = ac.update(roll)
     assert o1["status"] == "updated" and o2["status"] == "updated"
+
+
+def test_update_bc_reduces_mae_toward_expert():
+    """BC should pull deterministic mean toward a fixed expert action."""
+    ac = LatentActorCritic(
+        config=ActorCriticConfig(latent_dim=8, device="cpu", entropy_scale=0.0),
+    )
+    rng = np.random.default_rng(0)
+    z = rng.normal(size=(32, 8)).astype(np.float64)
+    goal = np.tile(np.array([10.0, 0.0, 0.0, 10.0], dtype=np.float32), (32, 1))
+    expert = np.tile(np.array([0.5, 0.2, 0.0, 0.1], dtype=np.float64), (32, 1))
+    lim = ac.action_limits
+    expert = np.clip(expert, -lim, lim)
+
+    def _mae() -> float:
+        pred = np.stack(
+            [ac.act_latent(z[i], goal_rel=goal[i], deterministic=True) for i in range(32)],
+            axis=0,
+        )
+        return float(np.mean(np.abs(pred - expert)))
+
+    before = _mae()
+    for _ in range(40):
+        out = ac.update_bc(z, expert, goal_rel=goal)
+        assert out["status"] == "updated"
+        assert np.isfinite(out["bc_loss"])
+    after = _mae()
+    assert after < before * 0.7, f"BC mae did not drop enough: {before=} {after=}"

@@ -23,6 +23,26 @@ def search_area_bounds(
     return min_x, max_x, min_y, max_y
 
 
+def corridor_waypoints(
+    min_x: float,
+    max_x: float,
+    y_center: float,
+    altitude_z: float,
+    spacing_m: float,
+    *,
+    start_x: Optional[float] = None,
+) -> list[np.ndarray]:
+    """Eastbound cruise along Humen corridor at fixed y (probe best: yaw≈45° toward bridge)."""
+    x0 = float(start_x if start_x is not None else min_x)
+    x1 = float(max_x)
+    if x0 > x1:
+        x0, x1 = x1, x0
+    xs = np.arange(x0, x1 + 1e-3, float(spacing_m))
+    if len(xs) < 2:
+        xs = np.array([x0, x1], dtype=np.float64)
+    return [np.array([x, float(y_center), float(altitude_z)], dtype=np.float64) for x in xs]
+
+
 def make_area_search_planner(
     spawn_pos: np.ndarray,
     *,
@@ -34,7 +54,7 @@ def make_area_search_planner(
     spiral_max_radius_m: float = 25.0,
     route_info: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
-    """Build ``AreaSearchPlanner`` for lawnmower/spiral; ``None`` for legacy scan."""
+    """Build ``AreaSearchPlanner`` for lawnmower/spiral/corridor; ``None`` for legacy scan."""
     kind = str(pattern).lower()
     if kind in ("scan", "yaw", "legacy", ""):
         return None
@@ -64,4 +84,20 @@ def make_area_search_planner(
             center=[cx, cy, float(cfg.altitude_z)],
             max_radius=float(sa.get("spiral_max_radius_m", spiral_max_radius_m)),
         )
+    elif kind == "corridor":
+        y_c = float(sa.get("corridor_y", sa.get("y_center", float(spawn_pos[1]))))
+        loop = bool(sa.get("loop", False))
+        cfg.loop = loop
+        planner.config.loop = loop
+        wps = corridor_waypoints(
+            min_x,
+            max_x,
+            y_c,
+            float(cfg.altitude_z),
+            float(sa.get("sweep_spacing_m", sweep_spacing_m)),
+            start_x=float(sa.get("corridor_start_x", float(spawn_pos[0]))),
+        )
+        planner.waypoints = wps
+        planner.current_wp_idx = 0
+        planner.is_completed = False
     return planner

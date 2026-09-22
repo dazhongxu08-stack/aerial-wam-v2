@@ -8,9 +8,12 @@ import numpy as np
 from experiments.aerial.path_expert import PathExpertPolicy
 from experiments.aerial.rl.collect_path_expert_dataset import (
     _episode_arrived,
+    _next_episode_index,
+    _parse_route_indices,
     build_collector,
     main as collect_main,
 )
+from experiments.aerial.rl.spawn_utils import lift_episode_z, nudge_episode_z
 from experiments.aerial.rl.env.obs import PolicyObservation
 
 
@@ -19,6 +22,26 @@ def _pol_obs(x: float, y: float = 0.0, yaw: float = 0.0) -> PolicyObservation:
         rgb=np.zeros((8, 8, 3), dtype=np.uint8),
         proprio=np.array([x, y, 0.0, yaw], dtype=np.float64),
     )
+
+
+def test_lift_episode_z():
+    ep = {"pos": [[0, 0, 10], [10, 0, 10]], "yaw": [0, 0]}
+    lifted = lift_episode_z(ep, 12.0)
+    assert lifted["pos"][0][2] == 12.0
+    assert lifted["pos"][1][2] == 12.0
+
+
+def test_parse_route_indices_and_next_episode_index(tmp_path: Path):
+    assert _parse_route_indices("6,1, 2") == [6, 1, 2]
+    (tmp_path / "episode_00003.npz").write_bytes(b"x")
+    assert _next_episode_index(tmp_path) == 4
+
+
+def test_nudge_episode_z():
+    ep = {"pos": [[0, 0, 12], [10, 0, 12]], "yaw": [0, 0]}
+    nudged = nudge_episode_z(ep, 5.0)
+    assert nudged["pos"][0][2] == 17.0
+    assert nudged["pos"][1][2] == 17.0
 
 
 def test_path_expert_policy_follows_polyline():

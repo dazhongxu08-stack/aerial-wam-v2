@@ -134,6 +134,30 @@ def test_success_dist_m_flows_from_yaml_to_reward_and_dynamics():
     assert loop.dynamics._success_dist == pytest.approx(2.5)
 
 
+def test_w_intervention_flows_from_yaml_to_reward_cfg():
+    """CLI/yaml --w-intervention must not be dropped by build_from_config."""
+    loop = build_from_config(_mock_cfg(w_intervention=0.1))
+    assert loop.collector.reward_cfg.w_intervention == pytest.approx(0.1)
+    # Default stays no-op when omitted.
+    loop0 = build_from_config(_mock_cfg())
+    assert loop0.collector.reward_cfg.w_intervention == pytest.approx(0.0)
+
+
+def test_hard_brake_depth_m_defaults_to_safety_exclusion_m():
+    cfg = {
+        "env": {"backend": "mock", "step_hz": 30.0},
+        "reward": {"w_intervention": 0.1},
+        "safety": {"exclusion_m": 2.5},
+        "dynamics": {"kind": "stub", "latent_dim": 8},
+    }
+    loop = build_from_config(cfg)
+    assert loop.collector.reward_cfg.hard_brake_depth_m == pytest.approx(2.5)
+    # Explicit reward override wins over safety.exclusion_m.
+    cfg["reward"]["hard_brake_depth_m"] = 1.25
+    loop2 = build_from_config(cfg)
+    assert loop2.collector.reward_cfg.hard_brake_depth_m == pytest.approx(1.25)
+
+
 def test_success_dist_m_default_is_tight_not_eval_radius():
     # Omitting it must fall back to the tight online default (3 m), never the
     # loose 20 m eval SR radius.

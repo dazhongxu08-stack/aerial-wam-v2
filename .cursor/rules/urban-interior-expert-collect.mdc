@@ -1,0 +1,22 @@
+---
+description: Expert collect must stay urban-interior inland with auto-review until quality gate passes
+alwaysApply: true
+---
+
+# Urban-interior expert data (always)
+
+When collecting **any** expert / demo / PathExpert / DepthSceneExpert dataset for urban RL:
+
+1. **Scene**: urban **interior** only — no waterfront, no open water-adjacent shoreline, no open flats.
+   - Prefer `outdoor_complex_inland_patched.json` or routes with `in_urban ∧ in_interior ∧ ¬in_water`.
+   - Defaults: `min_spawn_inland_m ≥ 100`, `min_path_inland_m ≥ 80`, require `in_interior`.
+   - Reject routes that fail geography **before** rollout; drop episodes that leave interior/inland after collect.
+
+2. **Auto-review during collect** (do not wait for a separate human pass):
+   - After each episode (or batch), run geography + quality review (arrived, inflate, path length, inland/interior).
+   - Write/update `AUTO_REVIEW.json` / curated keep list alongside the dataset.
+   - Log keep/drop reasons clearly.
+
+3. **Gate = keep going**: if quality gate is not met (usable keep count / arrived / inflate), **do not stop** — continue collecting (more routes / retries / append) until the gate passes. Never declare collect "done" on a failing gate.
+
+4. Do **not** mix baseline open-terrain arrivals (e.g. routes that are urban but not interior) into expert training sets.

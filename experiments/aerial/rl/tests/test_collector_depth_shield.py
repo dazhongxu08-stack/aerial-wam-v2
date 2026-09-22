@@ -7,6 +7,7 @@ would skip it on GPU-less hosts.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from experiments.aerial.rl.buffer import ReplayBuffer
 from experiments.aerial.rl.collector import RolloutCollector
@@ -60,6 +61,50 @@ def test_collector_writes_depth_min_pred_before_shield():
     assert ep[0].obs.info.get("depth_min_pred") == 0.5
     # ATTR: same pred must also land on transition.info for P7/attr harness.
     assert ep[0].info.get("depth_min_pred") == 0.5
+
+
+def test_collector_carries_decision_depth_into_real_reward():
+    """env.step rebuilds next_obs.info without depth — collector must copy it
+    so NavigationReward can fold clearance_risk (2026-09-21 audit)."""
+    from experiments.aerial.rl.reward import RewardConfig, clearance_risk_from_depth
+
+    class _StubEnv:
+        def __init__(self):
+            self.config = type("C", (), {"step_hz": 5.0})()
+            self.goal = np.array([100.0, 0.0, 0.0])
+
+        def reset(self, episode=None):
+            return _obs(depth_val=10.0, info={"goal": [100.0, 0.0, 0.0]})
+
+        def step(self, action):
+            # Mimic airsim_env.observe(): fresh info with only goal, no depth.
+            return _obs(depth_val=10.0, info={"goal": [100.0, 0.0, 0.0]}), {}
+
+    class _Pred:
+        def reset(self):
+            pass
+
+        def predict_min(self, obs):
+            return 5.0
+
+    class _Policy:
+        def act(self, view):
+            return np.zeros(4, dtype=np.float64)
+
+    col = RolloutCollector(
+        _StubEnv(),
+        _Policy(),
+        ReplayBuffer(capacity_episodes=1, seed=0),
+        max_steps=1,
+        target_hz=0.0,
+        depth_predictor=_Pred(),
+        skip_reset_collision=False,
+        reward_cfg=RewardConfig(w_progress=0.0, w_collision=10.0, w_maneuver=0.0),
+    )
+    ep, _ = col.collect_episode()
+    expect = clearance_risk_from_depth(5.0)
+    assert ep[0].info.get("clearance_risk") == pytest.approx(expect)
+    assert ep[0].info.get("collision_risk") == pytest.approx(expect)
 
 
 def test_collector_copies_tau_pred_into_ep_info():

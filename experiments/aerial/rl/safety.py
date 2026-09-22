@@ -23,7 +23,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
-from experiments.aerial.rl.env.action import MAX_BODY_VELOCITY, clip_body_delta
+from experiments.aerial.rl.env.action import MAX_BODY_VELOCITY, clip_body_delta, wrap_angle
 from experiments.aerial.rl.env.obs import Observation
 from experiments.aerial.rl.three_zone import ThreeZoneSpec
 from experiments.aerial.rl.tau_predictor import (
@@ -41,6 +41,9 @@ class SafetyShield(Protocol):
 
 class NullSafetyShield:
     """No-op shield: never intervenes. Default until D̂/τ heads exist."""
+
+    def reset(self) -> None:
+        return None
 
     def should_override(self, obs: Observation, wm_out: Optional[Any] = None) -> bool:
         return False
@@ -236,15 +239,39 @@ class ThreeZoneSpeedShield:
     tti_hysteresis_release_frac: float = 0.0
     #: Hard exclusion zone (metres). Below this → retreat, no forward motion.
     exclusion_m: float = 3.0
+    #: When True, exclusion uses forward cone only — ignore full-FOV ``depth_min_pred``
+    #: (peripheral close objects that cannot hit the small airframe).
+    exclusion_forward_only: bool = False
+    #: Near-goal soft exclusion: if rem ≤ this and nose aligned, creep instead of
+    #: full hard-brake (fixes terminal grind when d_fwd hovers near exclusion_m).
+    #: 0 disables. Requires ``obs.info["d_to_g"]`` (or rem_dist) + yaw_err_rad.
+    terminal_soft_exclusion_rem_m: float = 20.0
+    #: |yaw_err_rad| below this → eligible for terminal soft exclusion (≈25°).
+    terminal_soft_exclusion_yaw_rad: float = float(np.deg2rad(25.0))
+    #: Below this forward clearance, always hard-brake (crash-imminent).
+    terminal_soft_exclusion_min_fwd_m: float = 1.5
+    #: Max body +dx (m/step) allowed under terminal soft exclusion.
+    terminal_soft_exclusion_dx: float = 0.20
     #: When True (default), use max(v_now, v_cmd) as effective speed reference.
     dynamic_v_ref: bool = True
     #: Ignore WM ``p_coll`` emergency when forward clearance exceeds this (metres).
     #: ``None`` → use zone.l1_m (8 m). Set <=0 to disable.
     p_coll_clearance_veto_m: Optional[float] = None
+    #: Shield contract: **speed governor only** — never choose heading.
+    #: Emergency/exclusion may brake on body −x; dyaw must stay 0 unless an
+    #: explicit ablation sets ``retreat_max_dyaw_rad > 0`` (discouraged: that
+    #: path decided left/right from cones and caused reverse-flight spins).
+    retreat_max_dyaw_rad: float = 0.0
+    #: Only used when ``retreat_max_dyaw_rad > 0`` (ablation). Cap |Σ retreat
+    #: dyaw| while continuously retreating. 0 disables the cum gate.
+    retreat_max_cum_yaw_rad: float = 0.70
+    #: Only used when ``retreat_max_dyaw_rad > 0`` (ablation). Goal-facing gate.
+    retreat_max_head_vs_goal_rad: float = 1.047
     _emergency_engaged: bool = field(default=False, init=False, repr=False)
     _last_channels: tuple[str, ...] = field(default=(), init=False, repr=False)
     _clear_danger_steps: int = field(default=0, init=False, repr=False)
     _forward_cap_latched: bool = field(default=False, init=False, repr=False)
+    _retreat_yaw_accum: float = field(default=0.0, init=False, repr=False)
 
     @property
     def last_channels(self) -> tuple[str, ...]:
@@ -255,6 +282,7 @@ class ThreeZoneSpeedShield:
         self._last_channels = ()
         self._clear_danger_steps = 0
         self._forward_cap_latched = False
+        self._retreat_yaw_accum = 0.0
 
     def _effective_tti(self, obs: Observation) -> float:
         override = obs.info.get("shield_tti_coeff")
@@ -291,13 +319,102 @@ class ThreeZoneSpeedShield:
                 out.append("p_coll")
         return tuple(out)
 
-    def _emergency_override(self, obs: Observation) -> np.ndarray:
+    def _signed_bearing_to_goal(self, obs: Observation) -> Optional[float]:
+        """Signed yaw error to ``obs.info['goal']`` (+ = goal is left of heading)."""
+        raw = obs.info.get("goal")
+        if raw is None:
+            return None
+        try:
+            g = np.asarray(raw, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        if g.size < 2 or not np.all(np.isfinite(g[:2])):
+            return None
+        dx = float(g[0] - obs.position[0])
+        dy = float(g[1] - obs.position[1])
+        if abs(dx) + abs(dy) < 1e-6:
+            return 0.0
+        bearing = float(np.arctan2(dy, dx))
+        return float(wrap_angle(bearing - float(obs.yaw)))
+
+    def _clearer_cone_dyaw(self, obs: Observation, max_dyaw: float) -> float:
+        cones = self._cones(obs)
+        if not cones:
+            return 0.0
+        left = cones.get("left")
+        right = cones.get("right")
+        left_f = float(left) if left is not None and np.isfinite(float(left)) else None
+        right_f = float(right) if right is not None and np.isfinite(float(right)) else None
+        if left_f is None and right_f is None:
+            return 0.0
+        if right_f is None or (left_f is not None and left_f > right_f):
+            return float(max_dyaw)
+        if left_f is None or right_f > left_f:
+            return -float(max_dyaw)
+        return 0.0
+
+    def _retreat_dyaw(self, obs: Observation) -> float:
+        """Heading command during retreat — default **0** (no direction decision).
+
+        Shield is a speed rule, not a pilot: it must not choose left/right from
+        cones. Opt-in ``retreat_max_dyaw_rad > 0`` keeps the old clearer-cone
+        ablation behind cum/goal gates for A/B only.
+        """
+        if float(self.retreat_max_dyaw_rad) <= 0.0:
+            return 0.0
+        max_step = float(self.retreat_max_dyaw_rad)
+        max_cum = float(self.retreat_max_cum_yaw_rad)
+        if max_cum > 0.0 and abs(float(self._retreat_yaw_accum)) >= max_cum:
+            return 0.0
+
+        raw = self._clearer_cone_dyaw(obs, max_step)
+        bearing_err = self._signed_bearing_to_goal(obs)
+        face_lim = float(self.retreat_max_head_vs_goal_rad)
+        if bearing_err is not None and face_lim > 0.0:
+            toward = float(np.sign(bearing_err)) * max_step if abs(bearing_err) > 1e-6 else 0.0
+            if abs(bearing_err) >= face_lim:
+                if raw == 0.0:
+                    raw = toward
+                elif toward != 0.0 and np.sign(raw) != np.sign(toward):
+                    raw = toward
+            elif raw != 0.0 and toward != 0.0 and np.sign(raw) != np.sign(toward):
+                room = face_lim - abs(bearing_err)
+                if room <= 1e-6:
+                    raw = 0.0
+                else:
+                    raw = float(np.sign(raw)) * min(abs(raw), room)
+            elif raw != 0.0 and toward == 0.0:
+                raw = float(np.sign(raw)) * min(abs(raw), face_lim)
+
+        if max_cum > 0.0:
+            remain = max_cum - abs(float(self._retreat_yaw_accum))
+            if remain <= 1e-6:
+                return 0.0
+            if abs(raw) > remain:
+                raw = float(np.sign(raw)) * remain if abs(raw) > 1e-12 else 0.0
+        return float(raw)
+
+    def _speed_brake(self, obs: Observation, action: np.ndarray) -> np.ndarray:
+        """Hard proximity: constrain forward speed only; keep policy lateral/yaw.
+
+        Contract: shield is a speed rule, not a pilot. Forward axis is clipped to
+        ``[-brake_mag, 0]`` (no forward into danger); dy/dz/dyaw stay as proposed
+        unless an explicit ``retreat_max_dyaw_rad > 0`` ablation overwrites yaw.
+        """
+        out = np.asarray(action, dtype=np.float64).reshape(4).copy()
         v = closing_speed_m_s(obs)
         mag = min(
             float(self.retreat_step_m),
             max(float(v), float(self.min_closing_m_s)) * float(self.brake_gain),
         )
-        return np.array([-abs(mag), 0.0, 0.0, 0.0], dtype=np.float64)
+        out[0] = float(np.clip(float(out[0]), -abs(mag), 0.0))
+        dyaw = self._retreat_dyaw(obs)
+        if abs(float(dyaw)) > 1e-12:
+            out[3] = float(dyaw)
+            self._retreat_yaw_accum = float(self._retreat_yaw_accum) + float(dyaw)
+            obs.info["shield_retreat_dyaw"] = round(float(dyaw), 4)
+            obs.info["shield_retreat_yaw_accum"] = round(float(self._retreat_yaw_accum), 4)
+        return out
 
     def _dt_from_limits(self, limits: Optional[np.ndarray]) -> float:
         if limits is not None and float(limits[0]) > 0:
@@ -423,25 +540,61 @@ class ThreeZoneSpeedShield:
         return capped, True
 
     def _exclusion_brake(
-        self, obs: Observation, limits: Optional[np.ndarray]
+        self, obs: Observation, action: np.ndarray, limits: Optional[np.ndarray]
     ) -> Optional[tuple[np.ndarray, bool]]:
-        """Hard exclusion zone: when d_fwd ≤ exclusion_m, per-step −x retreat (no episode latch)."""
+        """Hard exclusion: d_fwd ≤ exclusion_m → forward-speed brake (keep yaw).
+
+        Near-goal exception: when rem is small, yaw is aligned, and forward is
+        not crash-imminent, creep forward under a soft cap instead of dx≤0
+        (R4 terminal grind). Still reports intervened=True via governor path.
+        """
         d_hat = self._forward_d_hat(obs)
-        full = obs.info.get("depth_min_pred")
-        full_f = float(full) if full is not None and np.isfinite(float(full)) else None
         d_crit = d_hat
-        if full_f is not None and (d_crit is None or full_f < d_crit):
-            d_crit = full_f
+        if not bool(self.exclusion_forward_only):
+            full = obs.info.get("depth_min_pred")
+            full_f = float(full) if full is not None and np.isfinite(float(full)) else None
+            if full_f is not None and (d_crit is None or full_f < d_crit):
+                d_crit = full_f
         if d_crit is None or float(d_crit) > float(self.exclusion_m):
             return None
+
+        # Terminal soft exclusion (aligned approach, not crash-imminent).
+        rem = obs.info.get("d_to_g")
+        if rem is None:
+            rem = obs.info.get("rem_dist")
+        yaw_err = obs.info.get("yaw_err_rad")
+        rem_lim = float(self.terminal_soft_exclusion_rem_m)
+        if (
+            rem_lim > 0.0
+            and rem is not None
+            and yaw_err is not None
+            and float(rem) <= rem_lim
+            and abs(float(yaw_err)) <= float(self.terminal_soft_exclusion_yaw_rad)
+            and float(d_crit) >= float(self.terminal_soft_exclusion_min_fwd_m)
+        ):
+            out = np.asarray(action, dtype=np.float64).reshape(4).copy()
+            creep = float(self.terminal_soft_exclusion_dx)
+            out[0] = float(np.clip(float(out[0]), 0.0, creep))
+            ch = list(obs.info.get("shield_channels") or [])
+            if "tii_exclusion_soft_terminal" not in ch:
+                ch.append("tii_exclusion_soft_terminal")
+            obs.info["shield_channels"] = ch
+            obs.info["shield_governor_cap"] = True
+            obs.info["shield_hard_brake"] = False
+            obs.info["tii_d_hat_fwd_m"] = round(float(d_crit), 4)
+            obs.info["shield_terminal_soft_exclusion"] = True
+            self._last_channels = tuple(ch)
+            return clip_body_delta(out, limits), True
+
         ch = list(obs.info.get("shield_channels") or [])
         if "tii_exclusion" not in ch:
             ch.append("tii_exclusion")
         obs.info["shield_channels"] = ch
         obs.info["tii_speed_cap_m_s"] = 0.0
         obs.info["tii_d_hat_fwd_m"] = round(float(d_crit), 4)
+        obs.info["shield_hard_brake"] = True
         self._last_channels = tuple(ch)
-        return clip_body_delta(self._emergency_override(obs), limits), True
+        return clip_body_delta(self._speed_brake(obs, action), limits), True
 
     def apply_action(
         self,
@@ -452,7 +605,15 @@ class ThreeZoneSpeedShield:
     ) -> tuple[np.ndarray, bool]:
         action = np.asarray(action, dtype=np.float64).reshape(4)
 
-        # 1. τ / p_coll emergency latch (unchanged)
+        # Per-step flags: collector may carry last-step values onto this obs.
+        # Clear first so a clear/no-cap frame never keeps a sticky hard_brake
+        # (which would falsely charge w_intervention on open sky).
+        if isinstance(obs.info, dict):
+            obs.info["shield_hard_brake"] = False
+            obs.info["shield_governor_cap"] = False
+            obs.info["shield_emergency_override"] = False
+
+        # 1. τ / p_coll emergency latch — forward-speed brake, keep heading cmds
         channels = self._emergency_channels(obs, wm_out)
         if self._emergency_engaged:
             if not channels:
@@ -460,26 +621,33 @@ class ThreeZoneSpeedShield:
                 if self._clear_danger_steps >= 3:
                     self._emergency_engaged = False
                     self._clear_danger_steps = 0
+                    self._retreat_yaw_accum = 0.0
             else:
                 self._clear_danger_steps = 0
             if self._emergency_engaged:
                 obs.info["shield_emergency_override"] = True
-                return clip_body_delta(self._emergency_override(obs), limits), True
+                obs.info["shield_hard_brake"] = True
+                return clip_body_delta(self._speed_brake(obs, action), limits), True
         if channels:
             self._emergency_engaged = True
             self._last_channels = channels
             obs.info["shield_channels"] = list(channels)
             obs.info["shield_emergency_override"] = True
-            return clip_body_delta(self._emergency_override(obs), limits), True
+            obs.info["shield_hard_brake"] = True
+            return clip_body_delta(self._speed_brake(obs, action), limits), True
 
-        # 2. Hard exclusion zone: d_fwd ≤ exclusion_m → retreat
-        braked = self._exclusion_brake(obs, limits)
+        # 2. Hard exclusion zone: d_fwd ≤ exclusion_m → forward-speed brake
+        braked = self._exclusion_brake(obs, action, limits)
         if braked is not None:
             out, _ = braked
-            obs.info["shield_emergency_override"] = True
+            # Exclusion is a hard speed brake, not the τ/p_coll emergency latch.
+            # Do not set shield_emergency_override (that flag is latch-only).
             return clip_body_delta(out, limits), True
 
-        # 3. TTI forward + lateral cap
+        # Not in hard brake: drop cumulative yaw budget for optional ablation.
+        self._retreat_yaw_accum = 0.0
+
+        # 3. TTI forward + lateral cap (speed governor — not a heading decision)
         capped, fwd_ch = self._cap_forward(action, obs, limits)
         lat, lat_ch = self._cap_lateral(capped, obs, limits)
         if fwd_ch or lat_ch:
@@ -494,4 +662,5 @@ class ThreeZoneSpeedShield:
         return bool(self._emergency_channels(obs, wm_out))
 
     def override_action(self, obs: Observation) -> np.ndarray:
-        return self._emergency_override(obs)
+        # Legacy path (no proposed action): cancel forward only.
+        return self._speed_brake(obs, np.zeros(4, dtype=np.float64))

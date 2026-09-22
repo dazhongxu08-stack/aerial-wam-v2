@@ -163,6 +163,10 @@ def load_episode(path: Path) -> List[Transition]:
         np.asarray(raw["goal"], dtype=np.float32).reshape(3)
         if "goal" in raw.files else None
     )
+    goals_per_step = (
+        np.asarray(raw["goals"], dtype=np.float32).reshape(-1, 3)
+        if "goals" in raw.files else None
+    )
     n = int(rgb.shape[0])
     if n == 0:
         raise ValueError(f"empty episode file: {path}")
@@ -228,7 +232,11 @@ def load_episode(path: Path) -> List[Transition]:
     # Stamp goal for reward-head features (V1-②). Stored npz key only — do not
     # invent end-proprio / reward-fit proxies here (r60 end-proxy and fit both
     # mislead; use ``backfill_episode_goals`` against the OpenFly annotation).
-    if goal_npz is not None:
+    if goals_per_step is not None:
+        from experiments.aerial.rl.goal_features import attach_goals_per_step
+
+        attach_goals_per_step(transitions, goals_per_step)
+    elif goal_npz is not None:
         attach_goal(transitions, goal_npz)
     return transitions
 

@@ -488,6 +488,74 @@ class LatentActorCritic:
             "goal_feat_mode": str(cfg.goal_feat_mode),
         }
 
+    def update_bc(
+        self,
+        z: np.ndarray,
+        actions: np.ndarray,
+        goal_rel: Optional[np.ndarray] = None,
+        *,
+        loss_scale: float = 1.0,
+    ) -> Dict[str, Any]:
+        """Behavior-clone actor mean toward expert actions (MSE in action space).
+
+        Does not touch the critic. Expert actions are clipped into the deployed
+        box before the loss so off-box demo frames cannot explode gradients.
+        """
+        cfg = self.config
+        if not self.bounded:
+            raise RuntimeError(
+                "refusing BC on policy_class="
+                f"{cfg.policy_class!r}: only {POLICY_TANH_BOUNDED} is trainable"
+            )
+        z_arr = np.asarray(z, dtype=np.float64)
+        a_arr = np.asarray(actions, dtype=np.float64)
+        if z_arr.ndim == 1:
+            z_arr = z_arr.reshape(1, -1)
+        if a_arr.ndim == 1:
+            a_arr = a_arr.reshape(1, -1)
+        if z_arr.shape[0] != a_arr.shape[0]:
+            raise ValueError(
+                f"z batch {z_arr.shape[0]} != actions batch {a_arr.shape[0]}"
+            )
+        if a_arr.shape[-1] != int(cfg.action_dim):
+            raise ValueError(
+                f"actions dim {a_arr.shape[-1]} != action_dim={cfg.action_dim}"
+            )
+        g_alive = None
+        if bool(cfg.condition_on_goal):
+            if goal_rel is None:
+                g_alive = np.zeros((z_arr.shape[0], GOAL_REL_DIM), dtype=np.float32)
+            else:
+                g_alive = np.asarray(goal_rel, dtype=np.float32).reshape(
+                    -1, GOAL_REL_DIM
+                )
+                if g_alive.shape[0] != z_arr.shape[0]:
+                    raise ValueError(
+                        f"goal_rel batch {g_alive.shape[0]} != z batch {z_arr.shape[0]}"
+                    )
+
+        feat_t = self._feat_tensor(z_arr, g_alive)
+        mean, _std = self._pre_dist(feat_t)
+        pred = self._limits * torch.tanh(mean)
+        a_t = torch.as_tensor(a_arr, dtype=torch.float32, device=self._device)
+        a_t = a_t.clamp(-self._limits, self._limits)
+        bc_loss = F.mse_loss(pred, a_t) * float(loss_scale)
+        self._actor_opt.zero_grad()
+        bc_loss.backward()
+        nn.utils.clip_grad_norm_(
+            list(self._actor.parameters()) + [self._log_std], cfg.grad_clip,
+        )
+        self._actor_opt.step()
+        with torch.no_grad():
+            mae = (pred - a_t).abs().mean()
+        return {
+            "status": "updated",
+            "bc_loss": float(bc_loss.item()),
+            "bc_mae": float(mae.item()),
+            "n_steps": int(z_arr.shape[0]),
+            "loss_scale": float(loss_scale),
+        }
+
     @classmethod
     def load_from_checkpoint(
         cls,

@@ -117,7 +117,136 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--corpus-handover-id", default=None, help="Optional handover_id for corpus")
     p.add_argument("--corpus-leg", default="deploy", help="Corpus leg tag (outdoor/indoor/deploy)")
     p.add_argument("--corpus-instruction", default=None, help="Free-text corpus instruction")
+    p.add_argument(
+        "--demo-short",
+        action="store_true",
+        help="Short visual approach preset (detect target, fly ~15-25m, no GPS fallback)",
+    )
+    p.add_argument(
+        "--success-on-visual",
+        action="store_true",
+        help="Success when visual target within --success-dist (not annot goal)",
+    )
+    p.add_argument(
+        "--detect-bench",
+        action="store_true",
+        help="Bench only: camera + YOLO loop, no WM/flight (props off)",
+    )
+    p.add_argument("--detect-bench-steps", type=int, default=40)
+    p.add_argument(
+        "--search-det-steer",
+        action="store_true",
+        help="When SEARCHING, steer toward YOLO bbox before area search",
+    )
+    p.add_argument(
+        "--reject-far-lock-m",
+        type=float,
+        default=0.0,
+        help="Reject visual locks farther than this (0=off)",
+    )
     return p.parse_args()
+
+
+def _apply_demo_short(args: argparse.Namespace) -> None:
+    """Preset for short outdoor visual approach demo."""
+    args.fallback_toward_g = False
+    args.success_on_visual = True
+    args.no_depth_shield = True
+    args.search_det_steer = True
+    args.reject_far_lock_m = 40.0
+    args.cruise_speed = 4.0
+    args.max_steps = 120
+    args.success_dist = 4.0
+    args.step_hz = 5.0
+    args.yolo_conf = max(0.2, float(args.yolo_conf))
+    if args.corpus_instruction is None:
+        args.corpus_instruction = f"short demo: approach {args.target_class}"
+    if args.corpus_scene == "real_hardware":
+        args.corpus_scene = "real_outdoor_demo"
+
+
+def _visual_success(
+    args: argparse.Namespace,
+    vstep: Any,
+    p_curr: np.ndarray,
+) -> tuple[bool, str]:
+    from experiments.aerial.scripts.wam_phase2_long_eval import _goal_dist
+    from vgoal.tracker import TargetState
+
+    if not args.success_on_visual or vstep.target_world is None:
+        return False, ""
+    d_vis = float(_goal_dist(p_curr, vstep.target_world))
+    if d_vis <= float(args.success_dist):
+        return True, f"visual target dist={d_vis:.1f}m"
+    if vstep.tracker_state == TargetState.ARRIVED.value:
+        return True, "tracker ARRIVED"
+    if vstep.goal_rel is not None and len(np.asarray(vstep.goal_rel).reshape(-1)) >= 4:
+        d_rel = float(np.asarray(vstep.goal_rel).reshape(-1)[3])
+        if d_rel <= float(args.success_dist):
+            return True, f"goal_rel dist={d_rel:.1f}m"
+    return False, ""
+
+
+def _run_detect_bench(args: argparse.Namespace, root: Path, vgoal_repo: Path) -> int:
+    from experiments.aerial.deploy.real_camera import RealCamera, RealCameraConfig
+    from experiments.aerial.scripts.wam_vgoal_eval import _build_detector
+
+    logger.info(
+        "detect-bench: target=%s steps=%d (place object in FOV)",
+        args.target_class,
+        int(args.detect_bench_steps),
+    )
+    cam = RealCamera(
+        RealCameraConfig(
+            device=str(args.camera),
+            width=int(args.capture_w),
+            height=int(args.capture_h),
+            fps=int(args.capture_fps),
+            wam_size=int(args.wam_encode_size),
+        )
+    )
+    cam.open()
+    detector = _build_detector(
+        argparse.Namespace(
+            detector="yolo",
+            target_class=args.target_class,
+            visual_prompt=args.visual_prompt or args.target_class,
+            yolo_model=args.yolo_model,
+            yolo_conf=args.yolo_conf,
+            yolo_imgsz=int(args.yolo_imgsz),
+            yolo_device=str(args.device),
+            camera_fov_deg=args.camera_fov_deg,
+            capture_w=args.capture_w,
+            capture_h=args.capture_h,
+        ),
+        vgoal_repo,
+    )
+    import cv2  # type: ignore
+
+    hits = 0
+    try:
+        for step in range(int(args.detect_bench_steps)):
+            bgr, _rgb = cam.read()
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            detect_all = getattr(detector, "detect_all", None)
+            if callable(detect_all):
+                dets = list(detect_all(rgb) or [])
+            else:
+                det = detector.detect(rgb)
+                dets = list(det) if isinstance(det, (list, tuple)) else ([det] if det is not None else [])
+            if dets:
+                hits += 1
+                det0 = dets[0]
+                bb = getattr(det0, "bbox", None)
+                conf = float(getattr(det0, "confidence", 0.0) or 0.0)
+                logger.info("step=%02d HIT n=%d conf=%.2f bbox=%s", step, len(dets), conf, bb)
+            elif step % 5 == 0:
+                logger.info("step=%02d no %s in view", step, args.target_class)
+            time.sleep(1.0 / max(1.0, float(args.step_hz)))
+    finally:
+        cam.close()
+    logger.info("detect-bench done: %d/%d frames with %s", hits, args.detect_bench_steps, args.target_class)
+    return 0 if hits > 0 else 1
 
 
 def _goal_from_args(args: argparse.Namespace, origin: np.ndarray) -> Optional[np.ndarray]:
@@ -188,6 +317,8 @@ def _deploy_manifest(args: argparse.Namespace, annot_goal: Optional[np.ndarray])
 
 def main() -> int:
     args = _parse()
+    if args.demo_short:
+        _apply_demo_short(args)
     if args.arm and not args.i_know_props_are_on:
         logger.error("Refusing --arm without --i-know-props-are-on")
         return 2
@@ -207,6 +338,15 @@ def main() -> int:
         raise SystemExit(f"--vgoal-repo not found: {vgoal_repo}")
     if str(vgoal_repo) not in sys.path:
         sys.path.insert(0, str(vgoal_repo))
+
+    if args.detect_bench:
+        device_str = str(args.device)
+        import torch
+
+        if device_str == "cuda" and not torch.cuda.is_available():
+            device_str = "cpu"
+        args.device = device_str
+        return _run_detect_bench(args, root, vgoal_repo)
 
     from vgoal.geometry import CameraIntrinsics
     from vgoal.tracker import TargetTracker, TrackerConfig
@@ -342,8 +482,12 @@ def main() -> int:
         curr_yaw = float(obs.yaw)
         annot_goal = _goal_from_args(args, p_curr)
         if annot_goal is None:
-            annot_goal = p_curr + np.array([20.0, 0.0, 0.0], dtype=np.float64)
-            logger.warning("No --goal-x/y/z; using fallback annot_goal=%s", annot_goal.tolist())
+            if args.fallback_toward_g:
+                annot_goal = p_curr + np.array([20.0, 0.0, 0.0], dtype=np.float64)
+                logger.warning("No --goal-x/y/z; using fallback annot_goal=%s", annot_goal.tolist())
+            else:
+                annot_goal = p_curr.copy()
+                logger.info("Visual-only mode: no annot goal (target=%s)", args.target_class)
 
         deploy_manifest = _deploy_manifest(args, annot_goal)
         if record_enabled and args.record_auto:
@@ -441,6 +585,8 @@ def main() -> int:
                 allow_fallback=bool(args.fallback_toward_g),
                 prefer_nearest=False,
                 camera_fov_deg=float(args.camera_fov_deg),
+                reject_far_lock_m=float(args.reject_far_lock_m),
+                search_det_steer=bool(args.search_det_steer),
             )
             p_prev = p_curr.copy()
             prev_yaw = curr_yaw
@@ -497,10 +643,14 @@ def main() -> int:
                     step_info.get("armed"),
                 )
 
-            if annot_goal is not None:
+            ok, why = _visual_success(args, vstep, p_curr)
+            if ok:
+                logger.info("SUCCESS %s at step %d", why, step)
+                break
+            if args.fallback_toward_g and annot_goal is not None:
                 dist = float(np.linalg.norm(annot_goal - p_curr))
                 if dist <= float(args.success_dist):
-                    logger.info("SUCCESS dist=%.1fm at step %d", dist, step)
+                    logger.info("SUCCESS annot dist=%.1fm at step %d", dist, step)
                     break
 
         return 0

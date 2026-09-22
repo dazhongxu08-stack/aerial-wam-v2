@@ -111,6 +111,11 @@ class TowardGoalIntent:
             d_fwd_hat=d_fwd_hat,
             d_to_g=d_to_g,
         )
+        # Body yaw-to-carrot (rad): + = carrot left of nose. Needed by F15
+        # heading cost and by the H=1 planner face-goal rule.
+        yaw_err = 0.0
+        if float(np.hypot(g_rel[0], g_rel[1])) > 1e-6:
+            yaw_err = float(np.arctan2(float(g_rel[1]), float(g_rel[0])))
         info: Dict[str, Any] = {
             "subgoal_source": mode,
             "target_world": target.tolist(),
@@ -120,6 +125,7 @@ class TowardGoalIntent:
             "cte_m": None,
             "r_lookahead": float(np.linalg.norm(target - p)),
             "seg_idx": 0,
+            "yaw_err_rad": yaw_err,
         }
         return g_rel, info
 
@@ -149,6 +155,28 @@ class SceneIntentPlanner:
     d_clear: float = 40.0
     min_creep_speed: float = 1.0
     stall_eps_m: float = 0.05
+    # Altitude-hold: while horizontal distance to goal exceeds this radius, hold
+    # the *current* altitude (do not blend candidate z toward goal z) so the fan
+    # clears rooftops instead of creeping along a building face at street level.
+    # 0 disables (legacy behaviour: candidate z always blends 30% toward goal z).
+    descent_radius_m: float = 0.0
+    # Stuck-escape (long-horizon, independent of the short replan hold above).
+    # Diagnosed hard134 route 0, 2026-09-18: even after fixing the shield's
+    # zero-yaw retreat, the ±75-105° fan + progress-weighted scoring settles
+    # into a STABLE equilibrium a few metres off the direct line (a corner /
+    # recess) and never escapes — the toward-goal progress term keeps pulling
+    # it back before it clears the obstacle, round after round, regardless of
+    # replan cadence or retreat-turn strength. A human pilot who's been
+    # fighting the same spot for ~10s+ backs off further and tries a direction
+    # they hadn't considered (even >90° off the goal bearing, or briefly
+    # increasing distance to goal) instead of nibbling at the same blocked
+    # approach forever. 0 disables (legacy: never widen/override on stall).
+    stuck_escape_after_s: float = 12.0
+    stuck_escape_hold_s: float = 5.0
+    stuck_escape_progress_eps_m: float = 3.0
+    stuck_escape_extra_yaw_offsets_deg: Sequence[float] = field(
+        default_factory=lambda: (120.0, -120.0, 150.0, -150.0, 180.0)
+    )
 
     _c_prev: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _steps_since_replan: int = field(default=10**9, init=False, repr=False)
@@ -161,6 +189,10 @@ class SceneIntentPlanner:
     _last_choice_idx: int = field(default=0, init=False, repr=False)
     _last_n_feasible: int = field(default=0, init=False, repr=False)
     n_fan_starved: int = field(default=0, init=False, repr=False)
+    _best_d_to_g: Optional[float] = field(default=None, init=False, repr=False)
+    _no_improve_steps: int = field(default=0, init=False, repr=False)
+    _escape_hold_left: int = field(default=0, init=False, repr=False)
+    escape_count: int = field(default=0, init=False, repr=False)
 
     def reset(self) -> None:
         self._c_prev = None
@@ -172,19 +204,34 @@ class SceneIntentPlanner:
         self._last_choice_idx = 0
         self._last_n_feasible = 0
         self.n_fan_starved = 0
+        self._best_d_to_g = None
+        self._no_improve_steps = 0
+        self._escape_hold_left = 0
+        self.escape_count = 0
 
     def _candidates(
-        self, p: np.ndarray, yaw: float, goal: np.ndarray
+        self,
+        p: np.ndarray,
+        yaw: float,
+        goal: np.ndarray,
+        *,
+        extra_yaw_offsets_deg: Sequence[float] = (),
     ) -> List[np.ndarray]:
         out: List[np.ndarray] = [clip_toward_goal(p, goal, self.r_m)]
         r = float(self.r_m)
-        for deg in self.yaw_offsets_deg:
+        for deg in tuple(self.yaw_offsets_deg) + tuple(extra_yaw_offsets_deg):
             psi = float(yaw) + np.deg2rad(float(deg))
             c = p + np.array(
                 [r * np.cos(psi), r * np.sin(psi), 0.0], dtype=np.float64
             )
-            c[2] = p[2] + 0.3 * (goal[2] - p[2])
             out.append(c)
+        d_horiz_to_g = float(np.hypot(goal[0] - p[0], goal[1] - p[1]))
+        if self.descent_radius_m > 0.0 and d_horiz_to_g > float(self.descent_radius_m):
+            z_target = float(p[2])  # hold current altitude — clear rooftops, don't hug walls
+        else:
+            z_target = float(p[2] + 0.3 * (goal[2] - p[2]))
+        for c in out:
+            c[2] = z_target
         return out
 
     def _should_replan(self, d_to_g: float, d_fwd_hat: Optional[float]) -> bool:
@@ -324,6 +371,25 @@ class SceneIntentPlanner:
                 fwd_penalty = tight * alignment * float(self.r_m) * float(self.w_fwd)
         return float(-float(self.w_g) * progress + float(self.w_jump) * jump + fwd_penalty)
 
+    def _azimuth_depth(
+        self,
+        bearing_deg: float,
+        depth_azimuth: Optional[Dict[str, Any]],
+    ) -> Optional[float]:
+        """Nearest-bin clearance from a multi-sector azimuth scan (finer than
+        the 2-bucket left/right in :meth:`_cone_depth`). Used only by the
+        stuck-escape branch, where distinguishing e.g. 45° from 150° matters."""
+        if not isinstance(depth_azimuth, dict):
+            return None
+        bearings = depth_azimuth.get("bearings_deg")
+        clears = depth_azimuth.get("clearances_m")
+        if not bearings or not clears or len(bearings) != len(clears):
+            return None
+        diffs = [abs(float(b) - float(bearing_deg)) for b in bearings]
+        i = int(np.argmin(diffs))
+        v = clears[i]
+        return float(v) if v is not None and np.isfinite(float(v)) else None
+
     def compute(
         self,
         curr_pos: np.ndarray,
@@ -331,59 +397,132 @@ class SceneIntentPlanner:
         goal: np.ndarray,
         d_fwd_hat: Optional[float] = None,
         depth_cones: Optional[Dict[str, Optional[float]]] = None,
+        depth_azimuth: Optional[Dict[str, Any]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         p = np.asarray(curr_pos, dtype=np.float64).reshape(3)
         g = np.asarray(goal, dtype=np.float64).reshape(3)
         yaw = float(curr_yaw)
         d_to_g = float(np.linalg.norm(g - p))
 
-        replan = self._should_replan(d_to_g, d_fwd_hat)
-        cands = self._candidates(p, yaw, g)
-        n_cands = len(cands)
-
-        if replan:
-            feasible = [
-                (i, c)
-                for i, c in enumerate(cands)
-                if not self._blocked(p, c, yaw, d_fwd_hat)
-            ]
-            n_feasible = len(feasible)
-            if not feasible:
-                # Whole fan inside the danger cone: take the most lateral option
-                # and let creep speed + shield handle it. Never return nothing.
-                feasible = [
-                    min(
-                        enumerate(cands),
-                        key=lambda ic: self._nose_alignment(p, ic[1], yaw),
-                    )
-                ]
-            best_idx, best = feasible[0]
-            best_j = self._score(p, g, best, d_fwd_hat, yaw, depth_cones=depth_cones)
-            for i, c in feasible[1:]:
-                j = self._score(p, g, c, d_fwd_hat, yaw, depth_cones=depth_cones)
-                if j < best_j:
-                    best_j = j
-                    best = c
-                    best_idx = i
-            target = best.copy()
-            self._c_prev = target.copy()
-            # Candidate 0 is clip_toward_goal — identical to TowardGoalIntent.
-            # Skip the hold period so it tracks position every step, matching
-            # the E0 baseline.  Offaxis candidates hold for stability.
-            self._steps_since_replan = 10**9 if best_idx == 0 else 0
-            self._stall_steps = 0
-            self.replan_count += 1
-            if best_idx != 0:
-                self.offaxis_count += 1
-            if n_feasible == 0:
-                self.n_fan_starved += 1
-            self._last_choice_idx = best_idx
-            self._last_n_feasible = n_feasible
+        # Stuck-escape bookkeeping (long-horizon, independent of the short
+        # replan hold below): has the drone made real net progress toward G
+        # over the last ``stuck_escape_after_s`` seconds?
+        if self._best_d_to_g is None or d_to_g < self._best_d_to_g - float(
+            self.stuck_escape_progress_eps_m
+        ):
+            self._best_d_to_g = d_to_g
+            self._no_improve_steps = 0
         else:
+            self._no_improve_steps += 1
+
+        escape_active = False
+        replan = False
+        if self.stuck_escape_after_s > 0.0 and self._escape_hold_left > 0:
+            # Committed to an escape heading; hold it regardless of the raw
+            # toward-goal pull (that pull is exactly what re-traps it).
+            escape_active = True
             assert self._c_prev is not None
             target = self._c_prev.copy()
-            self._steps_since_replan += 1
+            cands = [target]
+            self._escape_hold_left -= 1
+            if self._escape_hold_left == 0:
+                # Release: give it a fresh no-progress window before this can
+                # trigger again, and force a normal replan next step.
+                self._best_d_to_g = d_to_g
+                self._no_improve_steps = 0
+                self._steps_since_replan = 10**9
+        elif self.stuck_escape_after_s > 0.0 and self._no_improve_steps >= max(
+            1, int(round(float(self.stuck_escape_after_s) * float(self.step_hz)))
+        ):
+            # No real progress for a long while: widen the fan (including
+            # near-reverse headings) and pick by CLEARANCE ALONE — ignore the
+            # goal-progress term entirely, since chasing progress is what
+            # produced the stall. Like a human backing fully out of a recess
+            # before trying a direction they hadn't considered.
+            escape_active = True
+            cands = self._candidates(
+                p, yaw, g, extra_yaw_offsets_deg=self.stuck_escape_extra_yaw_offsets_deg
+            )
+            best_idx, best, best_clear = 0, cands[0], -1.0
+            for i, c in enumerate(cands):
+                bearing = self._body_bearing_deg(p, c, yaw)
+                # Prefer the finer multi-sector azimuth scan (distinguishes
+                # e.g. 45° from 150°); fall back to the 2-bucket cone dict,
+                # which cannot tell those apart (diagnosed hard134 route 0:
+                # escape kept re-picking ~the same heading without it).
+                dc = self._azimuth_depth(bearing, depth_azimuth)
+                if dc is None:
+                    dc = self._cone_depth(bearing, depth_cones)
+                if dc is None:
+                    dc = (
+                        float(d_fwd_hat)
+                        if d_fwd_hat is not None and np.isfinite(float(d_fwd_hat))
+                        else 0.0
+                    )
+                if float(dc) > best_clear:
+                    best_clear = float(dc)
+                    best_idx = i
+                    best = c
+            target = best.copy()
+            self._c_prev = target.copy()
+            hold_steps = max(1, int(round(float(self.stuck_escape_hold_s) * float(self.step_hz))))
+            self._escape_hold_left = hold_steps - 1
+            self._steps_since_replan = 0
+            self._stall_steps = 0
+            self.replan_count += 1
+            self.offaxis_count += 1
+            self.escape_count += 1
+            self._last_choice_idx = best_idx
+            self._last_n_feasible = len(cands)
 
+        if not escape_active:
+            replan = self._should_replan(d_to_g, d_fwd_hat)
+            cands = self._candidates(p, yaw, g)
+
+            if replan:
+                feasible = [
+                    (i, c)
+                    for i, c in enumerate(cands)
+                    if not self._blocked(p, c, yaw, d_fwd_hat)
+                ]
+                n_feasible = len(feasible)
+                if not feasible:
+                    # Whole fan inside the danger cone: take the most lateral option
+                    # and let creep speed + shield handle it. Never return nothing.
+                    feasible = [
+                        min(
+                            enumerate(cands),
+                            key=lambda ic: self._nose_alignment(p, ic[1], yaw),
+                        )
+                    ]
+                best_idx, best = feasible[0]
+                best_j = self._score(p, g, best, d_fwd_hat, yaw, depth_cones=depth_cones)
+                for i, c in feasible[1:]:
+                    j = self._score(p, g, c, d_fwd_hat, yaw, depth_cones=depth_cones)
+                    if j < best_j:
+                        best_j = j
+                        best = c
+                        best_idx = i
+                target = best.copy()
+                self._c_prev = target.copy()
+                # Candidate 0 is clip_toward_goal — identical to TowardGoalIntent.
+                # Skip the hold period so it tracks position every step, matching
+                # the E0 baseline.  Offaxis candidates hold for stability.
+                self._steps_since_replan = 10**9 if best_idx == 0 else 0
+                self._stall_steps = 0
+                self.replan_count += 1
+                if best_idx != 0:
+                    self.offaxis_count += 1
+                if n_feasible == 0:
+                    self.n_fan_starved += 1
+                self._last_choice_idx = best_idx
+                self._last_n_feasible = n_feasible
+            else:
+                assert self._c_prev is not None
+                target = self._c_prev.copy()
+                self._steps_since_replan += 1
+
+        n_cands = len(cands)
         self._last_d_to_g = d_to_g
         # Horizontal peel of c* off the direct-to-G ray (deg); 0 = pure toward_g.
         v_c = (target - p)[:2]
@@ -420,5 +559,7 @@ class SceneIntentPlanner:
             "replan_count": int(self.replan_count),
             "offaxis_count": int(self.offaxis_count),
             "n_fan_starved": int(self.n_fan_starved),
+            "in_escape": bool(escape_active),
+            "escape_count": int(self.escape_count),
         }
         return g_rel, info

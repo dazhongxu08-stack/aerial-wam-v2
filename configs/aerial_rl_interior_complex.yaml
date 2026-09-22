@@ -1,0 +1,115 @@
+# Interior urban-complex micro-FT (R09-template 20 routes).
+#
+# Collect (125):
+#   bash experiments/aerial/scripts/collect_urban_complex_path_expert.sh
+#
+# Train (125 → H100):
+#   bash experiments/aerial/scripts/train_interior_complex.sh
+
+scene_mix:
+  outdoor_prob: 1.0
+  indoor_prob: 0.0
+  cross_scene_in_episode: false
+  require_scene_tag: true
+
+scene_profiles:
+  outdoor_complex:
+    action_limits:
+      max_dx: 1.0
+      max_dy: 0.4
+      max_dz: 0.4
+      max_dyaw: 0.314
+    success_dist_m: 3.0
+    safety:
+      kind: three_zone
+      l1_m: 8.0
+      l2_m: 5.0
+      l3_m: 1.5
+      v1_m_s: 2.0
+      v2_m_s: 1.0
+      v_stop_m_s: 0.2
+      v_cruise_m_s: 10.0
+      a_max_m_s2: 2.5
+      delay_s: 0.2
+
+pose_contract:
+  pose_source_required: true
+  forbid_gt_world_pose_control: true
+  forbid_silent_gt_goal_rel: true
+  train_allow_gt_proxy: true
+  eval_allow_gt_proxy: false
+
+env:
+  backend: mock
+  step_hz: 5.0
+  width: 224
+  height: 224
+  grab_depth: false
+  seed: 0
+
+buffer:
+  capacity_episodes: 64
+  seed: 0
+
+reward:
+  w_progress: 1.0
+  w_collision: 10.0
+  w_maneuver: 0.01
+  success_bonus: 10.0
+  success_dist_m: 3.0
+
+dynamics:
+  kind: torch
+  latent_dim: 8
+  collide_radius_m: 2.0
+
+world_model:
+  checkpoint_dir: experiments/aerial/rl/artifacts/wm_ckpt_d_full_20260828
+
+imagination:
+  batch: 32
+  horizon: 8
+
+planner:
+  enable: false
+
+corrector:
+  iterations: 10
+  episodes_per_iter: 0
+  max_steps: 300
+  enable_wm_update: false
+  enable_policy_update: false
+  strict_gates: false
+  smoke: false
+
+v4:
+  lambda_gae: 0.95
+  gamma: 0.997
+  entropy_scale: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  action_scale: 1.0
+  device: cpu
+
+annotation: experiments/aerial/phase3_unified/annotations/outdoor_complex_only.json
+dataset: experiments/aerial/rl/artifacts/dataset_urban_complex_path_expert_20260916_night_curated
+max_episodes: 0
+
+interior_complex:
+  warm_start: experiments/aerial/rl/artifacts/v4_ac_ckpt_phase2_toward_g_20260905_112006/v4_ac_latest.pt
+  iters: 120
+
+safety:
+  kind: three_zone
+  l1_m: 8.0
+  l2_m: 5.0
+  l3_m: 1.5
+  v1_m_s: 2.0
+  v2_m_s: 1.0
+  v_stop_m_s: 0.2
+  v_cruise_m_s: 10.0
+  a_max_m_s2: 2.5
+  delay_s: 0.2
+  min_tau_s: 1.0
+  max_p_coll: 0.5
+  retreat_step_m: 3.0

@@ -62,6 +62,8 @@ class AirSimEnvConfig:
     # the H100→4090 path. Health-check on reset still grabs depth once when
     # health_check=True. Set False for Plan-A rate smokes / RGB-first collection.
     grab_depth: bool = True
+    fanout_rgb: bool = False
+    wam_encode_size: int = 224
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AirSimEnvConfig":
@@ -233,8 +235,38 @@ class AirSimDroneEnv:
         return obs, info
 
     def observe(self, *, force_depth: bool = False) -> Observation:
+        import cv2  # type: ignore
+
         client = self._connect()
-        rgb = self._grab_scene(client)
+        native_rgb = self._grab_scene_native(client)
+        rgb_yolo: Optional[np.ndarray] = None
+        rgb_vio: Optional[np.ndarray] = None
+        if self.config.fanout_rgb:
+            wam_sz = int(self.config.wam_encode_size)
+            rgb = cv2.resize(
+                native_rgb,
+                (wam_sz, wam_sz),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            det = native_rgb
+            if (det.shape[1], det.shape[0]) != (self.config.width, self.config.height):
+                det = cv2.resize(
+                    det,
+                    (self.config.width, self.config.height),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            rgb_yolo = np.ascontiguousarray(det, dtype=np.uint8)
+            rgb_vio = rgb_yolo
+            rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
+        else:
+            rgb = native_rgb
+            if (rgb.shape[1], rgb.shape[0]) != (self.config.width, self.config.height):
+                rgb = cv2.resize(
+                    rgb,
+                    (self.config.width, self.config.height),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
         # Depth is optional per-step (see ``grab_depth``); force it for the
         # one-shot health check on reset even when per-step grabs are off.
         want_depth = force_depth or self.config.grab_depth
@@ -250,6 +282,8 @@ class AirSimDroneEnv:
             imu=imu,
             t=time.perf_counter() - self._t0,
             info={"goal": None if self._goal is None else self._goal.tolist()},
+            rgb_yolo=rgb_yolo,
+            rgb_vio=rgb_vio,
         )
 
     def observe_state(self) -> np.ndarray:
@@ -286,7 +320,7 @@ class AirSimDroneEnv:
         return self._goal
 
     # -- capture helpers (lifted from the probes) -------------------------
-    def _grab_scene(self, client: Any) -> np.ndarray:
+    def _grab_scene_native(self, client: Any) -> np.ndarray:
         import cv2  # type: ignore
 
         airsim = self._airsim
@@ -296,9 +330,18 @@ class AirSimDroneEnv:
         img = cv2.imdecode(raw, cv2.IMREAD_COLOR)  # BGR
         if img is None:
             raise RuntimeError("empty/undecodable Scene buffer")
-        rgb = img[..., ::-1]  # BGR -> RGB
-        if (img.shape[1], img.shape[0]) != (self.config.width, self.config.height):
-            rgb = cv2.resize(rgb, (self.config.width, self.config.height), interpolation=cv2.INTER_LINEAR)
+        return np.ascontiguousarray(img[..., ::-1], dtype=np.uint8)  # RGB
+
+    def _grab_scene(self, client: Any) -> np.ndarray:
+        import cv2  # type: ignore
+
+        rgb = self._grab_scene_native(client)
+        if (rgb.shape[1], rgb.shape[0]) != (self.config.width, self.config.height):
+            rgb = cv2.resize(
+                rgb,
+                (self.config.width, self.config.height),
+                interpolation=cv2.INTER_LINEAR,
+            )
         return np.ascontiguousarray(rgb, dtype=np.uint8)
 
     def _grab_depth(self, client: Any) -> Optional[np.ndarray]:

@@ -1,36 +1,17 @@
 #!/usr/bin/env bash
-# Route-10 repeat validation for V11 stack (cap_r + ha_fix code, 2026-09-15).
+# Route-10 repeat validation for V12 mainline stack.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 # shellcheck disable=SC1091
 source "$ROOT/experiments/aerial/scripts/env_4090.sh"
+# shellcheck disable=SC1091
+source "$ROOT/experiments/aerial/scripts/wam_phase2_v12_mainline.inc.sh"
 PY="${AERIAL_PY:-${PYTHON_BIN:-python3}}"
 
 ROUTE_IDX=9
-OUT_ROOT="${OUT_ROOT:-artifacts/wam_phase2_route10_v11_validate_20260915}"
-ANNO="experiments/aerial/phase3_unified/annotations/outdoor_long_only.json"
-ACTOR="experiments/aerial/rl/artifacts/v4_ac_ckpt_phase2_toward_g_20260905_112006/v4_ac_latest.pt"
-WM="experiments/aerial/rl/artifacts/wm_ckpt_d_full_20260828/wm_step_3500.pt"
-DEPTH="experiments/aerial/rl/artifacts/depth_ckpt_p45mid_s8j_20260825/depth_best_holdout_da3_ft_head.pt"
-TAU="experiments/aerial/rl/artifacts/tau_ckpt_foe_r60_20260815/tau_foe_calibrator.pt"
-
-V11=(
-  --subgoal-source polyline
-  --rolling-global
-  --heading-assist
-  --global-horizon-m 60
-  --global-replan-period-s 1.0
-  --heading-assist-cte-max-m 8.0
-  --heading-assist-cos-thr 0.7
-  --planner --planner-horizon 1
-  --tti-coeff 2.5
-  --heading-reentry-cos 0.5
-  --cte-reentry-m 1.5
-  --cruise-speed 10.0
-  --max-steps 600
-)
+OUT_ROOT="${OUT_ROOT:-artifacts/wam_phase2_route10_v12_validate_20260916}"
 
 run_rep() {
   local tag="$1"
@@ -39,12 +20,9 @@ run_rep() {
   mkdir -p "$OUT_ROOT" "$traj"
   echo "=== ${tag} ==="
   "$PY" -m experiments.aerial.scripts.wam_phase2_long_eval \
-    --annotation "$ANNO" --routes "$ROUTE_IDX" \
-    --wm-ckpt "$WM" --actor-ckpt "$ACTOR" \
-    --depth-ckpt "$DEPTH" --tau-ckpt "$TAU" \
-    --goal-feat-mode meter \
+    "${WAM_PHASE2_CKPTS[@]}" --routes "$ROUTE_IDX" \
     --traj-out "${traj}/route09.jsonl" --out "$out" \
-    "${V11[@]}" || true
+    "${WAM_PHASE2_V12_STACK[@]}" || true
 }
 
 summary() {

@@ -12,7 +12,7 @@ from typing import Any, Deque, Dict, Optional
 
 import numpy as np
 
-from experiments.aerial.rl.depth_geometry import CONE_KEYS, cone_clearances
+from experiments.aerial.rl.depth_geometry import CONE_KEYS, azimuth_clearances, cone_clearances
 from experiments.aerial.rl.env.obs import Observation
 
 
@@ -66,6 +66,11 @@ class DepthMinPredictor:
         import torch
 
         rgb = np.asarray(obs.rgb, dtype=np.uint8)
+        target = int(getattr(self._model, "image_size", 0) or 0)
+        if target > 0 and rgb.shape[:2] != (target, target):
+            import cv2  # lazy: only when resizing for DA3 / mismatched capture
+
+            rgb = cv2.resize(rgb, (target, target), interpolation=cv2.INTER_LINEAR)
         self._hist.append(rgb)
         # Pad left with the oldest frame if history is still warming up.
         frames = list(self._hist)
@@ -90,6 +95,10 @@ class DepthMinPredictor:
         if all(cones[k] == float("inf") for k in CONE_KEYS):
             return None
         return cones
+
+    def predict_depth(self, obs: Observation) -> Optional[np.ndarray]:
+        """Full D̂ map for open-vocab back-projection (eval / debug)."""
+        return self._run_depth_head(obs)
 
     def predict_min(self, obs: Observation) -> Optional[float]:
         """Push ``obs.rgb`` into history; return min ``D̂`` or None if unloaded."""
@@ -130,3 +139,107 @@ class DepthMinPredictor:
         if d is None:
             return None, None
         return self._min_from_depth(d), self._cones_from_depth(d, center_frac=center_frac)
+
+    def predict_min_cones_and_azimuth(
+        self,
+        obs: Observation,
+        *,
+        center_frac: float = 0.5,
+        azimuth_n_bins: int = 8,
+        azimuth_hfov_deg: float = 90.0,
+    ) -> tuple[Optional[float], Optional[Dict[str, float]], Optional[Dict[str, Any]]]:
+        """Single depth-head pass: full-field min + five cones + N-bin azimuth
+        clearance on the SAME D̂.
+
+        MUST call ``_run_depth_head`` at most once per step: it pushes
+        ``obs.rgb`` into the sliding history window, so calling it twice in
+        one step (e.g. once for cones, once for azimuth) would double-feed
+        the same frame and desync the multi-frame history from real time.
+        Use this instead of separately calling :meth:`predict_min_and_cones`
+        and a standalone azimuth method.
+        """
+        d = self._run_depth_head(obs)
+        if d is None:
+            return None, None, None
+        return (
+            self._min_from_depth(d),
+            self._cones_from_depth(d, center_frac=center_frac),
+            azimuth_clearances(
+                d, n_bins=azimuth_n_bins, center_frac=center_frac, hfov_deg=azimuth_hfov_deg
+            ),
+        )
+
+
+class GTDepthAdapter:
+    """Diagnostic-only: same ``predict_min_and_cones`` interface as
+    :class:`DepthMinPredictor`, but reads AirSim's true DepthPlanar
+    (``obs.depth``) instead of running the D̂ network.
+
+    Privileged (ground-truth mesh depth) — never for deploy or for training
+    the deployed π. Purpose: isolate whether a chronic-shield-intervention
+    failure on a route is caused by D̂ bias/noise (this adapter flies clean)
+    or by a genuine obstacle occupying the corridor (this adapter also gets
+    intervened on heavily). Requires the env to grab per-step depth
+    (``grab_depth=True``); otherwise ``obs.depth`` is None and this is a
+    silent no-op (matches ``DepthMinPredictor`` with no checkpoint loaded).
+    """
+
+    def reset(self) -> None:
+        return None
+
+    def _min_from_depth(self, d: np.ndarray) -> Optional[float]:
+        finite = d[np.isfinite(d) & (d > 0)]
+        if finite.size == 0:
+            return None
+        return float(np.min(finite))
+
+    def _cones_from_depth(
+        self, d: np.ndarray, *, center_frac: float = 0.5
+    ) -> Optional[Dict[str, float]]:
+        cones = cone_clearances(d, center_frac=center_frac)
+        if all(cones[k] == float("inf") for k in CONE_KEYS):
+            return None
+        return cones
+
+    def predict_min(self, obs: Observation) -> Optional[float]:
+        d = getattr(obs, "depth", None)
+        if d is None:
+            return None
+        return self._min_from_depth(np.asarray(d, dtype=np.float32))
+
+    def predict_cones(
+        self, obs: Observation, *, center_frac: float = 0.5
+    ) -> Optional[Dict[str, float]]:
+        d = getattr(obs, "depth", None)
+        if d is None:
+            return None
+        return self._cones_from_depth(np.asarray(d, dtype=np.float32), center_frac=center_frac)
+
+    def predict_min_and_cones(
+        self, obs: Observation, *, center_frac: float = 0.5
+    ) -> tuple[Optional[float], Optional[Dict[str, float]]]:
+        d = getattr(obs, "depth", None)
+        if d is None:
+            return None, None
+        d = np.asarray(d, dtype=np.float32)
+        return self._min_from_depth(d), self._cones_from_depth(d, center_frac=center_frac)
+
+    def predict_min_cones_and_azimuth(
+        self,
+        obs: Observation,
+        *,
+        center_frac: float = 0.5,
+        azimuth_n_bins: int = 8,
+        azimuth_hfov_deg: float = 90.0,
+    ) -> tuple[Optional[float], Optional[Dict[str, float]], Optional[Dict[str, Any]]]:
+        d = getattr(obs, "depth", None)
+        if d is None:
+            return None, None, None
+        d = np.asarray(d, dtype=np.float32)
+        return (
+            self._min_from_depth(d),
+            self._cones_from_depth(d, center_frac=center_frac),
+            azimuth_clearances(
+                d, n_bins=azimuth_n_bins, center_frac=center_frac, hfov_deg=azimuth_hfov_deg
+            ),
+        )
