@@ -44,6 +44,11 @@ MAX_BODY_VELOCITY = np.array(
     [5.0, 2.0, 2.0, math.pi / 2.0], dtype=np.float64  # 5 m/s fwd, 90°/s yaw
 )
 
+# Ground UGV (G0): planar 3-DOF; dz channel unused (forced 0 in env).
+GROUND_MAX_BODY_VELOCITY = np.array(
+    [2.0, 1.0, 0.0, math.pi / 4.0], dtype=np.float64  # ~2 m/s fwd, 45°/s yaw
+)
+
 # Sparse OpenFly macro-primitive spans (fwd 9 m, strafe 3 m, climb 3 m, turn 30°).
 # These are DISCRETE teleport magnitudes, NOT a 1/step_hz continuous increment:
 # clipping a per-step command to these would sanction ~270 m/s at 30 Hz. Kept
@@ -54,11 +59,18 @@ MAX_BODY_VELOCITY = np.array(
 MACRO_PRIMITIVE_SPAN = np.array([9.0, 3.0, 3.0, math.pi / 6.0], dtype=np.float64)
 
 
-def body_delta_limits(dt: float) -> np.ndarray:
-    """Per-step body-delta cap = ``MAX_BODY_VELOCITY * dt`` (a real displacement)."""
+def body_delta_limits(
+    dt: float,
+    max_velocity: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Per-step body-delta cap = ``max_velocity * dt`` (a real displacement)."""
     if dt <= 0:
         raise ValueError(f"dt must be > 0, got {dt}")
-    return MAX_BODY_VELOCITY * float(dt)
+    mv = np.asarray(
+        MAX_BODY_VELOCITY if max_velocity is None else max_velocity,
+        dtype=np.float64,
+    ).reshape(ACTION_DIM)
+    return mv * float(dt)
 
 
 # Continuous per-step cap at the default control rate. At 30 Hz this is
@@ -69,12 +81,17 @@ DEFAULT_BODY_DELTA_LIMITS = body_delta_limits(1.0 / DEFAULT_STEP_HZ)
 def clip_body_delta(
     delta: np.ndarray,
     limits: Optional[np.ndarray] = None,
+    *,
+    forbid_backward: bool = False,
 ) -> np.ndarray:
     """Clamp a 4-D body delta to ±limits per axis. Rejects non-finite input.
 
     ``limits`` defaults to the continuous per-step cap at ``DEFAULT_STEP_HZ``.
     Callers that step at another rate should pass ``body_delta_limits(dt)`` so the
     displacement bound tracks ``dt``.
+
+    When ``forbid_backward`` is True, body ``dx`` is clamped to ``≥ 0`` (no rear
+    sensor → reverse flight is not a legal motion).
     """
     d = np.asarray(delta, dtype=np.float64).reshape(ACTION_DIM)
     if not np.isfinite(d).all():
@@ -82,7 +99,18 @@ def clip_body_delta(
     lim = np.asarray(
         DEFAULT_BODY_DELTA_LIMITS if limits is None else limits, dtype=np.float64
     ).reshape(ACTION_DIM)
-    return np.clip(d, -lim, lim)
+    out = np.clip(d, -lim, lim)
+    if forbid_backward:
+        out = forbid_backward_dx(out)
+    return out
+
+
+def forbid_backward_dx(delta: np.ndarray) -> np.ndarray:
+    """Clamp body-forward channel to ``dx ≥ 0`` (copy; no rear sensor)."""
+    d = np.asarray(delta, dtype=np.float64).reshape(ACTION_DIM).copy()
+    if d[0] < 0.0:
+        d[0] = 0.0
+    return d
 
 
 def body_delta_to_velocity_ned(

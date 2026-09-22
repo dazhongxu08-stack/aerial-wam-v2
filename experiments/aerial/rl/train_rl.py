@@ -84,33 +84,107 @@ class HeuristicPolicy:
 class Phase2CollectionPolicy:
     """Phase-2 data collection: learned AC + toward_g outer loop.
 
-    Before each act(), clips the episode goal G to r_m along the P→G ray and
-    writes the result to obs.info["goal"].  goal_rel_from_obs() (used by the
-    corrector's imagination update) then returns the toward_g goal_rel, so
-    imagination training is automatically conditioned on the same distribution
-    as Phase-2 eval — no separate goal-attachment step needed.
+    Collector must call ``stamp_local_goal(obs)`` on the **live** Observation
+    *before* ``act_delta`` (same order as ``wam_phase2_long_eval``). That writes
+    the clipped subgoal to ``obs.info["goal"]`` so planner / WM ``goal_rel`` /
+    buffer stamps / imagination all see toward_g — not only the frozen
+    ``PolicyObservation`` inside ``act()``.
+
+    Uses ``TowardGoalIntent`` (depth-adaptive ``r`` + ``safe_speed_limit``) so
+    train collect matches gate eval's outer loop.
     """
 
-    def __init__(self, inner: Any, goal_getter: Any, r_m: float = 100.0) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        goal_getter: Any,
+        r_m: float = 100.0,
+        *,
+        cruise_speed: float = 10.0,
+        d_danger: float = 3.0,
+        d_clear: float = 22.0,
+        min_creep_speed: float = 1.0,
+    ) -> None:
+        from experiments.aerial.rl.scene_intent import TowardGoalIntent
+
         self._inner = inner
         self._goal_getter = goal_getter
         self._r_m = float(r_m)
+        self._intent = TowardGoalIntent(
+            r_m=float(r_m),
+            mode="toward_g",
+            cruise_speed=float(cruise_speed),
+            d_danger=float(d_danger),
+            d_clear=float(d_clear),
+            min_creep_speed=float(min_creep_speed),
+        )
+        self._last_target: Optional[np.ndarray] = None
+        self._last_safe_speed: float = float(cruise_speed)
 
     def reset(self) -> None:
+        self._last_target = None
+        self._last_safe_speed = float(self._intent.cruise_speed)
+        self._intent.reset()
         if hasattr(self._inner, "reset"):
             self._inner.reset()
 
-    def act(self, obs: Any) -> np.ndarray:
-        from experiments.aerial.rl.scene_intent import clip_toward_goal
-
-        goal_G = self._goal_getter()
-        if goal_G is not None:
-            pos = np.asarray(obs.position, dtype=np.float64)
-            target = clip_toward_goal(pos, np.asarray(goal_G, dtype=np.float64), self._r_m)
-            # PolicyObservation is a frozen dataclass — bypass __setattr__.
-            # Mutable Observation: mutate info dict in place instead.
+    def _d_fwd_hat(self, obs: Any) -> Optional[float]:
+        info = getattr(obs, "info", None)
+        if not isinstance(info, dict):
+            return None
+        cones = info.get("depth_cones_pred")
+        if isinstance(cones, dict) and cones.get("forward") is not None:
             try:
-                object.__setattr__(obs, "goal", np.asarray(target, dtype=np.float64))
+                v = float(cones["forward"])
+                return v if np.isfinite(v) else None
+            except (TypeError, ValueError):
+                return None
+        raw = info.get("depth_min_pred")
+        if raw is None:
+            return None
+        try:
+            v = float(raw)
+            return v if np.isfinite(v) else None
+        except (TypeError, ValueError):
+            return None
+
+    def stamp_local_goal(self, obs: Any) -> Optional[np.ndarray]:
+        """Depth-adaptive toward_g carrot + safe_speed → live ``obs.info``."""
+        goal_G = self._goal_getter()
+        if goal_G is None:
+            self._last_target = None
+            return None
+        pos = np.asarray(obs.position, dtype=np.float64)
+        yaw = float(getattr(obs, "yaw", 0.0))
+        _g_rel, info = self._intent.compute(
+            pos,
+            yaw,
+            np.asarray(goal_G, dtype=np.float64),
+            d_fwd_hat=self._d_fwd_hat(obs),
+        )
+        target = np.asarray(info["target_world"], dtype=np.float64).reshape(3)
+        safe_v = float(info.get("safe_speed_limit", self._intent.cruise_speed))
+        obs_info = getattr(obs, "info", None)
+        if isinstance(obs_info, dict):
+            obs_info["goal"] = target.tolist()
+            obs_info["safe_speed_limit"] = safe_v
+            obs_info["r_lookahead"] = info.get("r_lookahead")
+            if info.get("yaw_err_rad") is not None:
+                obs_info["yaw_err_rad"] = float(info["yaw_err_rad"])
+        self._last_target = target.copy()
+        self._last_safe_speed = safe_v
+        return self._last_target
+
+    def act(self, obs: Any) -> np.ndarray:
+        # Prefer collector-stamped target; fall back to intent if stamp was skipped.
+        target = self._last_target
+        if target is None:
+            self.stamp_local_goal(obs)
+            target = self._last_target
+        if target is not None:
+            target = np.asarray(target, dtype=np.float64).reshape(3)
+            try:
+                object.__setattr__(obs, "goal", target)
             except (AttributeError, TypeError):
                 info = getattr(obs, "info", None)
                 if isinstance(info, dict):
@@ -148,6 +222,8 @@ def _build_env(env_cfg: Any) -> Any:
             step_hz=float(_get(env_cfg, "step_hz", 30.0)),
             health_check=bool(_get(env_cfg, "health_check", True)),
             grab_depth=bool(_get(env_cfg, "grab_depth", True)),
+            fanout_rgb=bool(_get(env_cfg, "fanout_rgb", False)),
+            wam_encode_size=int(_get(env_cfg, "wam_encode_size", 224)),
         ))
     raise ValueError(f"unknown env backend {backend!r} (expected mock|airsim)")
 
@@ -184,6 +260,22 @@ def _build_dynamics(dyn_cfg: Any, *, success_dist_m: float, wm_cfg: Any = None) 
             ) from exc
         return TorchRSSMDynamics.from_config(wm_cfg or {})
     raise ValueError(f"unknown dynamics kind {kind!r} (expected stub|wan|torch)")
+
+
+def bind_loaded_dynamics(loop: Any, dynamics: Any) -> None:
+    """Point loop + collector (+ planner) at the same loaded WM instance.
+
+    ``build_from_config`` may construct a randomly-init torch WM; after
+    ``load_torch_dynamics`` the collect / shield / imagination path must share
+    the loaded weights (2026-09-20 dual-WM audit).
+    """
+    loop.dynamics = dynamics
+    collector = getattr(loop, "collector", None)
+    if collector is not None:
+        collector.dynamics = dynamics
+        planner = getattr(collector, "planner", None)
+        if planner is not None and hasattr(planner, "dynamics"):
+            planner.dynamics = dynamics
 
 
 def load_torch_dynamics(
@@ -247,9 +339,19 @@ def _build_safety(safety_cfg: Any) -> Any:
             min_tau_s=float(_get(safety_cfg, "min_tau_s", 1.0)),
             max_p_coll=float(_get(safety_cfg, "max_p_coll", 0.5)),
             retreat_step_m=float(_get(safety_cfg, "retreat_step_m", 3.0)),
+            retreat_max_dyaw_rad=float(_get(safety_cfg, "retreat_max_dyaw_rad", 0.0)),
+            retreat_max_cum_yaw_rad=float(
+                _get(safety_cfg, "retreat_max_cum_yaw_rad", 0.70)
+            ),
+            retreat_max_head_vs_goal_rad=float(
+                _get(safety_cfg, "retreat_max_head_vs_goal_rad", 1.047)
+            ),
             tti_coeff=float(_get(safety_cfg, "tti_coeff", 4.0)),
             tti_hysteresis_release_frac=float(
                 _get(safety_cfg, "tti_hysteresis_release_frac", 0.0)
+            ),
+            exclusion_forward_only=bool(
+                _get(safety_cfg, "exclusion_forward_only", False)
             ),
         )
     raise ValueError(f"unknown safety kind {kind!r}")
@@ -301,11 +403,15 @@ def _build_planner(cfg: Any, dynamics: Any, reward_cfg: RewardConfig) -> Optiona
 
     step_hz = float(_get(_get(cfg, "env", {}), "step_hz", DEFAULT_STEP_HZ))
     limits = body_delta_limits(1.0 / step_hz)
+    rollout_mode = str(_get(pc, "rollout_mode", "open_loop") or "open_loop")
     return ImaginationPlanner(
         dynamics,
         horizon=int(_get(pc, "horizon", 5)),
         reward_cfg=reward_cfg,
         action_limits=limits,
+        rollout_mode=rollout_mode,
+        # closed_loop tail_policy wired after actor warm-start in train_v4_ac.
+        tail_policy=None,
     )
 
 
@@ -458,12 +564,44 @@ def build_from_config(cfg: Any) -> SerialCorrectorLoop:
         w_progress=float(_get(rc, "w_progress", 1.0)),
         w_collision=float(_get(rc, "w_collision", 10.0)),
         w_maneuver=w_maneuver,
+        # Shield-intervention cost (default 0 = no-op). Must be read here —
+        # train_v4_ac --w-intervention only writes cfg["reward"]; dropping it
+        # from RewardConfig construction silently zeroed every e5/clearrisk run
+        # (diagnosed 2026-09-20 full-path audit).
+        w_intervention=float(_get(rc, "w_intervention", 0.0)),
+        # Imag hard-brake band: prefer reward override, else safety.exclusion_m.
+        hard_brake_depth_m=float(
+            _get(
+                rc,
+                "hard_brake_depth_m",
+                _get(_get(cfg, "safety", {}), "exclusion_m", 3.0),
+            )
+        ),
         # F15 efficiency (default 0 = no-op until DECLARE short-train overrides).
         w_eff_strafe=float(_get(rc, "w_eff_strafe", 0.0)),
         w_eff_heading=float(_get(rc, "w_eff_heading", 0.0)),
         w_eff_idle=float(_get(rc, "w_eff_idle", 0.0)),
         eff_strafe_thr=float(_get(rc, "eff_strafe_thr", 0.5)),
         eff_idle_ds_thr_m=float(_get(rc, "eff_idle_ds_thr_m", 0.05)),
+        # Directional OA + path shaping (2026-09-21 plan); default 0 / False = no-op.
+        w_straight=float(_get(rc, "w_straight", 0.0)),
+        w_idle_body=float(_get(rc, "w_idle_body", 0.0)),
+        w_away=float(_get(rc, "w_away", 0.0)),
+        w_level_flight=float(_get(rc, "w_level_flight", 0.0)),
+        w_backward=float(_get(rc, "w_backward", 0.0)),
+        forbid_backward_motion=bool(_get(rc, "forbid_backward_motion", False)),
+        idle_body_trans_thr_m=float(_get(rc, "idle_body_trans_thr_m", 0.05)),
+        yaw_align_cos_thr=float(_get(rc, "yaw_align_cos_thr", 0.5)),
+        goal_ahead_cos_thr=float(_get(rc, "goal_ahead_cos_thr", 0.0)),
+        gate_progress_by_heading=bool(_get(rc, "gate_progress_by_heading", False)),
+        level_window=int(_get(rc, "level_window", 5)),
+        level_dz_thr_m=float(_get(rc, "level_dz_thr_m", 0.05)),
+        level_dyaw_thr_rad=float(_get(rc, "level_dyaw_thr_rad", 0.05)),
+        use_learned_obstacle_cost=bool(_get(rc, "use_learned_obstacle_cost", False)),
+        obstacle_cost_ceiling=float(_get(rc, "obstacle_cost_ceiling", 1.0)),
+        blend_clearance_risk=bool(_get(rc, "blend_clearance_risk", False)),
+        near_miss_d_fwd_m=float(_get(rc, "near_miss_d_fwd_m", 3.0)),
+        near_miss_d_clear_m=float(_get(rc, "near_miss_d_clear_m", 12.0)),
         # Online arrival/termination radius — tighter than the eval SR metric
         # (EVAL_SUCCESS_DIST_M=20 m); falls back to the tight online default.
         success_dist_m=float(_get(rc, "success_dist_m", DEFAULT_ONLINE_SUCCESS_DIST_M)),
@@ -520,6 +658,9 @@ def build_from_config(cfg: Any) -> SerialCorrectorLoop:
         safety=_build_safety(_get(cfg, "safety", {})),
         max_steps=int(_get(cc, "max_steps", 200)),
         target_hz=float(_get(_get(cfg, "env", {}), "step_hz", 30.0)),
+        min_spawn_z=float(_get(cc, "min_spawn_z", 0.0)),
+        spawn_z_retry_m=float(_get(cc, "spawn_z_retry_m", 0.0)),
+        spawn_z_max_retries=int(_get(cc, "spawn_z_max_retries", 0)),
         depth_predictor=_build_depth_predictor(_get(cfg, "world_model", {})),
         tau_predictor=_build_tau_predictor(_get(cfg, "tau_predictor", {})),
         planner=planner,

@@ -73,12 +73,23 @@ def advance_goal_rel_body(
 ) -> np.ndarray:
     """Update body-frame ``goal_rel`` after one body-delta action (imagination aux).
 
-    Matches the stub WM kinematic convention: ``action[:3]`` is the body-frame
-    displacement applied this step; remaining distance is ``||g_body||``.
+    Order matches one control step: subtract body displacement in the frame at
+    the start of the step, then rotate the remaining vector by ``-dyaw`` so the
+    goal stays in the body frame after the yaw change. Remaining distance is
+    ``||g_body||``.
     """
     g = np.asarray(goal_rel, dtype=np.float64).reshape(GOAL_REL_DIM).copy()
-    disp = np.asarray(action, dtype=np.float64).reshape(4)[:3]
+    a = np.asarray(action, dtype=np.float64).reshape(4)
+    disp = a[:3]
+    dyaw = float(a[3]) if a.size > 3 else 0.0
     g[:3] = g[:3] - disp
+    if abs(dyaw) > 1e-12:
+        c = float(np.cos(dyaw))
+        s = float(np.sin(dyaw))
+        # Body yawed +dyaw (CCW) ⇒ fixed world vector rotates by -dyaw in body.
+        fwd, left = float(g[0]), float(g[1])
+        g[0] = c * fwd + s * left
+        g[1] = -s * fwd + c * left
     g[3] = float(np.linalg.norm(g[:3]))
     return g.astype(np.float32, copy=False)
 
@@ -246,3 +257,20 @@ def attach_goal(transitions: List[Transition], goal: Optional[np.ndarray]) -> No
             if tr.next_obs.info is None:
                 tr.next_obs.info = {}
             tr.next_obs.info["goal"] = g.copy()
+
+
+def attach_goals_per_step(transitions: List[Transition], goals: np.ndarray) -> None:
+    """Stamp per-frame ``goals[i]`` onto each transition (polyline carrot FT)."""
+    g = np.asarray(goals, dtype=np.float32).reshape(-1, 3)
+    if len(g) != len(transitions):
+        raise ValueError(f"goals rows {len(g)} != transitions {len(transitions)}")
+    for i, tr in enumerate(transitions):
+        gi = g[i].copy()
+        tr.info["goal"] = gi
+        if tr.obs.info is None:
+            tr.obs.info = {}
+        tr.obs.info["goal"] = gi.copy()
+        if tr.next_obs is not None:
+            if tr.next_obs.info is None:
+                tr.next_obs.info = {}
+            tr.next_obs.info["goal"] = gi.copy()

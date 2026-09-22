@@ -43,6 +43,13 @@ class DynamicsOutput:
     progress: float
     done: bool
     arrived: bool = False
+    #: Optional forward/center clearance (metres) decoded from the latent
+    #: (depth-aux WM). Legacy imagination path; main OA reward prefers
+    #: ``obstacle_cost`` when the directional head is trained.
+    d_fwd_hat: Optional[float] = None
+    #: Action-conditioned obstacle cost from ``feature=[h‖z]`` + action.
+    #: ``None`` when the head is absent / not yet trained (do not invent risk).
+    obstacle_cost: Optional[float] = None
 
 
 class LatentDynamics(abc.ABC):

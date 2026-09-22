@@ -25,12 +25,13 @@ def test_bare_config_default_is_tight_online_radius_not_eval():
     assert terms["arrived"] == 0.0
 
 
-def _obs(pos, collided=False):
+def _obs(pos, collided=False, info=None):
     state = np.array([pos[0], pos[1], pos[2], 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
     return Observation(
         rgb=np.zeros((4, 4, 3), np.uint8),
         state=state,
         collided=collided,
+        info=info or {},
     )
 
 
@@ -179,7 +180,7 @@ def test_reward_terms_subtract_efficiency():
 
 
 def test_efficiency_heading_penalizes_yaw_err_while_maneuvering():
-    """F15: |yaw_err| × 1{|dx|+|dy|>ε} — not gated on strafe ratio alone."""
+    """F15: |yaw_err| × 1{|dx|+|dy|+|dyaw|>ε} — pure turn also sees heading."""
     from experiments.aerial.rl.reward import efficiency_cost
 
     cfg = RewardConfig(w_eff_heading=1.0, w_eff_strafe=0.0, w_eff_idle=0.0)
@@ -192,12 +193,53 @@ def test_efficiency_heading_penalizes_yaw_err_while_maneuvering():
     )
     assert thrust["heading_term"] == pytest.approx(0.5)
     assert thrust["efficiency_cost"] == pytest.approx(0.5)
-    # Idle (no planar motion) → heading term off.
-    idle = efficiency_cost(
+    # Pure yaw turn also pays heading (face-goal path).
+    turn = efficiency_cost(
         np.array([0.0, 0.0, 0.0, 0.1]),
+        yaw_err_rad=0.5,
+        ds_true_m=0.0,
+        cfg=cfg,
+    )
+    assert turn["heading_term"] == pytest.approx(0.5)
+    assert turn["efficiency_cost"] == pytest.approx(0.5)
+    # True idle (zero action) → heading term off.
+    idle = efficiency_cost(
+        np.zeros(4),
         yaw_err_rad=0.5,
         ds_true_m=0.0,
         cfg=cfg,
     )
     assert idle["heading_term"] == pytest.approx(0.0)
     assert idle["efficiency_cost"] == pytest.approx(0.0)
+
+
+def test_clearance_risk_from_depth_piecewise():
+    from experiments.aerial.rl.reward import clearance_risk_from_depth
+
+    assert clearance_risk_from_depth(None) == 0.0
+    assert clearance_risk_from_depth(1.0) == pytest.approx(1.0)   # < d_danger
+    assert clearance_risk_from_depth(3.0) == pytest.approx(1.0)
+    assert clearance_risk_from_depth(22.0) == pytest.approx(0.0)
+    assert clearance_risk_from_depth(100.0) == pytest.approx(0.0)
+    # Mid-band: (22-12.5)/(22-3) = 9.5/19
+    assert clearance_risk_from_depth(12.5) == pytest.approx(9.5 / 19.0)
+    # At d≈5 (hard-route median) risk is still high → imag penalty usable
+    r5 = clearance_risk_from_depth(5.0)
+    assert r5 > 0.8
+    assert RewardConfig().w_collision * r5 > 5.0
+
+
+def test_navigation_reward_folds_depth_min_clearance():
+    """Real path mirrors imag: collision_risk = max(p_coll, clearance(depth_min))."""
+    from experiments.aerial.rl.reward import clearance_risk_from_depth
+
+    cfg = RewardConfig(w_progress=0.0, w_collision=10.0, w_maneuver=0.0)
+    r = NavigationReward(goal=None, cfg=cfg)
+    r.reset(goal=None, start_pos=np.zeros(3))
+    obs = _obs([0.0, 0.0, 0.0], info={"depth_min_pred": 5.0})
+    _, _, terms = r.step(obs, np.zeros(4), p_coll=0.0)
+    expect = clearance_risk_from_depth(5.0)
+    assert terms["clearance_risk"] == pytest.approx(expect)
+    assert terms["collision_risk"] == pytest.approx(expect)
+    assert terms["reward"] == pytest.approx(-10.0 * expect)
+

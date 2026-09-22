@@ -1,0 +1,1151 @@
+{
+  "protocol_version": "phase3_outdoor_complex_r09_panel_v1",
+  "scene": "outdoor_complex",
+  "n_episodes": 4,
+  "template": "R09_smoke_validated_interior",
+  "episodes": [
+    {
+      "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+      "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+      "action": [
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        9,
+        9,
+        9,
+        9,
+        4,
+        4,
+        2,
+        9,
+        9,
+        9,
+        9,
+        9,
+        3,
+        9,
+        5,
+        3,
+        1,
+        0
+      ],
+      "index_list": [
+        "20250119_061740_0",
+        "20250119_061741_1",
+        "20250119_061741_2",
+        "20250119_061742_3",
+        "20250119_061743_4",
+        "20250119_061744_5",
+        "20250119_061745_6",
+        "20250119_061746_7",
+        "20250119_061746_8",
+        "20250119_061747_9",
+        "20250119_061748_10",
+        "20250119_061750_13",
+        "20250119_061753_16",
+        "20250119_061756_19",
+        "20250119_061758_22",
+        "20250119_061759_23",
+        "20250119_061800_24",
+        "20250119_061801_25",
+        "20250119_061803_28",
+        "20250119_061806_31",
+        "20250119_061808_34",
+        "20250119_061811_37",
+        "20250119_061814_40",
+        "20250119_061814_41",
+        "20250119_061817_44",
+        "20250119_061818_45",
+        "20250119_061819_46",
+        "20250119_061820_47",
+        "20250119_061820_48"
+      ],
+      "pos": [
+        [
+          -927.4879714261815,
+          101.32306708096145,
+          12.0
+        ],
+        [
+          -939.4879714261815,
+          80.53845739013492,
+          12.0
+        ],
+        [
+          -943.9879714261815,
+          72.74422875607497,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          70.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          70.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          70.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          64.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          55.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          46.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          37.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          28.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          25.14615254472166,
+          12.0
+        ],
+        [
+          -948.4879714261815,
+          19.950000122015027,
+          12.0
+        ],
+        [
+          -949.9879714261815,
+          17.35192391066171,
+          12.0
+        ],
+        [
+          -949.9879714261815,
+          17.35192391066171,
+          12.0
+        ],
+        [
+          -949.9879714261815,
+          17.35192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          15.85192391066171,
+          12.0
+        ]
+      ],
+      "yaw": [
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037
+      ],
+      "variant_id": "r09_x+120_y+90",
+      "source_kind": "r09_translate",
+      "source_m1a20_idx": 8,
+      "source_route_label": "R09",
+      "route_id": "interior_route_01",
+      "route_idx": 0,
+      "base_route_idx": 8,
+      "category": "outdoor_complex",
+      "template": "r09_smoke_validated",
+      "scene": "outdoor_complex",
+      "map_id": "env_airsim_16",
+      "pose_source": "gt_proxy",
+      "complexity_meta": {
+        "m1a20_idx": 29,
+        "route_label": "R30",
+        "astar_category": "low_short_updown",
+        "spawn_pos": [
+          -927.488,
+          101.323,
+          12.0
+        ],
+        "spawn_z_m": 12.0,
+        "urban_region_ids": [
+          "urban_west_north"
+        ],
+        "interior_region_ids": [],
+        "water_region_ids": [],
+        "spawn_inland_m": 222.5,
+        "path_min_inland_m": 197.4,
+        "path_median_inland_m": 200.0,
+        "in_interior": false,
+        "nominal_length_m": 93.0,
+        "excluded_from_long16": false,
+        "complexity_score": 23.121,
+        "selection_basis": "urban_interior_inland",
+        "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+        "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+        "smoke_template": "R09"
+      }
+    },
+    {
+      "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+      "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+      "action": [
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        9,
+        9,
+        9,
+        9,
+        4,
+        4,
+        2,
+        9,
+        9,
+        9,
+        9,
+        9,
+        3,
+        9,
+        5,
+        3,
+        1,
+        0
+      ],
+      "index_list": [
+        "20250119_061740_0",
+        "20250119_061741_1",
+        "20250119_061741_2",
+        "20250119_061742_3",
+        "20250119_061743_4",
+        "20250119_061744_5",
+        "20250119_061745_6",
+        "20250119_061746_7",
+        "20250119_061746_8",
+        "20250119_061747_9",
+        "20250119_061748_10",
+        "20250119_061750_13",
+        "20250119_061753_16",
+        "20250119_061756_19",
+        "20250119_061758_22",
+        "20250119_061759_23",
+        "20250119_061800_24",
+        "20250119_061801_25",
+        "20250119_061803_28",
+        "20250119_061806_31",
+        "20250119_061808_34",
+        "20250119_061811_37",
+        "20250119_061814_40",
+        "20250119_061814_41",
+        "20250119_061817_44",
+        "20250119_061818_45",
+        "20250119_061819_46",
+        "20250119_061820_47",
+        "20250119_061820_48"
+      ],
+      "pos": [
+        [
+          -927.4879714261815,
+          71.32306708096145,
+          12.0
+        ],
+        [
+          -939.4879714261815,
+          50.53845739013492,
+          12.0
+        ],
+        [
+          -943.9879714261815,
+          42.744228756074975,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          40.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          40.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          40.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          34.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          25.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          16.14615254472166,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          7.146152544721659,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          -1.8538474552783413,
+          12.0
+        ],
+        [
+          -945.4879714261815,
+          -4.853847455278341,
+          12.0
+        ],
+        [
+          -948.4879714261815,
+          -10.049999877984973,
+          12.0
+        ],
+        [
+          -949.9879714261815,
+          -12.64807608933829,
+          12.0
+        ],
+        [
+          -949.9879714261815,
+          -12.64807608933829,
+          12.0
+        ],
+        [
+          -949.9879714261815,
+          -12.64807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -952.5860476375349,
+          -14.14807608933829,
+          12.0
+        ]
+      ],
+      "yaw": [
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037
+      ],
+      "variant_id": "r09_x+120_y+60",
+      "source_kind": "r09_translate",
+      "source_m1a20_idx": 8,
+      "source_route_label": "R09",
+      "route_id": "interior_route_02",
+      "route_idx": 1,
+      "base_route_idx": 8,
+      "category": "outdoor_complex",
+      "template": "r09_smoke_validated",
+      "scene": "outdoor_complex",
+      "map_id": "env_airsim_16",
+      "pose_source": "gt_proxy",
+      "complexity_meta": {
+        "m1a20_idx": 28,
+        "route_label": "R29",
+        "astar_category": "low_short_updown",
+        "spawn_pos": [
+          -927.488,
+          71.323,
+          12.0
+        ],
+        "spawn_z_m": 12.0,
+        "urban_region_ids": [
+          "urban_west_north"
+        ],
+        "interior_region_ids": [
+          "interior_west_north"
+        ],
+        "water_region_ids": [],
+        "spawn_inland_m": 222.5,
+        "path_min_inland_m": 174.0,
+        "path_median_inland_m": 174.7,
+        "in_interior": true,
+        "nominal_length_m": 93.0,
+        "excluded_from_long16": false,
+        "complexity_score": 26.4,
+        "selection_basis": "urban_interior_inland",
+        "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+        "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+        "smoke_template": "R09"
+      }
+    },
+    {
+      "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+      "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+      "action": [
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        9,
+        9,
+        9,
+        9,
+        4,
+        4,
+        2,
+        9,
+        9,
+        9,
+        9,
+        9,
+        3,
+        9,
+        5,
+        3,
+        1,
+        0
+      ],
+      "index_list": [
+        "20250119_061740_0",
+        "20250119_061741_1",
+        "20250119_061741_2",
+        "20250119_061742_3",
+        "20250119_061743_4",
+        "20250119_061744_5",
+        "20250119_061745_6",
+        "20250119_061746_7",
+        "20250119_061746_8",
+        "20250119_061747_9",
+        "20250119_061748_10",
+        "20250119_061750_13",
+        "20250119_061753_16",
+        "20250119_061756_19",
+        "20250119_061758_22",
+        "20250119_061759_23",
+        "20250119_061800_24",
+        "20250119_061801_25",
+        "20250119_061803_28",
+        "20250119_061806_31",
+        "20250119_061808_34",
+        "20250119_061811_37",
+        "20250119_061814_40",
+        "20250119_061814_41",
+        "20250119_061817_44",
+        "20250119_061818_45",
+        "20250119_061819_46",
+        "20250119_061820_47",
+        "20250119_061820_48"
+      ],
+      "pos": [
+        [
+          -957.4879714261815,
+          71.32306708096145,
+          12.0
+        ],
+        [
+          -969.4879714261815,
+          50.53845739013492,
+          12.0
+        ],
+        [
+          -973.9879714261815,
+          42.744228756074975,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          40.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          40.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          40.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          34.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          25.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          16.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          7.146152544721659,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          -1.8538474552783413,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          -4.853847455278341,
+          12.0
+        ],
+        [
+          -978.4879714261815,
+          -10.049999877984973,
+          12.0
+        ],
+        [
+          -979.9879714261815,
+          -12.64807608933829,
+          12.0
+        ],
+        [
+          -979.9879714261815,
+          -12.64807608933829,
+          12.0
+        ],
+        [
+          -979.9879714261815,
+          -12.64807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          -14.14807608933829,
+          12.0
+        ]
+      ],
+      "yaw": [
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037
+      ],
+      "variant_id": "r09_x+90_y+60",
+      "source_kind": "r09_translate",
+      "source_m1a20_idx": 8,
+      "source_route_label": "R09",
+      "route_id": "interior_route_04",
+      "route_idx": 3,
+      "base_route_idx": 8,
+      "category": "outdoor_complex",
+      "template": "r09_smoke_validated",
+      "scene": "outdoor_complex",
+      "map_id": "env_airsim_16",
+      "pose_source": "gt_proxy",
+      "complexity_meta": {
+        "m1a20_idx": 23,
+        "route_label": "R24",
+        "astar_category": "low_short_updown",
+        "spawn_pos": [
+          -957.488,
+          71.323,
+          12.0
+        ],
+        "spawn_z_m": 12.0,
+        "urban_region_ids": [
+          "urban_west_north"
+        ],
+        "interior_region_ids": [
+          "interior_west_north"
+        ],
+        "water_region_ids": [],
+        "spawn_inland_m": 192.5,
+        "path_min_inland_m": 167.5,
+        "path_median_inland_m": 170.0,
+        "in_interior": true,
+        "nominal_length_m": 93.0,
+        "excluded_from_long16": false,
+        "complexity_score": 25.023,
+        "selection_basis": "urban_interior_inland",
+        "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+        "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+        "smoke_template": "R09"
+      }
+    },
+    {
+      "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+      "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+      "action": [
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        9,
+        9,
+        9,
+        9,
+        4,
+        4,
+        2,
+        9,
+        9,
+        9,
+        9,
+        9,
+        3,
+        9,
+        5,
+        3,
+        1,
+        0
+      ],
+      "index_list": [
+        "20250119_061740_0",
+        "20250119_061741_1",
+        "20250119_061741_2",
+        "20250119_061742_3",
+        "20250119_061743_4",
+        "20250119_061744_5",
+        "20250119_061745_6",
+        "20250119_061746_7",
+        "20250119_061746_8",
+        "20250119_061747_9",
+        "20250119_061748_10",
+        "20250119_061750_13",
+        "20250119_061753_16",
+        "20250119_061756_19",
+        "20250119_061758_22",
+        "20250119_061759_23",
+        "20250119_061800_24",
+        "20250119_061801_25",
+        "20250119_061803_28",
+        "20250119_061806_31",
+        "20250119_061808_34",
+        "20250119_061811_37",
+        "20250119_061814_40",
+        "20250119_061814_41",
+        "20250119_061817_44",
+        "20250119_061818_45",
+        "20250119_061819_46",
+        "20250119_061820_47",
+        "20250119_061820_48"
+      ],
+      "pos": [
+        [
+          -957.4879714261815,
+          101.32306708096145,
+          12.0
+        ],
+        [
+          -969.4879714261815,
+          80.53845739013492,
+          12.0
+        ],
+        [
+          -973.9879714261815,
+          72.74422875607497,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          70.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          70.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          70.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          64.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          55.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          46.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          37.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          28.14615254472166,
+          12.0
+        ],
+        [
+          -975.4879714261815,
+          25.14615254472166,
+          12.0
+        ],
+        [
+          -978.4879714261815,
+          19.950000122015027,
+          12.0
+        ],
+        [
+          -979.9879714261815,
+          17.35192391066171,
+          12.0
+        ],
+        [
+          -979.9879714261815,
+          17.35192391066171,
+          12.0
+        ],
+        [
+          -979.9879714261815,
+          17.35192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ],
+        [
+          -982.5860476375349,
+          15.85192391066171,
+          12.0
+        ]
+      ],
+      "yaw": [
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.0943951023931953,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037,
+        -2.6179938779915037
+      ],
+      "variant_id": "r09_x+90_y+90",
+      "source_kind": "r09_translate",
+      "source_m1a20_idx": 8,
+      "source_route_label": "R09",
+      "route_id": "interior_route_05",
+      "route_idx": 4,
+      "base_route_idx": 8,
+      "category": "outdoor_complex",
+      "template": "r09_smoke_validated",
+      "scene": "outdoor_complex",
+      "map_id": "env_airsim_16",
+      "pose_source": "gt_proxy",
+      "complexity_meta": {
+        "m1a20_idx": 24,
+        "route_label": "R25",
+        "astar_category": "low_short_updown",
+        "spawn_pos": [
+          -957.488,
+          101.323,
+          12.0
+        ],
+        "spawn_z_m": 12.0,
+        "urban_region_ids": [
+          "urban_west_north"
+        ],
+        "interior_region_ids": [],
+        "water_region_ids": [],
+        "spawn_inland_m": 192.5,
+        "path_min_inland_m": 167.4,
+        "path_median_inland_m": 170.0,
+        "in_interior": false,
+        "nominal_length_m": 93.0,
+        "excluded_from_long16": false,
+        "complexity_score": 21.021,
+        "selection_basis": "urban_interior_inland",
+        "gpt_instruction": "Begin by ascending towards a large gray building characterized by a row of arched windows and rooftop structures . Continue straight ahead to encounter a similarly large gray radio or telecommunication antenna , notable for its tall metallic structure with a cylindrical base and overhead framework . Again , head upwards to another large gray building featuring antenna structures on its rooftop . Slightly turn left and go directly towards it . Slightly turn right and proceed forward to reach a large building with a gray and brown brick exterior and large windows . Slightly descend , then slightly turn right , continuing straight before stopping and descending further towards a medium - sized light gray commercial building , easily identified by its arched windows with black frames .",
+        "image_path": "env_airsim_16/astar_data/low_short_updown/2025-01-19_06-17-38_215421",
+        "smoke_template": "R09"
+      }
+    }
+  ],
+  "focus_routes": [
+    0,
+    1,
+    3,
+    4
+  ],
+  "subset_of": "experiments/aerial/phase3_unified/annotations/outdoor_complex_only.json"
+}

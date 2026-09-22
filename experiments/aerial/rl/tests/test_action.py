@@ -30,6 +30,18 @@ def test_clip_bounds_per_axis():
     assert clipped.shape == (ACTION_DIM,)
 
 
+def test_forbid_backward_clamps_dx():
+    from experiments.aerial.rl.env.action import forbid_backward_dx
+
+    back = np.array([-0.5, 0.2, 0.0, 0.1])
+    out = forbid_backward_dx(back)
+    assert out[0] == 0.0
+    assert out[1] == pytest.approx(0.2)
+    clipped = clip_body_delta(back, forbid_backward=True)
+    assert clipped[0] >= 0.0
+    assert clipped[0] == 0.0
+
+
 def test_per_step_cap_is_velocity_times_dt_not_macro():
     # The continuous cap is a 33 ms increment, NOT the 9 m macro-primitive span.
     dt = 1.0 / DEFAULT_STEP_HZ

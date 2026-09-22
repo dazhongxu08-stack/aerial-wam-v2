@@ -36,7 +36,14 @@ from experiments.aerial.rl.goal_features import (
     advance_goal_rel_body,
     analytic_progress,
 )
-from experiments.aerial.rl.reward import RewardConfig, efficiency_cost, reward_terms
+from experiments.aerial.rl.reward import (
+    RewardConfig,
+    clearance_m_along_action,
+    clearance_risk_from_depth,
+    efficiency_cost,
+    path_shaping_terms,
+    reward_terms,
+)
 
 MAX_IMAGINATION_HORIZON = 15  # §9 safety cap until WM error shown non-divergent
 
@@ -144,6 +151,7 @@ def imagine(
         goals_hist = None
 
     alive = np.ones(batch, dtype=bool)
+    level_flags = [[] for _ in range(batch)]
     for t in range(horizon):
         for b in range(batch):
             if not alive[b]:
@@ -158,6 +166,10 @@ def imagine(
                 a_clipped = np.clip(a, -lim, lim)
                 n_clipped += int(np.count_nonzero(a_clipped != a))
                 a = a_clipped
+            if bool(getattr(cfg, "forbid_backward_motion", False)):
+                from experiments.aerial.rl.env.action import forbid_backward_dx
+
+                a = forbid_backward_dx(a)
             step_kw: dict = {}
             if use_aux:
                 step_kw["goal_rel"] = goal_rel_t[b]
@@ -174,19 +186,87 @@ def imagine(
             maneuver = float(np.linalg.norm(a))
             # F15: body yaw-to-carrot + analytic progress as along-track proxy.
             yaw_err = 0.0
+            g_rel = np.zeros(GOAL_REL_DIM, dtype=np.float64)
             if goal_rel_t is not None:
-                gxy = np.asarray(goal_rel_t[b][:2], dtype=np.float64)
+                g_rel = np.asarray(goal_rel_t[b], dtype=np.float64).reshape(GOAL_REL_DIM)
+                gxy = g_rel[:2]
                 if float(np.linalg.norm(gxy)) > 1e-6:
                     yaw_err = float(np.arctan2(gxy[1], gxy[0]))
             eff = efficiency_cost(
                 a, yaw_err_rad=yaw_err, ds_true_m=float(prog), cfg=cfg,
             )
+            # Obstacle cost: prefer trained directional head; else legacy clearance.
+            if bool(getattr(cfg, "use_learned_obstacle_cost", False)):
+                oc = getattr(out, "obstacle_cost", None)
+                if oc is None or not np.isfinite(float(oc)):
+                    collision_risk = 0.0
+                else:
+                    collision_risk = float(oc)
+                if bool(getattr(cfg, "blend_clearance_risk", False)):
+                    # Match real NavigationReward: only blend clearance along the
+                    # dominant motion axis. Imagination has d_fwd_hat only — so
+                    # non-forward actions skip blend (trust directional head).
+                    d_hat = getattr(out, "d_fwd_hat", None)
+                    cones = (
+                        {"forward": float(d_hat)}
+                        if d_hat is not None and np.isfinite(float(d_hat))
+                        else {}
+                    )
+                    d_along = clearance_m_along_action(a, cones, d_hat)
+                    if d_along is not None:
+                        clear_risk = clearance_risk_from_depth(
+                            d_along,
+                            d_danger=float(getattr(cfg, "near_miss_d_fwd_m", 3.0)),
+                            d_clear=float(getattr(cfg, "near_miss_d_clear_m", 12.0)),
+                        )
+                        collision_risk = float(
+                            max(collision_risk, float(clear_risk))
+                        )
+                # Hard-contact analogue: high p_coll / done → ceiling (matches real).
+                ceiling = float(getattr(cfg, "obstacle_cost_ceiling", 1.0))
+                if float(getattr(out, "p_coll", 0.0) or 0.0) >= 1.0 - 1e-6:
+                    collision_risk = max(collision_risk, ceiling)
+                elif bool(getattr(out, "done", False)) and float(
+                    getattr(out, "p_coll", 0.0) or 0.0
+                ) >= 0.5:
+                    collision_risk = max(collision_risk, ceiling)
+            else:
+                d_hat = getattr(out, "d_fwd_hat", None)
+                clear_risk = clearance_risk_from_depth(d_hat)
+                collision_risk = float(max(float(out.p_coll), float(clear_risk)))
+            a_arr = np.asarray(a, dtype=np.float64).reshape(-1)
+            level_step = (
+                abs(float(a_arr[2]) if a_arr.size > 2 else 0.0) <= float(cfg.level_dz_thr_m)
+                and abs(float(a_arr[3]) if a_arr.size > 3 else 0.0) <= float(cfg.level_dyaw_thr_rad)
+                and float(prog) <= 0.0
+            )
+            level_flags[b].append(bool(level_step))
+            wlen = max(1, int(cfg.level_window))
+            if len(level_flags[b]) > wlen:
+                level_flags[b] = level_flags[b][-wlen:]
+            hist_level = len(level_flags[b]) >= wlen and all(level_flags[b])
+            shaping = path_shaping_terms(
+                a_arr, g_rel, float(prog), hist_level=hist_level, cfg=cfg,
+            )
+            prog_eff = float(shaping.get("progress_eff", prog))
             r = reward_terms(
-                prog, out.p_coll, maneuver, cfg,
+                prog_eff, collision_risk, maneuver, cfg,
                 efficiency_cost_val=float(eff["efficiency_cost"]),
+                path_shaping_val=float(shaping["path_shaping"]),
             )["reward"]
-            # Mirror NavigationReward.step: arrival earns the same success bonus,
-            # so imagined and real returns are on one scale (spec reward §4.5).
+            # Intervention proxy only on legacy clearance path (shield analogue).
+            hard_m = float(getattr(cfg, "hard_brake_depth_m", 3.0) or 3.0)
+            d_hat = getattr(out, "d_fwd_hat", None)
+            if (
+                not bool(getattr(cfg, "use_learned_obstacle_cost", False))
+                and float(cfg.w_intervention) > 0.0
+                and d_hat is not None
+            ):
+                try:
+                    if float(d_hat) <= hard_m:
+                        r -= float(cfg.w_intervention)
+                except (TypeError, ValueError):
+                    pass
             if getattr(out, "arrived", False):
                 r += cfg.success_bonus
             rews[b, t] = r

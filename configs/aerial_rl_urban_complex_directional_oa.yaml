@@ -1,0 +1,49 @@
+# Directional OA overlay (plan 2026-09-21). Deep-merge onto the urban p2c base:
+#
+#   python -m experiments.aerial.rl.train_v4_ac \
+#     --config configs/aerial_rl_urban_complex_p2c.yaml \
+#     --config-overlay configs/aerial_rl_urban_complex_directional_oa.yaml \
+#     --no-planner --no-shield ...
+#
+# Enable ONLY after task-5 gate passes and WM ckpt has obstacle_cost_trained=true.
+# Startup refuses use_learned_obstacle_cost without that flag.
+
+reward:
+  w_progress: 1.0
+  w_collision: 2.0
+  w_maneuver: 0.01
+  w_intervention: 0.0
+  # Zero legacy F15 so they do not stack with new idle/away.
+  w_eff_strafe: 0.0
+  w_eff_heading: 0.0
+  w_eff_idle: 0.0
+  w_straight: 0.5
+  w_idle_body: 0.5
+  w_away: 1.0
+  w_level_flight: 0.3
+  w_backward: 5.0
+  # No rear sensor: never execute/imagine body dx<0 (yaw/strafe/climb only).
+  forbid_backward_motion: true
+  idle_body_trans_thr_m: 0.05
+  yaw_align_cos_thr: 0.5
+  goal_ahead_cos_thr: 0.0
+  gate_progress_by_heading: true
+  level_window: 5
+  level_dz_thr_m: 0.05
+  level_dyaw_thr_rad: 0.05
+  use_learned_obstacle_cost: true
+  obstacle_cost_ceiling: 1.0
+  # Plug head under-report with *action-aligned* cone clearance (not always fwd).
+  blend_clearance_risk: true
+  near_miss_d_fwd_m: 3.0
+  near_miss_d_clear_m: 12.0
+  success_bonus: 10.0
+  success_dist_m: 3.0
+
+safety:
+  kind: null
+
+planner:
+  enable: false
+  # Set true + rollout_mode closed_loop via CLI for deploy-aligned collect.
+  rollout_mode: open_loop

@@ -357,3 +357,31 @@ def test_from_config_reads_coll_geom_keys():
     assert m.coll_hinge_fwd_max_m == pytest.approx(4.5)
     assert m.coll_fwd_depth_aux_weight == pytest.approx(0.6)
 
+
+def test_d_fwd_hat_gated_until_depth_decoder_trained():
+    """Random-init depth_decoder must not emit d_fwd_hat (OA reward noise)."""
+    import tempfile
+    from pathlib import Path
+
+    m = TorchRSSMDynamics(image_size=16, device="cpu", recurrent_dim=16, stoch_dim=4, stoch_classes=4)
+    assert m.depth_decoder_trained is False
+    z = np.zeros(m.latent_dim, dtype=np.float64)
+    a = np.zeros(4, dtype=np.float64)
+    out = m.step(z, a)
+    assert out.d_fwd_hat is None
+
+    m.depth_decoder_trained = True
+    out2 = m.step(z, a)
+    # Flag on → decoder runs; median may be finite or None if no positive patch.
+    assert out2.d_fwd_hat is None or float(out2.d_fwd_hat) > 0.0
+
+    # Checkpoint without depth_decoder.* leaves the flag False.
+    bare = {k: v for k, v in m.state_dict().items() if not k.startswith("depth_decoder.")}
+    path = Path(tempfile.mkdtemp()) / "wm.pt"
+    torch.save({"model": bare, "step": 0}, path)
+    m2 = TorchRSSMDynamics(image_size=16, device="cpu", recurrent_dim=16, stoch_dim=4, stoch_classes=4)
+    payload = m2.load_checkpoint(str(path))
+    assert payload["depth_decoder_trained"] is False
+    assert m2.depth_decoder_trained is False
+    assert m2.step(z, a).d_fwd_hat is None
+

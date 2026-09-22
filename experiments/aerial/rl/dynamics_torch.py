@@ -946,6 +946,7 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         beta_dyn: float = BETA_DYN,
         beta_rep: float = BETA_REP,
         beta_reward: float = 1.0,
+        beta_depth: float = 1.0,
         unimix: float = 0.01,
         lr: float = 1e-4,
         grad_clip: float = 1000.0,
@@ -979,6 +980,7 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         self.beta_dyn = float(beta_dyn)
         self.beta_rep = float(beta_rep)
         self.beta_reward = float(beta_reward)
+        self.beta_depth = float(beta_depth)
         self.grad_clip = float(grad_clip)
         self.train_steps_per_update = int(train_steps_per_update)
         self.decoder_train_only = bool(decoder_train_only)
@@ -999,6 +1001,17 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             spatial //= 2
         self.decoder = _RGBDecoder(feature_dim, self.encoder.flat_dim, spatial,
                                    out_ch=rgb_channels)
+        # Depth-reconstruction AUX head (2026-09-20, B'-1 gate follow-up): the
+        # RGB-recon-only objective above leaves z without geometry (measured —
+        # see wam_latent_depth_probe*.json, readout="weak_geometry" on every WM
+        # trained before this). Never fed to the policy (spec §1.2 stays RGB+
+        # proprio-only via PolicyObservation); this decoder only exists to force
+        # the encoder/RSSM to make z depth-decodable during training, TRAIN-ONLY
+        # like ``self.decoder`` above. Skipped automatically when a batch has no
+        # GT depth (``wm_data.windows_to_arrays`` omits the key; see
+        # ``training_loss``), so mixed depth/no-depth corpora train safely.
+        self.depth_decoder = _RGBDecoder(feature_dim, self.encoder.flat_dim, spatial,
+                                          out_ch=1)
         # Reward ≈ NavigationReward progress (Δdist to goal) needs goal + *realized*
         # motion. r60 actions are near-constant and overshoot early-horizon
         # displacement; body velocity × dt recovers it. Aux features are
@@ -1022,6 +1035,13 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         )
         self.continue_head = nn.Linear(feature_dim, 1)
         self.coll_head = nn.Linear(feature_dim, 1)
+        # Directional obstacle cost: feature=[h‖z] + action → scalar ≥ 0.
+        # Online reward uses this only when ``obstacle_cost_trained`` is True.
+        self.obstacle_cost_head = nn.Sequential(
+            nn.Linear(feature_dim + int(action_dim), hidden_dim), nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.obstacle_cost_trained: bool = False
 
         self.register_buffer(
             "bins", torch.linspace(float(bin_lo), float(bin_hi), int(num_bins)))
@@ -1032,6 +1052,49 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         # Optional imagination aux cache (V4): used when :meth:`step` kwargs omitted.
         self._imagine_goal_rel: Optional[np.ndarray] = None
         self._imagine_body_vel: Optional[np.ndarray] = None
+        # Set True in load_checkpoint when depth_decoder.* weights actually load.
+        # Random-init decoder must NOT emit d_fwd_hat (silent OA reward noise).
+        self.depth_decoder_trained: bool = False
+
+    def predict_obstacle_cost(
+        self,
+        feature: Any,
+        action: Any,
+    ) -> float:
+        """Scalar obstacle cost from packed ``feature=[h‖z]`` and body action.
+
+        Softplus so the cost is ≥ 0. Returns 0 when the head is not marked
+        trained (random weights must not enter the reward). Feature width must
+        equal ``latent_dim`` (= recurrent ‖ z_flat); silent z-only is rejected.
+        """
+        if not bool(getattr(self, "obstacle_cost_trained", False)):
+            return 0.0
+        feat = torch.as_tensor(feature, device=self.device, dtype=self.torch_dtype)
+        act = torch.as_tensor(action, device=self.device, dtype=self.torch_dtype)
+        if feat.ndim == 1:
+            feat = feat.unsqueeze(0)
+        if act.ndim == 1:
+            act = act.unsqueeze(0)
+        feat = feat.reshape(feat.shape[0], -1)
+        if int(feat.shape[-1]) != int(self.latent_dim):
+            raise ValueError(
+                f"predict_obstacle_cost expects feature width latent_dim="
+                f"{self.latent_dim} ([h‖z]), got {int(feat.shape[-1])}"
+            )
+        act = act.reshape(feat.shape[0], -1)[:, : int(self.action_dim)]
+        if act.shape[-1] < int(self.action_dim):
+            pad = torch.zeros(
+                act.shape[0], int(self.action_dim) - act.shape[-1],
+                device=self.device, dtype=self.torch_dtype,
+            )
+            act = torch.cat([act, pad], dim=-1)
+        inp = torch.cat([feat, act], dim=-1)
+        raw = self.obstacle_cost_head(inp).squeeze(-1)
+        return float(F.softplus(raw).mean().item())
+
+    def mark_obstacle_cost_trained(self, trained: bool = True) -> None:
+        """Explicit gate for online reward / imagination (never infer from keys)."""
+        self.obstacle_cost_trained = bool(trained)
 
     # -- factory (FastWAM from_config idiom) ---------------------------------
     @classmethod
@@ -1059,6 +1122,7 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             beta_dyn=float(scales.get("dyn", BETA_DYN)) if isinstance(scales, dict) else BETA_DYN,
             beta_rep=float(scales.get("rep", BETA_REP)) if isinstance(scales, dict) else BETA_REP,
             beta_reward=float(scales.get("reward", 1.0)) if isinstance(scales, dict) else 1.0,
+            beta_depth=float(scales.get("depth", 1.0)) if isinstance(scales, dict) else 1.0,
             lr=float(g("lr", 1e-4)),
             grad_clip=float(g("grad_clip", 1000.0)),
             train_steps_per_update=int(g("train_steps_per_update", 1)),
@@ -1160,6 +1224,30 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         recon_target = rgb_target.reshape(B * L, *recon.shape[1:])
         loss_recon = F.mse_loss(recon, recon_target)
 
+        # Depth-reconstruction AUX (train-only; never in the online step/act
+        # path — see __init__ comment). ``sample["depth"]`` is present only when
+        # every frame in the batch carries GT depth (wm_data.windows_to_arrays);
+        # symlog-compress before MSE so near (~1m) and far (~100m+) pixels don't
+        # get wildly unequal gradient scale (mirrors the reward two-hot's symlog
+        # target, §1.5).
+        depth_sample = sample.get("depth")
+        if depth_sample is not None:
+            depth_gt = depth_sample.to(self.torch_dtype).reshape(B * L, *depth_sample.shape[2:])
+            depth_pred = self.depth_decoder(feature.reshape(B * L, -1)).squeeze(1)
+            if depth_pred.shape[-2:] != depth_gt.shape[-2:]:
+                depth_pred = F.interpolate(
+                    depth_pred.unsqueeze(1), size=depth_gt.shape[-2:],
+                    mode="bilinear", align_corners=False,
+                ).squeeze(1)
+            valid = torch.isfinite(depth_gt) & (depth_gt > 0.0) & (depth_gt < 200.0)
+            if bool(valid.any()):
+                target = _symlog(depth_gt)
+                loss_depth_aux = F.mse_loss(depth_pred[valid], target[valid])
+            else:
+                loss_depth_aux = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+        else:
+            loss_depth_aux = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+
         # Goal+velocity-conditioned reward: same concat timing as :meth:`step`.
         act = action.to(self.torch_dtype)
         reward_logits = self._reward_logits(feature, act, goal_rel, body_vel)
@@ -1176,6 +1264,7 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         # MSE on 224² frames otherwise dwarfs reward CE; V1-② fidelity needs it).
         loss_pred = (
             loss_recon + self.beta_reward * loss_reward + loss_cont + loss_coll
+            + self.beta_depth * loss_depth_aux
         )
 
         # -- dynamics / representation KL (βdyn / βrep) ---------------------
@@ -1199,6 +1288,8 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             "loss_rep": float(loss_rep.detach().item()),
             "loss_recon": float(loss_recon.detach().item()),
             "loss_reward": float(loss_reward.detach().item()),
+            "loss_depth_aux": float(loss_depth_aux.detach().item()),
+            "has_depth_batch": bool(depth_sample is not None),
             "recon_err": float(loss_recon.detach().item()),
             "post_entropy": float(ent.item()),
             "post_entropy_frac": float(ent.item() / max_ent) if max_ent > 0 else 0.0,
@@ -1450,11 +1541,42 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         cont = float(torch.sigmoid(self.continue_head(feature)).item())
         done = bool(cont < 0.5 or p_coll >= 1.0)
 
+        # Depth-aux clearance readout (train-time decoder reused at imagination
+        # time — never fed to the policy). Centre-patch median of the symexp'd
+        # depth map ≈ forward clearance. Only emit when checkpoint actually
+        # loaded depth_decoder.* — pre-aux / random-init weights would inject
+        # garbage clearance_risk into OA rewards (2026-09-21 audit).
+        d_fwd_hat: Optional[float] = None
+        depth_dec = getattr(self, "depth_decoder", None)
+        if depth_dec is not None and bool(getattr(self, "depth_decoder_trained", False)):
+            depth_sym = depth_dec(feature).squeeze(0).squeeze(0)  # [H, W] or [1,H,W]
+            if depth_sym.ndim == 3:
+                depth_sym = depth_sym[0]
+            depth_m = _symexp(depth_sym)
+            hh, ww = int(depth_m.shape[-2]), int(depth_m.shape[-1])
+            y0, y1 = hh // 3, 2 * hh // 3
+            x0, x1 = ww // 3, 2 * ww // 3
+            patch = depth_m[y0:y1, x0:x1].reshape(-1)
+            finite = patch[torch.isfinite(patch) & (patch > 0)]
+            if finite.numel() > 0:
+                d_fwd_hat = float(finite.median().item())
+
+        obstacle_cost: Optional[float] = None
+        if bool(getattr(self, "obstacle_cost_trained", False)):
+            inp = torch.cat([feature, a], dim=-1)
+            obstacle_cost = float(F.softplus(self.obstacle_cost_head(inp)).reshape(-1)[0].item())
+
         h_next = self.rssm.advance_h(h, z_flat, a)
         z_next = self.rssm._sample(self.rssm.prior_probs(h_next))
         packed_next = torch.cat([h_next, z_next], dim=-1).squeeze(0).float().cpu().numpy()
         return DynamicsOutput(
-            z_next=packed_next, p_coll=p_coll, progress=progress, done=done, arrived=False,
+            z_next=packed_next,
+            p_coll=p_coll,
+            progress=progress,
+            done=done,
+            arrived=False,
+            d_fwd_hat=d_fwd_hat,
+            obstacle_cost=obstacle_cost,
         )
 
     # -- checkpoint I/O (FastWAM idiom: path + optional optimizer/step) ------
@@ -1464,6 +1586,14 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             "model": self.state_dict(),
             "step": step,
             "torch_dtype": str(self.torch_dtype),
+            # Explicit flags — presence of head keys ≠ trained (architecture
+            # always includes obstacle_cost_head after 2026-09-21).
+            "obstacle_cost_trained": bool(
+                getattr(self, "obstacle_cost_trained", False)
+            ),
+            "depth_decoder_trained": bool(
+                getattr(self, "depth_decoder_trained", False)
+            ),
         }
         opt = optimizer if optimizer is not None else self.optimizer
         if opt is not None:
@@ -1478,6 +1608,26 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             payload["load_skipped"] = skipped
             payload["load_missing"] = list(missing)
             payload["load_unexpected"] = list(unexpected)
+            n_depth = sum(1 for k in filtered if k.startswith("depth_decoder."))
+            # Depth decoder still uses key-presence (legacy aux WMs omit the
+            # module entirely when untrained). Prefer explicit flag when set.
+            if "depth_decoder_trained" in payload:
+                self.depth_decoder_trained = bool(payload["depth_decoder_trained"])
+            else:
+                self.depth_decoder_trained = n_depth > 0
+            payload["depth_decoder_trained"] = bool(self.depth_decoder_trained)
+            payload["depth_decoder_keys_loaded"] = int(n_depth)
+            n_obs = sum(1 for k in filtered if k.startswith("obstacle_cost_head."))
+            payload["obstacle_cost_keys_loaded"] = int(n_obs)
+            # NEVER infer True from key presence alone — random-init heads are
+            # always in state_dict after architecture land.
+            if "obstacle_cost_trained" in payload:
+                self.obstacle_cost_trained = bool(payload["obstacle_cost_trained"])
+            else:
+                self.obstacle_cost_trained = False
+            if self.obstacle_cost_trained and n_obs == 0:
+                self.obstacle_cost_trained = False
+            payload["obstacle_cost_trained"] = bool(self.obstacle_cost_trained)
         opt = optimizer if optimizer is not None else self.optimizer
         if opt is not None and "optimizer" in payload:
             try:

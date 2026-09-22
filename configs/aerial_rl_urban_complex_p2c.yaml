@@ -1,0 +1,186 @@
+# Urban outdoor-complex online Phase-2 toward_g FT (125 · AirSim).
+#
+# Original WAM extension: warm-start phase2_toward_g, online --phase2 collect +
+# imagination update on R09 urban routes (train/deploy both toward_g r=100m).
+#
+#   bash experiments/aerial/scripts/train_urban_complex_p2c.sh
+
+scene_mix:
+  outdoor_prob: 1.0
+  indoor_prob: 0.0
+  cross_scene_in_episode: false
+  require_scene_tag: true
+
+scene_profiles:
+  outdoor_complex:
+    action_limits:
+      max_dx: 2.0
+      max_dy: 0.4
+      max_dz: 0.4
+      max_dyaw: 0.314
+    success_dist_m: 3.0
+    safety:
+      kind: three_zone
+      l1_m: 8.0
+      l2_m: 5.0
+      l3_m: 1.5
+      v1_m_s: 2.0
+      v2_m_s: 1.0
+      v_stop_m_s: 0.2
+      v_cruise_m_s: 10.0
+      a_max_m_s2: 2.5
+      delay_s: 0.2
+
+pose_contract:
+  pose_source_required: true
+  forbid_gt_world_pose_control: true
+  forbid_silent_gt_goal_rel: true
+  train_allow_gt_proxy: true
+  eval_allow_gt_proxy: false
+
+env:
+  backend: airsim
+  host: 127.0.0.1
+  port: 41451
+  camera: front_custom
+  vehicle: drone_1
+  width: 224
+  height: 224
+  step_hz: 5.0
+  grab_depth: false
+  health_check: true
+  seed: 0
+
+buffer:
+  capacity_episodes: 128
+  seed: 0
+
+reward:
+  w_progress: 1.0
+  w_collision: 10.0
+  w_maneuver: 0.01
+  # OA soft-zone / shield cost (declare-before-use). depthaux launcher also
+  # passes --w-intervention; keep yaml non-zero so bare train_v4_ac --config
+  # does not silently train with free interventions.
+  w_intervention: 0.1
+  # Human-like path shaping (F15): discourage side-fly / idle while progressing.
+  # Overridden further by train_urban_humanlike_p2c.sh CLI when set.
+  w_eff_strafe: 0.08
+  w_eff_heading: 0.08
+  w_eff_idle: 0.03
+  # Directional OA (plan 2026-09-21): defaults OFF here. After task-5 gate,
+  # use configs/aerial_rl_urban_complex_directional_oa.yaml (w_collision=1,
+  # use_learned_obstacle_cost=true, path-shaping weights, safety null).
+  w_straight: 0.0
+  w_idle_body: 0.0
+  w_away: 0.0
+  w_level_flight: 0.0
+  use_learned_obstacle_cost: false
+  success_bonus: 10.0
+  success_dist_m: 3.0
+
+dynamics:
+  kind: torch
+  latent_dim: 8
+  collide_radius_m: 2.0
+
+world_model:
+  # Depth-aux WM (encode_window geometry). Legacy RGB-only Aug-28 ckpt still
+  # loadable via --wm-ckpt / train_urban_complex_p2c.sh WM_REL override, but
+  # d_fwd_hat is gated off unless depth_decoder.* weights are present.
+  checkpoint_dir: experiments/aerial/rl/artifacts/wm_ckpt_depth_aux_long_20260920
+  device: cuda
+  # Match wam_phase2_long_eval / eval_urban_complex_toward_g_gate.sh (shield D̂ inputs).
+  depth_head:
+    enable: true
+    checkpoint_path: experiments/aerial/rl/artifacts/depth_ckpt_p45mid_s8j_20260825/depth_best_holdout_da3_ft_head.pt
+
+tau_predictor:
+  enable: true
+  kind: foe_calibrated
+  use_gt_depth: false
+  center_frac: 0.5
+  min_closing_m_s: 0.05
+  max_tau_s: 60.0
+  dt_s: 0.1
+  ckpt: experiments/aerial/rl/artifacts/tau_ckpt_foe_r60_20260815/tau_foe_calibrator.pt
+  device: cuda
+
+imagination:
+  batch: 16
+  horizon: 15
+
+# Match eval: --planner --planner-horizon 1
+planner:
+  enable: true
+  horizon: 1
+
+corrector:
+  iterations: 10
+  episodes_per_iter: 1
+  max_steps: 600
+  enable_wm_update: false
+  enable_policy_update: true
+  strict_gates: false
+  wm_batch: 32
+  wm_window: 8
+  smoke: false
+  # Align with PathExpert urban collect (flyable spawn over inland geometry).
+  min_spawn_z: 24.0
+  spawn_z_retry_m: 5.0
+  spawn_z_max_retries: 4
+  renderer_restart_every: 8
+  renderer_restart_scene: outdoor
+  renderer_restart_wait_s: 30.0
+
+v4:
+  lambda_gae: 0.95
+  gamma: 0.997
+  entropy_scale: 3.0e-4
+  actor_lr: 1.0e-4
+  critic_lr: 1.0e-4
+  action_scale: 1.0
+  device: cpu
+
+annotation: experiments/aerial/phase3_unified/annotations/outdoor_complex_focus134.json
+max_episodes: 0
+
+urban_complex_p2c:
+  warm_start: experiments/aerial/rl/artifacts/v4_ac_ckpt_phase2_toward_g_20260905_112006/v4_ac_latest.pt
+  near_goal_frac: 0.5
+  near_goal_dist_min_m: 5.0
+  near_goal_dist_max_m: 25.0
+  iters: 32
+  eval_routes: "0,1,3,4"
+  # Stage 2: FOCUS_ROUTES=0,1,2,3,4,10,17 ANNO=outdoor_complex_only.json
+  min_spawn_z: 24.0
+  spawn_z_retry_m: 5.0
+  spawn_z_max_retries: 4
+  # Human-like expert: depth-scene (not PathExpert). Collect via
+  # collect_urban_depth_scene_expert.sh; FT via train_urban_humanlike_p2c.sh.
+  expert_kind: depth_scene
+  expert_max_inflate: 1.8
+  gate_max_inflate: 1.8
+  gate_max_ir: 0.35
+
+safety:
+  kind: three_zone
+  l1_m: 8.0
+  l2_m: 5.0
+  l3_m: 1.5
+  v1_m_s: 2.0
+  v2_m_s: 1.0
+  v_stop_m_s: 0.2
+  v_cruise_m_s: 10.0
+  a_max_m_s2: 2.5
+  delay_s: 0.2
+  min_tau_s: 1.0
+  max_p_coll: 0.5
+  retreat_step_m: 3.0
+  # Speed governor only: never choose heading (dyaw=0). Opt-in >0 is ablation.
+  retreat_max_dyaw_rad: 0.0
+  retreat_max_cum_yaw_rad: 0.70
+  retreat_max_head_vs_goal_rad: 1.047
+  # Match eval: --tti-coeff 2.5 --shield-exclusion-forward-only
+  tti_coeff: 2.5
+  exclusion_forward_only: true

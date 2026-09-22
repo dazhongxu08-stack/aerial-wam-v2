@@ -37,7 +37,13 @@ from experiments.aerial.rl.reward import maneuver_weight_at
 logger = logging.getLogger(__name__)
 
 
-def _save_actor_ckpt(ckpt_dir: str, actor_critic: Any, iter_idx: int) -> None:
+def _save_actor_ckpt(
+    ckpt_dir: str,
+    actor_critic: Any,
+    iter_idx: int,
+    *,
+    also_best: bool = False,
+) -> None:
     from pathlib import Path
 
     import torch
@@ -53,6 +59,9 @@ def _save_actor_ckpt(ckpt_dir: str, actor_critic: Any, iter_idx: int) -> None:
     }
     torch.save(payload, out / "v4_ac_latest.pt")
     torch.save(payload, out / f"v4_ac_iter_{iter_idx:04d}.pt")
+    if also_best:
+        torch.save(payload, out / "v4_ac_best.pt")
+        logger.info("wrote BEST ckpt iter %d -> %s", iter_idx, out / "v4_ac_best.pt")
     logger.info("wrote ckpt iter %d -> %s", iter_idx, out / "v4_ac_latest.pt")
 
 
@@ -70,6 +79,11 @@ class CorrectorConfig:
     # Imagination-RL params (used once enable_policy_update flips on).
     imagine_batch: int = 64
     imagine_horizon: int = 10
+    # Behavior cloning on expert transitions (optional; default OFF).
+    enable_bc_update: bool = False
+    bc_batch: int = 64
+    bc_updates_per_iter: int = 4
+    bc_loss_scale: float = 1.0
     smoke: bool = False
     start_iter: int = 0
     ckpt_dir: Optional[str] = None
@@ -101,6 +115,7 @@ class SerialCorrectorLoop:
         actor_critic: Optional[Any] = None,
         config: Optional[CorrectorConfig] = None,
         episodes: Optional[List[Dict[str, Any]]] = None,
+        expert_transitions: Optional[List[Any]] = None,
     ) -> None:
         self.collector = collector
         self.buffer = buffer
@@ -109,10 +124,13 @@ class SerialCorrectorLoop:
         self.actor_critic = actor_critic
         self.config = config or CorrectorConfig()
         self.episodes = episodes
+        # Flat expert Transition list for BC (DepthScene / PathExpert demos).
+        self.expert_transitions = list(expert_transitions or [])
         # Snapshot the base maneuver weight ONCE: the curriculum rewrites
         # ``collector.reward_cfg.w_maneuver`` each iteration, so the schedule must
         # ramp from this immutable start, never from its own last output.
         self._w_maneuver_start = float(getattr(self.collector.reward_cfg, "w_maneuver", 0.0))
+        self._best_collect_return = float("-inf")
 
     def run(self) -> List[IterationReport]:
         # Own the env lifecycle: whatever happens, release the single-consumer
@@ -134,8 +152,14 @@ class SerialCorrectorLoop:
                     episode_offset=it,
                 )
                 self._apply_maneuver_curriculum(stats)
-                wm = self._update_world_model()
-                rl = self._update_policy()
+                # Empty / all-spawn-collision iters must not RL-update on stale buffer
+                # (was poisoning hard014 with 0-step "updated" noise).
+                if int(stats.steps) <= 0:
+                    wm = {"status": "skipped", "reason": "empty collect"}
+                    rl = {"status": "skipped", "reason": "empty collect"}
+                else:
+                    wm = self._update_world_model()
+                    rl = self._update_policy()
                 logger.info(
                     "iter %d: %d steps @ %.1f Hz | wm=%s | rl=%s | w_man=%.4g",
                     it, stats.steps, stats.achieved_hz, wm.get("status", "?"), rl.get("status", "?"),
@@ -143,7 +167,18 @@ class SerialCorrectorLoop:
                 )
                 reports.append(IterationReport(collect=stats, wm=wm, rl=rl))
                 if self.config.save_every_iter and self.config.ckpt_dir and self.actor_critic is not None:
-                    _save_actor_ckpt(self.config.ckpt_dir, self.actor_critic, it)
+                    mean_ret = (
+                        float(np.mean(stats.returns)) if stats.returns else float("-inf")
+                    )
+                    is_best = bool(stats.steps > 0 and mean_ret > self._best_collect_return)
+                    if is_best:
+                        self._best_collect_return = mean_ret
+                    _save_actor_ckpt(
+                        self.config.ckpt_dir,
+                        self.actor_critic,
+                        it,
+                        also_best=is_best,
+                    )
             return reports
         finally:
             close = getattr(getattr(self.collector, "env", None), "close", None)
@@ -232,6 +267,15 @@ class SerialCorrectorLoop:
     # -- GATE V4: imagination actor-critic update ------------------------
     def _update_policy(self) -> Dict[str, Any]:
         if not self.config.enable_policy_update:
+            if bool(self.config.enable_bc_update):
+                bc_out = self._update_bc()
+                if bc_out.get("status") == "updated":
+                    return {"status": "bc_only", **bc_out}
+                return {
+                    "status": "skipped",
+                    "reason": "bc-only produced no update",
+                    "bc": bc_out,
+                }
             msg = "imagination RL update is V4-gated (enable_policy_update=False)"
             if self.config.strict_gates:
                 raise RuntimeError(msg)
@@ -278,7 +322,7 @@ class SerialCorrectorLoop:
         mean_progress = float(rollout.progress.mean())
         if ac is not None:
             ac_out = ac.update(rollout)
-            return {
+            out = {
                 "status": "updated",
                 "batch": int(z0.shape[0]),
                 "horizon": int(self.config.imagine_horizon),
@@ -287,6 +331,10 @@ class SerialCorrectorLoop:
                 "mean_progress": mean_progress,
                 **{k: v for k, v in ac_out.items() if k != "status"},
             }
+            bc_out = self._update_bc()
+            if bc_out:
+                out["bc"] = bc_out
+            return out
         # >>> V4 INSERTION POINT: actor_critic.update(rollout) <<<
         return {
             "status": "imagined",
@@ -296,4 +344,44 @@ class SerialCorrectorLoop:
             "mean_abs_goal_rel": mean_abs_goal_rel,
             "mean_progress": mean_progress,
             "note": "trajectories produced; wire actor_critic for AC update",
+        }
+
+    def _update_bc(self) -> Dict[str, Any]:
+        """Optional BC step on ``expert_transitions`` after the AC update."""
+        if not bool(self.config.enable_bc_update):
+            return {}
+        ac = self.actor_critic
+        if ac is None or not hasattr(ac, "update_bc"):
+            return {"status": "skipped", "reason": "no actor_critic.update_bc"}
+        pool = self.expert_transitions
+        if not pool:
+            return {"status": "skipped", "reason": "no expert_transitions"}
+        from experiments.aerial.rl.goal_features import goal_rel_from_obs
+
+        n_updates = max(1, int(self.config.bc_updates_per_iter))
+        batch = max(1, int(self.config.bc_batch))
+        losses: List[float] = []
+        maes: List[float] = []
+        rng = np.random.default_rng()
+        for _ in range(n_updates):
+            idx = rng.integers(0, len(pool), size=min(batch, len(pool)))
+            chosen = [pool[int(i)] for i in idx]
+            z = np.stack([self.dynamics.encode(t.obs) for t in chosen], axis=0)
+            acts = np.stack([np.asarray(t.action, dtype=np.float64) for t in chosen], axis=0)
+            goal_rel = np.stack([goal_rel_from_obs(t.obs) for t in chosen], axis=0)
+            bc = ac.update_bc(
+                z, acts, goal_rel=goal_rel, loss_scale=float(self.config.bc_loss_scale)
+            )
+            if bc.get("status") == "updated":
+                losses.append(float(bc["bc_loss"]))
+                maes.append(float(bc["bc_mae"]))
+        if not losses:
+            return {"status": "skipped", "reason": "bc updates produced no loss"}
+        return {
+            "status": "updated",
+            "n_updates": int(n_updates),
+            "batch": int(batch),
+            "bc_loss": float(sum(losses) / len(losses)),
+            "bc_mae": float(sum(maes) / len(maes)),
+            "n_expert": int(len(pool)),
         }
