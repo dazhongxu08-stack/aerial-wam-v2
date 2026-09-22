@@ -74,10 +74,14 @@ EP_PER_ITER="${EP_PER_ITER:-2}"
   --min-spawn-clear-m 5.0 \
   2>&1 | tee -a "$ART/logs/directional_oa_cl_ft_train_${STAMP}.log"
 
-if [[ -f "$OUT/v4_ac_best.pt" ]]; then ACTOR="$OUT/v4_ac_best.pt"
-else ACTOR="$OUT/v4_ac_latest.pt"
+if [[ -f "$OUT/v4_ac_best.pt" ]]; then ACTOR_BEST="$OUT/v4_ac_best.pt"
+else ACTOR_BEST="$OUT/v4_ac_latest.pt"
 fi
-echo "ACTOR=$ACTOR"
+ACTOR_LATEST="$OUT/v4_ac_latest.pt"
+[[ -f "$ACTOR_LATEST" ]] || ACTOR_LATEST="$ACTOR_BEST"
+echo "ACTOR_BEST=$ACTOR_BEST"
+echo "ACTOR_LATEST=$ACTOR_LATEST"
+ACTOR="$ACTOR_BEST"
 
 CFG="$ROOT/configs/_tmp_directional_oa_cl_eval.yaml"
 "$PY" - <<PY
@@ -101,11 +105,12 @@ PY
 
 run_eval() {
   local TAG=$1; shift
+  local CKPT=$1; shift
   local EOUT="$ART/eval_directional_oa_${STAMP}_${TAG}"
   mkdir -p "$EOUT/traj"
-  echo "=== EVAL $TAG ==="
+  echo "=== EVAL $TAG ckpt=$(basename "$CKPT") ==="
   "$PY" -m experiments.aerial.scripts.wam_phase2_long_eval \
-    --config "$CFG" --annotation "$ANN_HARD" --wm-ckpt "$WM" --actor-ckpt "$ACTOR" \
+    --config "$CFG" --annotation "$ANN_HARD" --wm-ckpt "$WM" --actor-ckpt "$CKPT" \
     --depth-ckpt "$DEPTH" --tau-ckpt "$TAU" --goal-feat-mode meter \
     --routes 0,1,3,4 --traj-out "$EOUT/traj" --out "$EOUT/eval_all.json" \
     --subgoal-source toward_g --r-m-intent 100 \
@@ -132,11 +137,13 @@ PY
 }
 
 # Dual shield: CL with planner, shield off vs on (default three_zone from yaml).
+# BEST return-ckpts for CL; actor arms also report LATEST (BEST≠SR risk).
 for SEED in b0 b1 b2; do
-  run_eval "cl_noshield_${SEED}" --planner --planner-horizon 15 --planner-rollout closed_loop --no-shield
-  run_eval "cl_shield_${SEED}" --planner --planner-horizon 15 --planner-rollout closed_loop
+  run_eval "cl_noshield_${SEED}" "$ACTOR_BEST" --planner --planner-horizon 15 --planner-rollout closed_loop --no-shield
+  run_eval "cl_shield_${SEED}" "$ACTOR_BEST" --planner --planner-horizon 15 --planner-rollout closed_loop
 done
 for SEED in a0 a1 a2; do
-  run_eval "actor_noshield_${SEED}" --no-shield
+  run_eval "actor_noshield_best_${SEED}" "$ACTOR_BEST" --no-shield
+  run_eval "actor_noshield_latest_${SEED}" "$ACTOR_LATEST" --no-shield
 done
-echo "=== CL-FT-125 DONE stamp=$STAMP actor=$ACTOR wm=$WM ==="
+echo "=== CL-FT-125 DONE stamp=$STAMP best=$ACTOR_BEST latest=$ACTOR_LATEST wm=$WM ==="

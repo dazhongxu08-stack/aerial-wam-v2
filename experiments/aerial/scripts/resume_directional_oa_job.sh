@@ -32,7 +32,7 @@ case "$JOB" in
     MASTER="$ART/logs/directional_oa_cl_ft_${STAMP}.log"
     OUT="$ART/v4_ac_ckpt_urban_directional_oa_${STAMP}_cl_ft"
     CFG="$ROOT/configs/_tmp_directional_oa_cl_eval.yaml"
-    EVAL_TAGS=(cl_noshield_b0 cl_noshield_b1 cl_noshield_b2 cl_shield_b0 cl_shield_b1 cl_shield_b2 actor_noshield_a0 actor_noshield_a1 actor_noshield_a2)
+    EVAL_TAGS=(cl_noshield_b0 cl_noshield_b1 cl_noshield_b2 cl_shield_b0 cl_shield_b1 cl_shield_b2 actor_noshield_best_a0 actor_noshield_best_a1 actor_noshield_best_a2 actor_noshield_latest_a0 actor_noshield_latest_a1 actor_noshield_latest_a2)
     NEED_PLANNER=1
     LOG_PREFIX=directional_oa_cl_ft
     ;;
@@ -76,12 +76,15 @@ fi
 [[ -n "${WM:-}" && -f "$WM" ]] || { echo "FATAL no WM"; exit 1; }
 echo "WM=$WM"
 
-if [[ -f "$OUT/v4_ac_best.pt" ]]; then ACTOR="$OUT/v4_ac_best.pt"
-elif [[ -f "$OUT/v4_ac_latest.pt" ]]; then ACTOR="$OUT/v4_ac_latest.pt"
+if [[ -f "$OUT/v4_ac_best.pt" ]]; then ACTOR_BEST="$OUT/v4_ac_best.pt"
+elif [[ -f "$OUT/v4_ac_latest.pt" ]]; then ACTOR_BEST="$OUT/v4_ac_latest.pt"
 else
   echo "FATAL no actor in $OUT — need full retrain"; exit 1
 fi
-echo "ACTOR=$ACTOR"
+ACTOR_LATEST="$OUT/v4_ac_latest.pt"
+[[ -f "$ACTOR_LATEST" ]] || ACTOR_LATEST="$ACTOR_BEST"
+ACTOR="$ACTOR_BEST"
+echo "ACTOR_BEST=$ACTOR_BEST ACTOR_LATEST=$ACTOR_LATEST"
 
 "$PY" - <<PY
 import yaml
@@ -114,8 +117,12 @@ run_eval() {
     echo "SKIP completed $TAG"
     return 0
   fi
+  local CKPT="$ACTOR_BEST"
+  if [[ "$TAG" == *"_latest_"* ]]; then
+    CKPT="$ACTOR_LATEST"
+  fi
   mkdir -p "$EOUT/traj"
-  echo "=== EVAL $TAG (resume) ==="
+  echo "=== EVAL $TAG (resume) ckpt=$(basename "$CKPT") ==="
   local extra=()
   if [[ "$TAG" == cl_* ]]; then
     extra+=(--planner --planner-horizon 15 --planner-rollout closed_loop)
@@ -128,7 +135,7 @@ run_eval() {
   [[ -f "$DEPTH" ]] && depth_args+=(--depth-ckpt "$DEPTH")
   [[ -f "$TAU" ]] && depth_args+=(--tau-ckpt "$TAU")
   "$PY" -m experiments.aerial.scripts.wam_phase2_long_eval \
-    --config "$CFG" --annotation "$ANN_HARD" --wm-ckpt "$WM" --actor-ckpt "$ACTOR" \
+    --config "$CFG" --annotation "$ANN_HARD" --wm-ckpt "$WM" --actor-ckpt "$CKPT" \
     "${depth_args[@]}" --goal-feat-mode meter \
     --routes 0,1,3,4 --traj-out "$EOUT/traj" --out "$EOUT/eval_all.json" \
     --subgoal-source toward_g --r-m-intent 100 \

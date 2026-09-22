@@ -88,6 +88,8 @@ class CorrectorConfig:
     enable_online_planner_bc: bool = False
     online_bc_diff_thr: float = 0.08
     online_bc_max_pool: int = 8000
+    #: If True, also keep steps where head ranks climb over wall-fwd under escape.
+    online_bc_keep_oc_beats: bool = True
     smoke: bool = False
     start_iter: int = 0
     ckpt_dir: Optional[str] = None
@@ -108,6 +110,37 @@ class IterationReport:
     collect: CollectStats
     wm: Dict[str, Any] = field(default_factory=dict)
     rl: Dict[str, Any] = field(default_factory=dict)
+
+
+def should_keep_planner_bc_step(
+    info: Dict[str, Any],
+    action: Any,
+    *,
+    diff_thr: float,
+    keep_oc_beats: bool = True,
+) -> bool:
+    """Whether an online CL step is worth BC-distilling into the actor.
+
+    Do **not** keep on ``offer_escape`` alone — mid-band escape offers often
+    still pick wall-fwd clones and dilute climb. Prefer climb / real Δa / oc↑.
+    """
+    if not isinstance(info, dict):
+        return False
+    if not info.get("planner_meta") and info.get("offer_escape") is None:
+        return False
+    if bool(info.get("chose_climb")):
+        return True
+    actor_a = info.get("action_actor")
+    if actor_a is not None:
+        aa = np.asarray(actor_a, dtype=np.float64).reshape(-1)
+        pa = np.asarray(action, dtype=np.float64).reshape(-1)
+        if aa.size == pa.size and float(np.linalg.norm(pa - aa)) >= float(diff_thr):
+            return True
+    if bool(keep_oc_beats) and bool(info.get("offer_escape")) and bool(
+        info.get("oc_climb_beats_fwd")
+    ):
+        return True
+    return False
 
 
 class SerialCorrectorLoop:
@@ -158,7 +191,9 @@ class SerialCorrectorLoop:
                     episode_offset=it,
                 )
                 if int(stats.steps) > 0:
-                    n_bc_h = self._harvest_online_planner_bc()
+                    n_bc_h = self._harvest_online_planner_bc(
+                        n_episodes=max(1, int(self.config.episodes_per_iter))
+                    )
                     if n_bc_h:
                         logger.info(
                             "online planner-BC harvest +%d (pool=%d)",
@@ -259,33 +294,58 @@ class SerialCorrectorLoop:
             metric, self.collector.reward_cfg, w_start=self._w_maneuver_start,
         )
 
-    def _harvest_online_planner_bc(self) -> int:
-        """Append planner-selected steps that diverge from the actor into BC pool."""
+    def _harvest_online_planner_bc(self, n_episodes: Optional[int] = None) -> int:
+        """Append climb / planner≠actor steps from the latest collect into BC pool.
+
+        Harvests the last ``n_episodes`` buffer episodes (defaults to
+        ``episodes_per_iter``) so multi-ep iters are not half-dropped.
+        """
         if not bool(self.config.enable_online_planner_bc):
             return 0
         if self.buffer.num_episodes <= 0:
             return 0
-        ep = list(self.buffer._episodes)[-1]
+        eps = list(self.buffer._episodes)
+        n_take = int(n_episodes) if n_episodes is not None else int(
+            self.config.episodes_per_iter
+        )
+        n_take = max(1, min(n_take, len(eps)))
+        recent = eps[-n_take:]
         thr = float(self.config.online_bc_diff_thr)
+        keep_oc = bool(getattr(self.config, "online_bc_keep_oc_beats", True))
         added = 0
-        for t in ep:
-            info = t.info if isinstance(t.info, dict) else {}
-            if not info.get("planner_meta") and info.get("offer_escape") is None:
-                continue
-            keep = bool(info.get("chose_climb")) or bool(info.get("offer_escape"))
-            actor_a = info.get("action_actor")
-            if actor_a is not None:
-                aa = np.asarray(actor_a, dtype=np.float64).reshape(-1)
-                pa = np.asarray(t.action, dtype=np.float64).reshape(-1)
-                if aa.size == pa.size and float(np.linalg.norm(pa - aa)) >= thr:
-                    keep = True
-            if not keep:
-                continue
-            self.expert_transitions.append(t)
-            added += 1
+        n_climb = 0
+        n_delta = 0
+        n_oc = 0
+        for ep in recent:
+            for t in ep:
+                info = t.info if isinstance(t.info, dict) else {}
+                if not should_keep_planner_bc_step(
+                    info, t.action, diff_thr=thr, keep_oc_beats=keep_oc
+                ):
+                    continue
+                if bool(info.get("chose_climb")):
+                    n_climb += 1
+                elif info.get("action_actor") is not None:
+                    aa = np.asarray(info["action_actor"], dtype=np.float64).reshape(-1)
+                    pa = np.asarray(t.action, dtype=np.float64).reshape(-1)
+                    if aa.size == pa.size and float(np.linalg.norm(pa - aa)) >= thr:
+                        n_delta += 1
+                    else:
+                        n_oc += 1
+                else:
+                    n_oc += 1
+                self.expert_transitions.append(t)
+                added += 1
         cap = int(self.config.online_bc_max_pool)
         if cap > 0 and len(self.expert_transitions) > cap:
             self.expert_transitions = self.expert_transitions[-cap:]
+        if added:
+            logger.info(
+                "online planner-BC keep mix: climb=%d delta=%d oc_beats=%d",
+                n_climb,
+                n_delta,
+                n_oc,
+            )
         return added
 
     # -- GATE V1: world-model training -----------------------------------

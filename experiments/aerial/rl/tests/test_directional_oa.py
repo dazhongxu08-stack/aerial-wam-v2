@@ -271,6 +271,63 @@ def test_oa_offer_escape_tight_mid_even_near_goal():
     assert oa_offer_escape(None, near_goal=True) is False
 
 
+def test_should_keep_planner_bc_step_tight():
+    from experiments.aerial.rl.corrector import should_keep_planner_bc_step
+
+    a_plan = np.array([0.2, 0.0, 0.7, 0.0])
+    a_actor = np.array([0.8, 0.0, 0.0, 0.0])
+    # offer_escape alone must NOT keep (dilution)
+    assert (
+        should_keep_planner_bc_step(
+            {"offer_escape": True, "planner_meta": {}, "action_actor": a_actor.tolist()},
+            a_actor,  # same as actor → no delta
+            diff_thr=0.08,
+        )
+        is False
+    )
+    # climb keeps
+    assert (
+        should_keep_planner_bc_step(
+            {
+                "chose_climb": True,
+                "offer_escape": True,
+                "planner_meta": {},
+                "action_actor": a_actor.tolist(),
+            },
+            a_plan,
+            diff_thr=0.08,
+        )
+        is True
+    )
+    # meaningful Δa keeps
+    assert (
+        should_keep_planner_bc_step(
+            {
+                "offer_escape": True,
+                "planner_meta": {},
+                "action_actor": a_actor.tolist(),
+            },
+            a_plan,
+            diff_thr=0.08,
+        )
+        is True
+    )
+    # oc_climb_beats_fwd under escape keeps
+    assert (
+        should_keep_planner_bc_step(
+            {
+                "offer_escape": True,
+                "oc_climb_beats_fwd": True,
+                "planner_meta": {},
+                "action_actor": a_actor.tolist(),
+            },
+            a_actor,
+            diff_thr=0.08,
+        )
+        is True
+    )
+
+
 def test_near_wall_straight_loses_to_empty_approach():
     cfg = directional_oa_reward_cfg()
     g = np.array([20.0, 0.0, 0.0, 20.0], dtype=np.float64)
