@@ -84,10 +84,16 @@ class CorrectorConfig:
     bc_batch: int = 64
     bc_updates_per_iter: int = 4
     bc_loss_scale: float = 1.0
+    #: Harvest planner≠actor (or climb/escape) steps from online collect into BC pool.
+    enable_online_planner_bc: bool = False
+    online_bc_diff_thr: float = 0.08
+    online_bc_max_pool: int = 8000
     smoke: bool = False
     start_iter: int = 0
     ckpt_dir: Optional[str] = None
     save_every_iter: bool = False
+    #: Ignore ultra-short collects when updating v4_ac_best (spawn noise).
+    min_steps_for_best: int = 20
     # Periodic AirSim renderer restart (125 long online runs). 0 = disabled.
     renderer_restart_every: int = 0
     renderer_restart_script: Optional[str] = None
@@ -151,6 +157,14 @@ class SerialCorrectorLoop:
                     episodes=self.episodes,
                     episode_offset=it,
                 )
+                if int(stats.steps) > 0:
+                    n_bc_h = self._harvest_online_planner_bc()
+                    if n_bc_h:
+                        logger.info(
+                            "online planner-BC harvest +%d (pool=%d)",
+                            n_bc_h,
+                            len(self.expert_transitions),
+                        )
                 self._apply_maneuver_curriculum(stats)
                 # Empty / all-spawn-collision iters must not RL-update on stale buffer
                 # (was poisoning hard014 with 0-step "updated" noise).
@@ -170,7 +184,11 @@ class SerialCorrectorLoop:
                     mean_ret = (
                         float(np.mean(stats.returns)) if stats.returns else float("-inf")
                     )
-                    is_best = bool(stats.steps > 0 and mean_ret > self._best_collect_return)
+                    min_best = int(getattr(self.config, "min_steps_for_best", 20) or 0)
+                    is_best = bool(
+                        int(stats.steps) >= max(1, min_best)
+                        and mean_ret > self._best_collect_return
+                    )
                     if is_best:
                         self._best_collect_return = mean_ret
                     _save_actor_ckpt(
@@ -240,6 +258,35 @@ class SerialCorrectorLoop:
         self.collector.reward_cfg.w_maneuver = maneuver_weight_at(
             metric, self.collector.reward_cfg, w_start=self._w_maneuver_start,
         )
+
+    def _harvest_online_planner_bc(self) -> int:
+        """Append planner-selected steps that diverge from the actor into BC pool."""
+        if not bool(self.config.enable_online_planner_bc):
+            return 0
+        if self.buffer.num_episodes <= 0:
+            return 0
+        ep = list(self.buffer._episodes)[-1]
+        thr = float(self.config.online_bc_diff_thr)
+        added = 0
+        for t in ep:
+            info = t.info if isinstance(t.info, dict) else {}
+            if not info.get("planner_meta") and info.get("offer_escape") is None:
+                continue
+            keep = bool(info.get("chose_climb")) or bool(info.get("offer_escape"))
+            actor_a = info.get("action_actor")
+            if actor_a is not None:
+                aa = np.asarray(actor_a, dtype=np.float64).reshape(-1)
+                pa = np.asarray(t.action, dtype=np.float64).reshape(-1)
+                if aa.size == pa.size and float(np.linalg.norm(pa - aa)) >= thr:
+                    keep = True
+            if not keep:
+                continue
+            self.expert_transitions.append(t)
+            added += 1
+        cap = int(self.config.online_bc_max_pool)
+        if cap > 0 and len(self.expert_transitions) > cap:
+            self.expert_transitions = self.expert_transitions[-cap:]
+        return added
 
     # -- GATE V1: world-model training -----------------------------------
     def _update_world_model(self) -> Dict[str, Any]:

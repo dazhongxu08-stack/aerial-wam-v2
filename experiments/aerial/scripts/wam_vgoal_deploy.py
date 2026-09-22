@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
-"""Phase-2 + vgoal real-aircraft deploy (Pixhawk 6C + Orin camera).
+"""Phase-2 + vgoal real-aircraft deploy (Pixhawk 6C or Tello EDU).
 
 Loads the same π / WM / depth / shield stack as ``wam_vgoal_eval``, but drives
-a ``PixhawkDroneEnv`` instead of AirSim. Default is **bench-safe**: mock
+``PixhawkDroneEnv`` or ``TelloDroneEnv``. Default is **bench-safe**: mock
 camera, no OFFBOARD, no ARM — only loads models and prints one observation.
 
-Stages:
+Stages (Pixhawk):
   (default)       connect MAVLink + load stack + one observe()
   --offboard      enter ArduPilot GUIDED / PX4 OFFBOARD (disarmed)
   --arm           arm motors (requires --i-know-props-are-on)
   --run           closed-loop steps (requires --offboard; --arm for flight)
 
-Example (bench, props off; saves one frame + state under artifacts/orin_deploy/):
+Tello (Orin on Tello Wi-Fi):
 
   python -m experiments.aerial.scripts.wam_vgoal_deploy \\
-    --mavlink-port /dev/ttyACM0 --mock-camera
-
-Recording (default): **ch8** start, **ch9** stop (independent of ch7 Orin handoff).
-Disable: ``--no-record``. Immediate start: ``--record-auto``.
-
-Outdoor flight (props on, RC ready):
-
-  sudo python -m experiments.aerial.scripts.wam_vgoal_deploy \\
-    --mavlink-port /dev/ttyACM0 --camera 0 \\
+    --backend tello --camera tello --demo-short \\
     --vgoal-repo ~/Projects/aerial-vgoal-wam \\
-    --goal-x 10 --goal-y 0 --goal-z 5 \\
-    --offboard --arm --run --max-steps 300 --i-know-props-are-on
+    --offboard --arm --run --i-know-props-are-on
+
+Recording (Pixhawk default): **ch8** start, **ch9** stop.
+Tello defaults to ``--record-auto``. Disable: ``--no-record``.
 """
 from __future__ import annotations
 
@@ -45,14 +39,26 @@ logger = logging.getLogger("wam_vgoal_deploy")
 
 
 def _parse() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Phase-2 vgoal Pixhawk deploy")
+    p = argparse.ArgumentParser(description="Phase-2 vgoal real-aircraft deploy")
     p.add_argument("--config", default="configs/aerial_rl.yaml")
     p.add_argument("--vgoal-repo", default="~/Projects/aerial-vgoal-wam")
+    p.add_argument(
+        "--backend",
+        choices=("pixhawk", "tello"),
+        default="pixhawk",
+        help="Flight backend: Pixhawk MAVLink or Tello EDU Wi-Fi SDK",
+    )
     p.add_argument("--mavlink-port", default="/dev/ttyACM0")
     p.add_argument("--mavlink-baud", type=int, default=57600)
+    p.add_argument("--tello-ip", default="192.168.10.1")
+    p.add_argument("--tello-local-ip", default="", help="Override local bind IP for Tello")
     p.add_argument("--step-hz", type=float, default=5.0)
     p.add_argument("--max-steps", type=int, default=100)
-    p.add_argument("--camera", default="0", help="V4L2 device index or path")
+    p.add_argument(
+        "--camera",
+        default="0",
+        help="V4L2 device, 'tello' stream, or use --mock-camera",
+    )
     p.add_argument("--mock-camera", action="store_true")
     p.add_argument("--capture-w", type=int, default=1280)
     p.add_argument("--capture-h", type=int, default=720)
@@ -123,6 +129,25 @@ def _parse() -> argparse.Namespace:
         help="Short visual approach preset (detect target, fly ~15-25m, no GPS fallback)",
     )
     p.add_argument(
+        "--preset",
+        choices=("none", "v5"),
+        default="none",
+        help="v5 = hard-route sealed baseline (hbclear + open_loop face/peel planner + shield)",
+    )
+    p.add_argument("--planner", action="store_true", help="Enable ImaginationPlanner")
+    p.add_argument("--planner-horizon", type=int, default=5)
+    p.add_argument(
+        "--planner-rollout",
+        choices=("open_loop", "closed_loop"),
+        default="open_loop",
+        help="open_loop = v5 hand-rule face/peel; closed_loop = actor tail, no hand bias",
+    )
+    p.add_argument(
+        "--shield-exclusion-forward-only",
+        action="store_true",
+        help="Three-zone shield uses forward cone only (v5 gate default)",
+    )
+    p.add_argument(
         "--success-on-visual",
         action="store_true",
         help="Success when visual target within --success-dist (not annot goal)",
@@ -147,11 +172,45 @@ def _parse() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _apply_preset_v5(args: argparse.Namespace) -> None:
+    """Hard-route sealed baseline (2026-09-21 hbclear_facegoal_v5, SR 3/4)."""
+    args.actor_ckpt = (
+        "experiments/aerial/rl/artifacts/"
+        "v4_ac_ckpt_urban_complex_p2c_20260921_shield_contract_v2_hbclear/v4_ac_latest.pt"
+    )
+    args.wm_ckpt = (
+        "experiments/aerial/rl/artifacts/wm_ckpt_depth_aux_long_20260920/wm_step_8500.pt"
+    )
+    args.depth_ckpt = (
+        "experiments/aerial/rl/artifacts/depth_ckpt_p45mid_s8j_20260825/"
+        "depth_best_holdout_da3_ft_head.pt"
+    )
+    args.tau_ckpt = (
+        "experiments/aerial/rl/artifacts/tau_ckpt_foe_r60_20260815/tau_foe_calibrator.pt"
+    )
+    args.planner = True
+    args.planner_horizon = int(args.planner_horizon or 5)
+    args.planner_rollout = "open_loop"
+    args.no_depth_shield = False
+    args.shield_exclusion_forward_only = True
+    args.tti_coeff = 2.5
+    if str(getattr(args, "backend", "pixhawk")) != "tello":
+        args.cruise_speed = 10.0
+    if args.corpus_instruction is None:
+        args.corpus_instruction = "v5 hard-route baseline → vgoal"
+    logger.info(
+        "preset=v5 actor=hbclear wm=depth_aux_long planner=open_loop H=%d shield=on",
+        int(args.planner_horizon),
+    )
+
+
 def _apply_demo_short(args: argparse.Namespace) -> None:
     """Preset for short outdoor visual approach demo."""
     args.fallback_toward_g = False
     args.success_on_visual = True
-    args.no_depth_shield = True
+    # Keep shield if preset=v5 (sealed baseline had shield on).
+    if str(getattr(args, "preset", "none")) != "v5":
+        args.no_depth_shield = True
     args.search_det_steer = True
     args.reject_far_lock_m = 40.0
     args.cruise_speed = 4.0
@@ -163,6 +222,23 @@ def _apply_demo_short(args: argparse.Namespace) -> None:
         args.corpus_instruction = f"short demo: approach {args.target_class}"
     if args.corpus_scene == "real_hardware":
         args.corpus_scene = "real_outdoor_demo"
+    if str(getattr(args, "backend", "pixhawk")) == "tello":
+        args.cruise_speed = 0.5
+        args.success_dist = 1.5
+        args.reject_far_lock_m = 8.0
+        args.max_steps = 80
+        args.capture_w = 960
+        args.capture_h = 720
+        if args.camera == "0":
+            args.camera = "tello"
+        if args.corpus_scene == "real_outdoor_demo":
+            args.corpus_scene = "tello_indoor_demo"
+        if args.corpus_instruction and "short demo" in str(args.corpus_instruction):
+            args.corpus_instruction = f"tello short demo: approach {args.target_class}"
+        if str(getattr(args, "preset", "none")) == "v5":
+            args.corpus_instruction = f"v5→tello: approach {args.target_class}"
+        if not args.record_auto and not args.no_record:
+            args.record_auto = True
 
 
 def _visual_success(
@@ -299,7 +375,9 @@ def _poll_record_gate(
 def _deploy_manifest(args: argparse.Namespace, annot_goal: Optional[np.ndarray]) -> dict[str, Any]:
     return {
         "script": "wam_vgoal_deploy",
+        "backend": str(args.backend),
         "mavlink_port": args.mavlink_port,
+        "tello_ip": getattr(args, "tello_ip", None),
         "step_hz": float(args.step_hz),
         "max_steps": int(args.max_steps),
         "offboard": bool(args.offboard),
@@ -317,6 +395,8 @@ def _deploy_manifest(args: argparse.Namespace, annot_goal: Optional[np.ndarray])
 
 def main() -> int:
     args = _parse()
+    if str(args.preset) == "v5":
+        _apply_preset_v5(args)
     if args.demo_short:
         _apply_demo_short(args)
     if args.arm and not args.i_know_props_are_on:
@@ -354,8 +434,9 @@ def main() -> int:
     import torch
     from experiments.aerial.rl.actor_critic import LatentActorCritic, LatentActorDeployPolicy
     from experiments.aerial.rl.depth_predictor import DepthMinPredictor
-    from experiments.aerial.rl.env.action import body_delta_limits
-    from experiments.aerial.rl.env.pixhawk_env import PixhawkDroneEnv, PixhawkEnvConfig
+    from experiments.aerial.rl.env.action import body_delta_limits, clip_body_delta
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
     from experiments.aerial.rl.scene_intent import TowardGoalIntent
     from experiments.aerial.rl.tau_predictor import make_tau_predictor
     from experiments.aerial.rl.train_rl import _build_safety, load_torch_dynamics
@@ -374,23 +455,50 @@ def main() -> int:
             logger.warning("CUDA unusable (%s) — falling back to cpu", exc)
             device_str = "cpu"
     device = torch.device(device_str)
-    logger.info("deploy device=%s mock_camera=%s", device, args.mock_camera)
-
-    env = PixhawkDroneEnv(
-        PixhawkEnvConfig(
-            mavlink_port=args.mavlink_port,
-            mavlink_baud=int(args.mavlink_baud),
-            step_hz=float(args.step_hz),
-            camera_device=str(args.camera),
-            capture_w=int(args.capture_w),
-            capture_h=int(args.capture_h),
-            capture_fps=int(args.capture_fps),
-            wam_encode_size=int(args.wam_encode_size),
-            offboard_on_reset=bool(args.offboard),
-            arm_on_reset=bool(args.arm),
-            mock_camera=bool(args.mock_camera),
-        )
+    logger.info(
+        "deploy backend=%s device=%s mock_camera=%s",
+        args.backend,
+        device,
+        args.mock_camera,
     )
+
+    if args.backend == "tello":
+        from experiments.aerial.rl.env.tello_env import TelloDroneEnv, TelloEnvConfig
+
+        env = TelloDroneEnv(
+            TelloEnvConfig(
+                tello_ip=str(args.tello_ip),
+                local_ip=str(args.tello_local_ip or ""),
+                step_hz=float(args.step_hz),
+                camera_device=str(args.camera),
+                capture_w=int(args.capture_w),
+                capture_h=int(args.capture_h),
+                capture_fps=int(args.capture_fps),
+                wam_encode_size=int(args.wam_encode_size),
+                takeoff_on_reset=bool(args.arm),
+                control_on_reset=bool(args.offboard),
+                mock_camera=bool(args.mock_camera),
+                max_v_mps=float(min(1.0, max(0.2, float(args.cruise_speed)))),
+            )
+        )
+    else:
+        from experiments.aerial.rl.env.pixhawk_env import PixhawkDroneEnv, PixhawkEnvConfig
+
+        env = PixhawkDroneEnv(
+            PixhawkEnvConfig(
+                mavlink_port=args.mavlink_port,
+                mavlink_baud=int(args.mavlink_baud),
+                step_hz=float(args.step_hz),
+                camera_device=str(args.camera),
+                capture_w=int(args.capture_w),
+                capture_h=int(args.capture_h),
+                capture_fps=int(args.capture_fps),
+                wam_encode_size=int(args.wam_encode_size),
+                offboard_on_reset=bool(args.offboard),
+                arm_on_reset=bool(args.arm),
+                mock_camera=bool(args.mock_camera),
+            )
+        )
 
     wm_cfg = cfg.get("world_model") or {}
     wm_path = (root / args.wm_ckpt).resolve()
@@ -417,11 +525,34 @@ def main() -> int:
         dtype=np.float64,
     )
 
+    reward_cfg = RewardConfig(**(cfg.get("reward") or {}))
+    reward_cfg.success_dist_m = float(args.success_dist)
+
+    planner = None
+    if bool(args.planner):
+        planner = ImaginationPlanner(
+            dynamics=dynamics,
+            horizon=int(args.planner_horizon),
+            reward_cfg=reward_cfg,
+            action_limits=action_limits,
+            rollout_mode=str(args.planner_rollout),
+            tail_policy=policy if str(args.planner_rollout) == "closed_loop" else None,
+        )
+        logger.info(
+            "planner rollout=%s horizon=%d hand_bias=%s",
+            args.planner_rollout,
+            int(args.planner_horizon),
+            "off" if str(args.planner_rollout) == "closed_loop" else "on(v5)",
+        )
+
     safety_cfg = dict(cfg.get("safety") or {})
     if args.no_depth_shield:
         safety_cfg["kind"] = "null"
     elif str(safety_cfg.get("kind", "null")) in ("null", "none", "None"):
         safety_cfg["kind"] = "three_zone"
+    if bool(getattr(args, "shield_exclusion_forward_only", False)):
+        safety_cfg["exclusion_forward_only"] = True
+        logger.info("shield exclusion: forward cone only")
     safety_cfg["v_cruise_m_s"] = float(args.cruise_speed)
     safety_cfg["tti_coeff"] = float(args.tti_coeff)
     shield = _build_safety(safety_cfg)
@@ -505,6 +636,8 @@ def main() -> int:
         shield.reset()
         tau_pred.reset()
         depth_pred.reset()
+        if planner is not None:
+            planner.reset()
         if fallback_intent is not None:
             fallback_intent.reset()
 
@@ -518,7 +651,12 @@ def main() -> int:
 
         if not args.run:
             logger.info("Bench load OK — pass --run --offboard to close the loop")
-            if record_enabled and record_gate is not None and deploy_manifest is not None:
+            if (
+                record_enabled
+                and record_gate is not None
+                and deploy_manifest is not None
+                and args.backend == "pixhawk"
+            ):
                 logger.info("Waiting for RC record buttons (Ctrl+C to exit)")
                 try:
                     while True:
@@ -546,7 +684,12 @@ def main() -> int:
         prev_yaw = curr_yaw
 
         for step in range(int(args.max_steps)):
-            if record_enabled and record_gate is not None and deploy_manifest is not None:
+            if (
+                record_enabled
+                and record_gate is not None
+                and deploy_manifest is not None
+                and args.backend == "pixhawk"
+            ):
                 recorder, _ = _poll_record_gate(
                     record_gate,
                     env._bridge,
@@ -598,6 +741,16 @@ def main() -> int:
                 goal_rel = np.asarray(vstep.goal_rel, dtype=np.float32)
                 z = dynamics.encode(obs)
                 action = policy.act_latent(z, goal_rel)
+                if planner is not None:
+                    # Keep obs.info goal_rel for face/peel hand-rule scoring (v5).
+                    obs.info["goal_rel"] = goal_rel.tolist()
+                    if vstep.target_world is not None:
+                        planner.set_goal(np.asarray(vstep.target_world, dtype=np.float64))
+                        obs.info["goal"] = np.asarray(
+                            vstep.target_world, dtype=np.float64
+                        ).tolist()
+                    action = planner.plan(obs, action, latent=z)
+                    action = clip_body_delta(action, action_limits)
             else:
                 action = np.zeros(4, dtype=np.float64)
                 goal_rel = None

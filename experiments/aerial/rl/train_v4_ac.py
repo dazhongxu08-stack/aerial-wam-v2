@@ -179,8 +179,9 @@ def main() -> int:
         "--enable-bc",
         action="store_true",
         help=(
-            "Behavior-clone actor toward expert actions from --dataset each "
-            "corrector iter (after imagination AC). Requires --dataset."
+            "Behavior-clone actor toward demo/planner actions each corrector "
+            "iter (after imagination AC). With --dataset uses expert demos; "
+            "with --planner and no dataset, harvests online planner≠actor steps."
         ),
     )
     p.add_argument(
@@ -197,6 +198,12 @@ def main() -> int:
                    help="Number of BC gradient steps per corrector iteration.")
     p.add_argument("--bc-loss-scale", type=float, default=1.0,
                    help="Multiplier on BC MSE loss.")
+    p.add_argument(
+        "--min-steps-for-best",
+        type=int,
+        default=None,
+        help="Ignore collects shorter than this when updating v4_ac_best (default 20)",
+    )
     p.add_argument(
         "--cs-values",
         type=str,
@@ -252,6 +259,12 @@ def main() -> int:
         type=int,
         default=None,
         help="Spawn-collision retries after min-spawn-z lift (default: yaml corrector)",
+    )
+    p.add_argument(
+        "--min-spawn-clear-m",
+        type=float,
+        default=None,
+        help="Reject train-collect spawn if GT forward clearance < this (0 disables)",
     )
     p.add_argument(
         "--planner",
@@ -344,13 +357,20 @@ def main() -> int:
         cfg["corrector"]["spawn_z_retry_m"] = float(args.spawn_z_retry_m)
     if args.spawn_z_max_retries is not None:
         cfg["corrector"]["spawn_z_max_retries"] = int(args.spawn_z_max_retries)
+    if getattr(args, "min_spawn_clear_m", None) is not None:
+        cfg["corrector"]["min_spawn_clear_m"] = float(args.min_spawn_clear_m)
     cc_spawn = cfg["corrector"]
-    if cc_spawn.get("min_spawn_z") or cc_spawn.get("spawn_z_max_retries"):
+    if (
+        cc_spawn.get("min_spawn_z")
+        or cc_spawn.get("spawn_z_max_retries")
+        or cc_spawn.get("min_spawn_clear_m")
+    ):
         logger.info(
-            "spawn: min_z=%s retry_m=%s max_retries=%s",
+            "spawn: min_z=%s retry_m=%s max_retries=%s min_clear=%s",
             cc_spawn.get("min_spawn_z", 0),
             cc_spawn.get("spawn_z_retry_m", 0),
             cc_spawn.get("spawn_z_max_retries", 0),
+            cc_spawn.get("min_spawn_clear_m", 0),
         )
     if bool(getattr(args, "bc_only", False)):
         args.enable_bc = True
@@ -456,20 +476,42 @@ def main() -> int:
             len(loaded), stamped, len(expert_flat), ds_path,
         )
     if bool(getattr(args, "enable_bc", False)):
-        if not loop.expert_transitions:
-            logger.error("--enable-bc requires --dataset with loadable expert episodes")
+        online_ok = bool(getattr(args, "planner", False)) and not bool(
+            getattr(args, "bc_only", False)
+        )
+        if not loop.expert_transitions and not online_ok:
+            logger.error(
+                "--enable-bc requires --dataset (expert) or --planner (online distill)"
+            )
             return 1
         loop.config.enable_bc_update = True
         loop.config.bc_batch = int(args.bc_batch)
         loop.config.bc_updates_per_iter = int(args.bc_updates_per_iter)
         loop.config.bc_loss_scale = float(args.bc_loss_scale)
-        logger.info(
-            "BC ON: batch=%d updates/iter=%d loss_scale=%.3g n_expert=%d",
-            loop.config.bc_batch,
-            loop.config.bc_updates_per_iter,
-            loop.config.bc_loss_scale,
-            len(loop.expert_transitions),
-        )
+        if online_ok and not loop.expert_transitions:
+            loop.config.enable_online_planner_bc = True
+            logger.info(
+                "BC ON (online planner distill): batch=%d updates/iter=%d "
+                "loss_scale=%.3g (pool grows from CL collect)",
+                loop.config.bc_batch,
+                loop.config.bc_updates_per_iter,
+                loop.config.bc_loss_scale,
+            )
+        else:
+            if online_ok:
+                loop.config.enable_online_planner_bc = True
+            logger.info(
+                "BC ON: batch=%d updates/iter=%d loss_scale=%.3g n_expert=%d "
+                "online_harvest=%s",
+                loop.config.bc_batch,
+                loop.config.bc_updates_per_iter,
+                loop.config.bc_loss_scale,
+                len(loop.expert_transitions),
+                bool(loop.config.enable_online_planner_bc),
+            )
+    if getattr(args, "min_steps_for_best", None) is not None:
+        loop.config.min_steps_for_best = int(args.min_steps_for_best)
+        logger.info("min_steps_for_best=%d", loop.config.min_steps_for_best)
     if dyn_kind == "torch" and wm_ckpt_path:
         wm_cfg = cfg.get("world_model", {})
         success_dist_m = float(cfg.get("reward", {}).get("success_dist_m", 3.0))

@@ -20,7 +20,7 @@ test-time imagination scoring path — distinct from V4 actor-critic training.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -56,8 +56,29 @@ _ESCAPE_YAW_OVERRIDE_RAD = float(np.deg2rad(60.0))
 _ESCAPE_SCORE_W = 0.6
 #: Mild tax on freeze/dive only when nose is hard-jammed (< block thresh).
 _ESCAPE_STUCK_TAX = 0.5
-#: Disable tight-mid escape when this close to goal (v11 R4: reached 3.8m then peeled away).
-_ESCAPE_DISABLE_NEAR_GOAL_M = 25.0
+#: Disable *mid-open* peel only in the last metres. Hard-block (<3 m) and
+#: tight-mid (<5 m) always offer escape even near goal (urban crash ~25 m rem).
+_ESCAPE_DISABLE_NEAR_GOAL_M = 8.0
+
+
+def oa_offer_escape(
+    d_fwd: Optional[float],
+    *,
+    near_goal: bool,
+) -> bool:
+    """When to add climb/side escape atoms under directional OA."""
+    if d_fwd is None:
+        return not near_goal
+    d = float(d_fwd)
+    if d < float(_FACE_BLOCK_FWD_M):
+        return True
+    if d < float(_ESCAPE_TIGHT_MID_M):
+        # Always peel/climb in the jam band — including last 8 m.
+        return True
+    if d < float(_FACE_OPEN_FWD_M):
+        return not near_goal
+    return False
+
 
 
 class ConstantLatentPolicy:
@@ -200,8 +221,22 @@ def escape_clearer_cone_candidates(
     dy = 0.85 * lim_dy
     turn = lim_dyaw
 
+    lim_dz = 0.4
+    if limits is not None:
+        lim_dz = float(np.abs(np.asarray(limits, dtype=np.float64).reshape(4)[2]))
+    climb = 0.85 * lim_dz
+
     def _atom(s: float) -> np.ndarray:
         return np.array([creep, s * dy, 0.0, s * turn], dtype=np.float64)
+
+    # Climb escapes: gate-passed obstacle head ranks these under wall-fwd; without
+    # them the planner can only peel sideways and urban runs sink into canyons.
+    climbs = [
+        np.array([creep, 0.0, climb, 0.0], dtype=np.float64),
+        np.array([0.0, 0.0, climb, 0.0], dtype=np.float64),
+        np.array([creep, 0.0, climb, turn], dtype=np.float64),
+        np.array([creep, 0.0, climb, -turn], dtype=np.float64),
+    ]
 
     if side is None or side == 0.0:
         return [
@@ -209,12 +244,15 @@ def escape_clearer_cone_candidates(
             _atom(-1.0),
             np.array([0.0, dy, 0.0, turn], dtype=np.float64),
             np.array([0.0, -dy, 0.0, -turn], dtype=np.float64),
+            *climbs,
         ]
     s = float(side)
     return [
         _atom(s),
         np.array([0.0, s * dy, 0.0, s * turn], dtype=np.float64),
         _atom(-s),  # backup opposite
+        *climbs,
+        np.array([creep, s * dy, climb, s * turn], dtype=np.float64),
     ]
 
 
@@ -357,7 +395,10 @@ class ImaginationPlanner:
     #: ``closed_loop``: candidate is only step 0; steps 1..H-1 call ``tail_policy``
     #: (the deployed actor). Score is WM return only — no face/escape/strafe bias.
     rollout_mode: str = "open_loop"
+    #: Deploy actor used as imagination tail when ``rollout_mode=closed_loop``.
     tail_policy: Any = None
+    #: Filled by the last ``plan()`` call (eval / distill diagnostics).
+    last_plan_meta: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.mock_mode is not None and self.mock_mode not in (
@@ -420,17 +461,40 @@ class ImaginationPlanner:
         if closed and self.tail_policy is None:
             raise RuntimeError("closed_loop planner requires tail_policy")
         if closed:
-            # Actor-local proposals only. Face/escape atoms and hand biases stay
-            # on the frozen open-loop path (v5 seal); they do not score this run.
+            # Base: actor-local proposals (v5 seal). Directional OA additionally
+            # scores climb/side escapes so the learned obstacle head can beat
+            # wall-fwd — actor-local atoms alone never invent climb.
             candidates = list(self.candidate_fn(np.asarray(base_action, dtype=np.float64)))
-            candidates = drop_backward_if_subgoal_ahead(candidates, goal_rel)
-            candidates = drop_backward_motion(candidates)
             offer_escape_cands = False
             w_face = 0.0
             w_strafe = 0.0
             yaw_err0 = 0.0
             if float(np.hypot(goal_rel[0], goal_rel[1])) > 1e-6:
                 yaw_err0 = float(np.arctan2(float(goal_rel[1]), float(goal_rel[0])))
+            if bool(getattr(self.reward_cfg, "use_learned_obstacle_cost", False)):
+                goal_rem_xy = float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
+                near_goal = goal_rem_xy < float(_ESCAPE_DISABLE_NEAR_GOAL_M)
+                offer_escape_cands = oa_offer_escape(d_fwd, near_goal=near_goal)
+                if offer_escape_cands:
+                    candidates.extend(
+                        escape_clearer_cone_candidates(
+                            obs, self.action_limits, goal_rel=goal_rel
+                        )
+                    )
+                candidates.extend(face_goal_candidates(goal_rel, self.action_limits))
+            candidates = drop_backward_if_subgoal_ahead(candidates, goal_rel)
+            candidates = drop_backward_motion(candidates)
+            # Stash for eval / distill diagnostics.
+            self.last_plan_meta = {
+                "n_candidates": int(len(candidates)),
+                "offer_escape": bool(offer_escape_cands),
+                "d_fwd": float(d_fwd) if d_fwd is not None and np.isfinite(float(d_fwd)) else None,
+                "near_goal": bool(
+                    float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
+                    < float(_ESCAPE_DISABLE_NEAR_GOAL_M)
+                ),
+                "rollout_mode": "closed_loop",
+            }
         else:
             goal_rem_xy = float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
             near_goal = goal_rem_xy < float(_ESCAPE_DISABLE_NEAR_GOAL_M)
@@ -453,8 +517,11 @@ class ImaginationPlanner:
                 w_face = float(self.face_yaw_score_w_mid)
                 w_strafe = float(self.strafe_score_w_mid)
                 offer_face_cands = True
-                # Tight mid: peel only when still far from goal (protect R4 terminal).
-                if float(d_fwd) < float(_ESCAPE_TIGHT_MID_M) and not near_goal:
+                # Tight mid: always offer escape (incl. near goal). Mid-open
+                # (5–8 m): peel only when not in last metres.
+                if float(d_fwd) < float(_ESCAPE_TIGHT_MID_M):
+                    offer_escape_cands = True
+                elif float(d_fwd) < float(_FACE_OPEN_FWD_M) and not near_goal:
                     offer_escape_cands = True
             else:
                 # Hard proximity: no face-into-wall; ban pure crab; escape via cone.
@@ -515,6 +582,7 @@ class ImaginationPlanner:
             candidates = [np.clip(c, -lim, lim) for c in candidates]
 
         best_a = candidates[0]
+        best_idx = 0
         best_score = -np.inf
         gr0 = np.asarray(goal_rel, dtype=np.float32).reshape(1, -1)
         bv0 = np.asarray(body_vel, dtype=np.float32).reshape(1, -1)
@@ -523,7 +591,7 @@ class ImaginationPlanner:
         hard_block = d_fwd is not None and float(d_fwd) < float(_FACE_BLOCK_FWD_M)
         use_wm = self.mock_mode != "rules"
         apply_hand = (not closed) and self.mock_mode != "wm_bare"
-        for cand in candidates:
+        for ci, cand in enumerate(candidates):
             if use_wm:
                 if closed:
                     policy = FirstActionThenActor(cand, self.tail_policy)
@@ -576,9 +644,26 @@ class ImaginationPlanner:
             if score > best_score:
                 best_score = score
                 best_a = cand
+                best_idx = int(ci)
         out = np.asarray(best_a, dtype=np.float64).reshape(4)
         if bool(getattr(self.reward_cfg, "forbid_backward_motion", False)):
             from experiments.aerial.rl.env.action import forbid_backward_dx
 
             out = forbid_backward_dx(out)
+        meta = dict(getattr(self, "last_plan_meta", {}) or {})
+        meta.update(
+            {
+                "chosen_idx": int(best_idx),
+                "n_candidates": int(len(candidates)),
+                "offer_escape": bool(offer_escape_cands),
+                "best_score": float(best_score),
+                "chose_climb": bool(float(out[2]) > 0.15),
+                "d_fwd": (
+                    float(d_fwd)
+                    if d_fwd is not None and np.isfinite(float(d_fwd))
+                    else None
+                ),
+            }
+        )
+        self.last_plan_meta = meta
         return out

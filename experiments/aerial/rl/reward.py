@@ -69,6 +69,8 @@ class RewardConfig:
     #: Cost for any body-backward ``dx<0`` (stops reverse-SR / nose-away back-in).
     #: Applied even when the carrot is behind — yaw-align first, then nose-forward.
     w_backward: float = 0.0
+    #: Cost for body descent ``dz<0`` (urban sink-into-canyon failure mode).
+    w_descent: float = 0.0
     #: Hard clamp: never execute/imagine ``dx<0`` (no rear depth sensor).
     forbid_backward_motion: bool = False
     idle_body_trans_thr_m: float = 0.05
@@ -118,6 +120,7 @@ IDLE_BODY_WEIGHT: float = 0.5
 AWAY_WEIGHT: float = 1.0
 LEVEL_FLIGHT_WEIGHT: float = 0.3
 BACKWARD_WEIGHT: float = 5.0  # soft backup; hard forbid is primary (no rear sensor)
+DESCENT_WEIGHT: float = 1.5  # tax sink; climb/level preferred in urban interior
 LEVEL_WINDOW_STEPS: int = 5
 LEVEL_DZ_THR_M: float = 0.05
 LEVEL_DYAW_THR_RAD: float = 0.05
@@ -137,6 +140,7 @@ def directional_oa_reward_cfg(**overrides) -> RewardConfig:
         w_away=AWAY_WEIGHT,
         w_level_flight=LEVEL_FLIGHT_WEIGHT,
         w_backward=BACKWARD_WEIGHT,
+        w_descent=DESCENT_WEIGHT,
         forbid_backward_motion=True,
         level_window=LEVEL_WINDOW_STEPS,
         level_dz_thr_m=LEVEL_DZ_THR_M,
@@ -451,6 +455,22 @@ def level_flight_cost(
     return w
 
 
+def descent_flight_cost(
+    action: np.ndarray,
+    *,
+    cfg: RewardConfig = RewardConfig(),
+) -> float:
+    """Cost for body descent ``dz<0`` (urban canyon sink). Climb is free."""
+    w = float(getattr(cfg, "w_descent", 0.0) or 0.0)
+    if w <= 0.0:
+        return 0.0
+    a = np.asarray(action, dtype=np.float64).reshape(-1)
+    dz = float(a[2]) if a.size > 2 else 0.0
+    if dz >= 0.0:
+        return 0.0
+    return w * float(-dz)
+
+
 def path_shaping_terms(
     action: np.ndarray,
     goal_rel: np.ndarray,
@@ -459,21 +479,23 @@ def path_shaping_terms(
     hist_level: bool = False,
     cfg: RewardConfig = RewardConfig(),
 ) -> Dict[str, float]:
-    """Straight − idle − away − level − backward. Pure; real and imagined."""
+    """Straight − idle − away − level − backward − descent. Pure; real and imagined."""
     prog = nose_aligned_progress(progress, goal_rel, cfg=cfg)
     straight = straight_to_goal_bonus(action, goal_rel, cfg=cfg)
     idle = idle_body_cost(action, goal_rel, cfg=cfg)
     away = away_from_goal_cost(prog, cfg=cfg)
     level = level_flight_cost(action, prog, hist_level=hist_level, cfg=cfg)
     backward = backward_flight_cost(action, goal_rel, cfg=cfg)
+    descent = descent_flight_cost(action, cfg=cfg)
     return {
         "straight_bonus": float(straight),
         "idle_body_cost": float(idle),
         "away_cost": float(away),
         "level_flight_cost": float(level),
         "backward_cost": float(backward),
+        "descent_cost": float(descent),
         "progress_eff": float(prog),
-        "path_shaping": float(straight - idle - away - level - backward),
+        "path_shaping": float(straight - idle - away - level - backward - descent),
     }
 
 

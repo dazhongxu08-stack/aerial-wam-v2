@@ -22,6 +22,7 @@ reward:
   w_away: 1.0
   w_level_flight: 0.3
   w_backward: 5.0
+  w_descent: 1.5
   # No rear sensor: never execute/imagine body dx<0 (yaw/strafe/climb only).
   forbid_backward_motion: true
   idle_body_trans_thr_m: 0.05

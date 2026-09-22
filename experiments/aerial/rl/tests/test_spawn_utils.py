@@ -28,13 +28,19 @@ def test_nudge_episode_z_adds_delta():
 
 
 def test_spawn_retry_plan_stacks_on_lifted_base():
-    tries = spawn_retry_plan(_ep(12.0), min_spawn_z=24.0, spawn_z_retry_m=5.0, spawn_z_max_retries=2)
+    tries = spawn_retry_plan(
+        _ep(12.0),
+        min_spawn_z=24.0,
+        spawn_z_retry_m=5.0,
+        spawn_z_max_retries=2,
+        spawn_xy_nudge_m=12.0,
+    )
     z0 = [float(np.asarray(t["pos"])[0, 2]) for t in tries]
     # First 3 are z-only; remaining are XY offsets on the highest z.
     assert z0[:3] == [24.0, 29.0, 34.0]
-    assert len(tries) == 3 + 6
+    assert len(tries) == 3 + 20
     xy0 = np.asarray(tries[3]["pos"], dtype=np.float64)[0, :2]
-    assert abs(float(xy0[0]) - 2.0) < 1e-6 or abs(float(xy0[1]) - 2.0) < 1e-6
+    assert abs(float(xy0[0]) - 12.0) < 1e-6 or abs(float(xy0[1]) - 12.0) < 1e-6
 
 
 def test_nudge_episode_xy():

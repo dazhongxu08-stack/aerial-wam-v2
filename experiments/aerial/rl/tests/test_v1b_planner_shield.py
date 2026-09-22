@@ -155,9 +155,12 @@ def test_escape_clearer_cone_fallback_without_side_cones():
         obs, goal_rel=np.array([0.0, 40.0, 0.0, 40.0])
     )
     assert len(cands) >= 2
-    assert all(abs(float(c[3])) > 0.05 for c in cands)
+    peels = [c for c in cands if abs(float(c[3])) > 0.05]
+    climbs = [c for c in cands if float(c[2]) > 0.05]
+    assert len(peels) >= 2
+    assert len(climbs) >= 1
     # Goal is left (+y) → first peel should turn left.
-    assert float(cands[0][3]) > 0.0
+    assert float(peels[0][3]) > 0.0
 
 
 def test_escape_side_clearer_and_fallback():

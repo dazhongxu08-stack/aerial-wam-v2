@@ -326,6 +326,12 @@ def main() -> int:
         help="Spawn retries after min-spawn-z lift",
     )
     parser.add_argument(
+        "--min-spawn-clear-m",
+        type=float,
+        default=5.0,
+        help="Reject spawn if GT forward clearance < this (0 disables); retry z/xy",
+    )
+    parser.add_argument(
         "--heading-assist",
         action="store_true",
         default=False,
@@ -806,6 +812,7 @@ def main() -> int:
             spawn_z_max_retries=int(args.spawn_z_max_retries),
             spawn_tol_m=float(args.spawn_tol_m),
             mock=bool(args.mock),
+            min_spawn_clear_m=float(args.min_spawn_clear_m),
         )
         # BUGFIX (2026-09-20): pts/goal_pos/start_pos above were computed from
         # the RAW annotation (pre-lift). reset_with_spawn_retries() internally
@@ -926,6 +933,12 @@ def main() -> int:
             last_true_s: float | None = None
             dev_degs: List[float] = []
             transitions: List[Any] = []
+            oa_n_steps = 0
+            oa_n_offer_escape = 0
+            oa_n_chose_climb = 0
+            oa_n_climb_beats = 0
+            oa_n_oc_probes = 0
+            oa_sum_planner_delta = 0.0
             nav_reward = None
             goal_stamp = np.asarray(goal_pos, dtype=np.float32).reshape(3)
             if save_dir is not None:
@@ -1079,8 +1092,58 @@ def main() -> int:
                     planner.set_goal(target_world)
 
                 action = policy.act(obs)
+                action_actor = np.asarray(action, dtype=np.float64).reshape(4).copy()
+                oa_step: dict = {}
                 if planner is not None:
                     action = planner.plan(obs, action, latent=policy._latent)
+                    plan_meta = getattr(planner, "last_plan_meta", None) or {}
+                    if isinstance(plan_meta, dict):
+                        oa_step = {
+                            "offer_escape": bool(plan_meta.get("offer_escape")),
+                            "chose_climb": bool(plan_meta.get("chose_climb")),
+                            "chosen_idx": plan_meta.get("chosen_idx"),
+                            "n_candidates": plan_meta.get("n_candidates"),
+                            "d_fwd_plan": plan_meta.get("d_fwd"),
+                        }
+                    # Head ranking diagnostic: oc(climb) vs oc(wall-fwd).
+                    feat = getattr(policy, "_latent", None)
+                    if (
+                        feat is not None
+                        and bool(getattr(dynamics, "obstacle_cost_trained", False))
+                        and hasattr(dynamics, "predict_obstacle_cost")
+                    ):
+                        lim = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                        a_fwd = np.clip(
+                            np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64), -lim, lim
+                        )
+                        a_climb = np.clip(
+                            np.array([0.2, 0.0, 0.7, 0.0], dtype=np.float64), -lim, lim
+                        )
+                        try:
+                            oc_fwd = float(dynamics.predict_obstacle_cost(feat, a_fwd))
+                            oc_climb = float(
+                                dynamics.predict_obstacle_cost(feat, a_climb)
+                            )
+                            oa_step["oc_fwd"] = oc_fwd
+                            oa_step["oc_climb"] = oc_climb
+                            oa_step["oc_climb_beats_fwd"] = bool(
+                                oc_climb + 1e-4 < oc_fwd
+                            )
+                        except Exception:
+                            pass
+                    act_delta = float(
+                        np.linalg.norm(
+                            np.asarray(action, dtype=np.float64).reshape(4) - action_actor
+                        )
+                    )
+                    oa_step["planner_delta"] = act_delta
+                    oa_n_steps += 1
+                    oa_n_offer_escape += int(bool(oa_step.get("offer_escape")))
+                    oa_n_chose_climb += int(bool(oa_step.get("chose_climb")))
+                    oa_sum_planner_delta += act_delta
+                    if "oc_climb_beats_fwd" in oa_step:
+                        oa_n_oc_probes += 1
+                        oa_n_climb_beats += int(bool(oa_step["oc_climb_beats_fwd"]))
 
                 action = clip_body_delta(
                     action,
@@ -1221,6 +1284,13 @@ def main() -> int:
                         "intervened": bool(step in intervened_steps),
                         "hard_brake": bool(step in hard_brake_steps),
                         "governor_cap": bool(step in governor_cap_steps),
+                        "offer_escape": oa_step.get("offer_escape") if oa_step else None,
+                        "chose_climb": oa_step.get("chose_climb") if oa_step else None,
+                        "oc_fwd": oa_step.get("oc_fwd") if oa_step else None,
+                        "oc_climb": oa_step.get("oc_climb") if oa_step else None,
+                        "oc_climb_beats_fwd": (
+                            oa_step.get("oc_climb_beats_fwd") if oa_step else None
+                        ),
                     }) + "\n")
 
                 seg_d = _segment_min_dist(p_prev, p_curr, goal_pos)
@@ -1313,6 +1383,20 @@ def main() -> int:
                 "mean_intent_dev_deg": round(float(np.mean(dev_degs)), 2) if dev_degs else 0.0,
                 "max_intent_dev_deg": round(float(np.max(dev_degs)), 2) if dev_degs else 0.0,
                 "fail_tag": fail_tag,
+                # Directional OA online diagnostics (planner + obstacle head).
+                "oa_n_steps": int(oa_n_steps),
+                "oa_offer_escape_rate": round(
+                    oa_n_offer_escape / max(1, oa_n_steps), 4
+                ),
+                "oa_chose_climb_rate": round(
+                    oa_n_chose_climb / max(1, oa_n_steps), 4
+                ),
+                "oa_oc_climb_beats_fwd_rate": round(
+                    oa_n_climb_beats / max(1, oa_n_oc_probes), 4
+                ),
+                "oa_mean_planner_delta": round(
+                    oa_sum_planner_delta / max(1, oa_n_steps), 4
+                ),
             }
             if traj_writer is not None:
                 traj_writer.close()
@@ -1351,6 +1435,13 @@ def main() -> int:
             f"inflate={ep_result['monotone_inflate']} | "
             f"spl={ep_result['spl']:.3f} | IR={ep_result['intervention_rate']:.3f}"
             f"{intent_tail}{_retry_tag}"
+            + (
+                f" | oa_esc={ep_result.get('oa_offer_escape_rate', 0):.2f}"
+                f" climb={ep_result.get('oa_chose_climb_rate', 0):.2f}"
+                f" oc↑={ep_result.get('oa_oc_climb_beats_fwd_rate', 0):.2f}"
+                if int(ep_result.get("oa_n_steps") or 0) > 0
+                else ""
+            )
         )
 
     scored, spawn_fails, metrics, verdict = aggregate_metrics(results)

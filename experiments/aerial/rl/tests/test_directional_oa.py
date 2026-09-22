@@ -175,6 +175,42 @@ def test_reverse_closing_does_not_beat_nose_forward():
     assert r_yaw > r_rev_close
 
 
+def test_spawn_utils_clearance_reject():
+    from experiments.aerial.rl.spawn_utils import reset_with_spawn_retries
+    from experiments.aerial.rl.env.obs import Observation
+
+    class _Env:
+        def __init__(self):
+            self.n = 0
+
+        def reset(self, ep):
+            self.n += 1
+            pts = np.asarray(ep["pos"], dtype=np.float64).reshape(-1, 3)
+            depth = np.full((16, 16), 1.0 if self.n == 1 else 20.0, dtype=np.float64)
+            st = np.zeros(7, np.float32)
+            st[0], st[1], st[2] = pts[0]
+            return Observation(
+                rgb=np.zeros((16, 16, 3), np.uint8),
+                state=st,
+                depth=depth,
+                collided=False,
+            )
+
+    ep = {"pos": [[0.0, 0.0, 24.0], [10.0, 0.0, 24.0]], "yaw": [0.0, 0.0]}
+    env = _Env()
+    _used, obs, _err, failed = reset_with_spawn_retries(
+        env,
+        ep,
+        min_spawn_z=24.0,
+        spawn_z_retry_m=5.0,
+        spawn_z_max_retries=2,
+        min_spawn_clear_m=5.0,
+    )
+    assert not failed
+    assert env.n >= 2
+    assert float(np.asarray(obs.depth).mean()) > 5.0
+
+
 def test_clearance_along_action_skips_backward():
     """Backward-dominant motion must not inherit forward-cone clearance tax."""
     from experiments.aerial.rl.reward import clearance_m_along_action
@@ -191,10 +227,48 @@ def test_clearance_along_action_skips_backward():
     ) == pytest.approx(20.0)
 
 
+def test_descent_tax_and_climb_free():
+    from experiments.aerial.rl.reward import descent_flight_cost, directional_oa_reward_cfg
+
+    cfg = directional_oa_reward_cfg()
+    assert float(cfg.w_descent) > 0.0
+    down = np.array([0.5, 0.0, -0.4, 0.0])
+    up = np.array([0.5, 0.0, 0.4, 0.0])
+    assert descent_flight_cost(down, cfg=cfg) == pytest.approx(0.4 * float(cfg.w_descent))
+    assert descent_flight_cost(up, cfg=cfg) == 0.0
+
+
 def test_directional_oa_forbids_backward_by_default():
     cfg = directional_oa_reward_cfg()
     assert cfg.forbid_backward_motion is True
     assert float(cfg.w_backward) >= 5.0
+
+
+def test_escape_candidates_include_climb():
+    from experiments.aerial.rl.env.obs import Observation
+    from experiments.aerial.rl.planner import escape_clearer_cone_candidates
+
+    obs = Observation(
+        rgb=np.zeros((8, 8, 3), np.uint8),
+        state=np.zeros(7, np.float32),
+        depth=np.full((8, 8), 4.0),
+        collided=False,
+    )
+    obs.info = {"depth_cones_pred": {"forward": 2.0, "left": 10.0, "right": 4.0}}
+    cands = escape_clearer_cone_candidates(obs, limits=np.array([1.0, 0.4, 0.4, 0.3]))
+    assert any(float(np.asarray(c).reshape(4)[2]) > 0.2 for c in cands)
+
+
+def test_oa_offer_escape_tight_mid_even_near_goal():
+    from experiments.aerial.rl.planner import oa_offer_escape
+
+    assert oa_offer_escape(2.0, near_goal=True) is True  # hard block
+    assert oa_offer_escape(4.0, near_goal=True) is True  # tight mid
+    assert oa_offer_escape(6.0, near_goal=True) is False  # mid-open near goal
+    assert oa_offer_escape(6.0, near_goal=False) is True
+    assert oa_offer_escape(12.0, near_goal=False) is False
+    assert oa_offer_escape(None, near_goal=False) is True
+    assert oa_offer_escape(None, near_goal=True) is False
 
 
 def test_near_wall_straight_loses_to_empty_approach():
@@ -510,10 +584,15 @@ def test_pack_features_from_frames_encodes_latent_dim():
     acts = np.array([[1, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
     groups = np.array(["fwd_empty", "fwd_near", "left_near", "fwd_empty"])
     out = pack_features_from_frames(dyn, rgbs, acts, depths=depth, groups=groups)
-    assert out["feature"].shape == (n, dyn.latent_dim)
-    assert out["action"].shape == (n, 4)
-    assert out["obstacle_label"].shape == (n,)
+    # Depth expand: each frame × _TRAIN_PROBES (6) rows.
+    assert out["feature"].shape[0] == n * 6
+    assert out["feature"].shape[1] == dyn.latent_dim
+    assert out["action"].shape == (n * 6, 4)
+    assert out["obstacle_label"].shape == (n * 6,)
     assert "group" in out
+    assert set(out["group"].astype(str).tolist()) <= {
+        "fwd_empty", "fwd_near", "left_near"
+    }
 
 
 def test_run_task5_gate_api():

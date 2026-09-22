@@ -69,9 +69,9 @@ def spawn_retry_plan(
     min_spawn_z: float,
     spawn_z_retry_m: float,
     spawn_z_max_retries: int,
-    spawn_xy_nudge_m: float = 2.0,
+    spawn_xy_nudge_m: float = 12.0,
 ) -> list[Dict[str, Any]]:
-    """Episode variants: lifted base, +z retries, then small XY offsets at max z."""
+    """Episode variants: lifted base, +z retries, then XY offsets at max z."""
     base = lift_episode_z(ep, float(min_spawn_z))
     tries = [base]
     if float(spawn_z_retry_m) > 0 and int(spawn_z_max_retries) > 0:
@@ -82,14 +82,14 @@ def spawn_retry_plan(
     xy = float(spawn_xy_nudge_m)
     if xy > 0:
         top = tries[-1]
-        for dx, dy in (
-            (xy, 0.0),
-            (-xy, 0.0),
-            (0.0, xy),
-            (0.0, -xy),
-            (xy, xy),
-            (-xy, -xy),
-        ):
+        offsets = [
+            (xy, 0.0), (-xy, 0.0), (0.0, xy), (0.0, -xy),
+            (xy, xy), (-xy, -xy), (xy, -xy), (-xy, xy),
+            (2 * xy, 0.0), (-2 * xy, 0.0), (0.0, 2 * xy), (0.0, -2 * xy),
+            (3 * xy, 0.0), (-3 * xy, 0.0), (0.0, 3 * xy), (0.0, -3 * xy),
+            (2 * xy, xy), (-2 * xy, -xy), (xy, 2 * xy), (-xy, -2 * xy),
+        ]
+        for dx, dy in offsets:
             tries.append(nudge_episode_xy(top, dx, dy))
     return tries
 
@@ -136,8 +136,13 @@ def reset_with_spawn_retries(
     spawn_z_max_retries: int = 0,
     spawn_tol_m: float = 12.0,
     mock: bool = False,
+    min_spawn_clear_m: float = 0.0,
 ) -> Tuple[Dict[str, Any], Any, float, bool]:
-    """Reset env; retry with z-lift on collision or large spawn position error.
+    """Reset env; retry with z-lift on collision, pose error, or tight clearance.
+
+    When ``min_spawn_clear_m > 0`` and GT ``obs.depth`` is present, reject spawns
+    whose forward directional clearance is below the threshold (avoids starting
+    already inside a wall FOV with --no-shield).
 
     Returns (episode_used, observation, spawn_err_m, spawn_failed).
     """
@@ -150,6 +155,7 @@ def reset_with_spawn_retries(
     last_err = float("inf")
     last_obs = None
     ep_try = variants[0]
+    need_clear = float(min_spawn_clear_m)
     for attempt, ep_try in enumerate(variants):
         obs = env.reset(ep_try)
         last_obs = obs
@@ -159,13 +165,28 @@ def reset_with_spawn_retries(
         spawn_err = float(np.linalg.norm(p_curr - start_pos))
         collided = bool(getattr(obs, "collided", False))
         last_err = spawn_err
-        if mock or (not collided and spawn_err <= float(spawn_tol_m)):
+        clear_ok = True
+        d_fwd = None
+        if need_clear > 0.0 and getattr(obs, "depth", None) is not None:
+            from experiments.aerial.rl.depth_geometry import directional_clearance_m
+
+            d_fwd = directional_clearance_m(
+                np.asarray(obs.depth, dtype=np.float64),
+                np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            )
+            if np.isfinite(float(d_fwd)) and float(d_fwd) < need_clear:
+                clear_ok = False
+        ok = mock or (
+            not collided and spawn_err <= float(spawn_tol_m) and clear_ok
+        )
+        if ok:
             if attempt > 0:
                 logger.info(
-                    "eval spawn retry %d ok at z=%.1f err=%.1fm",
+                    "eval spawn retry %d ok at z=%.1f err=%.1fm d_fwd=%s",
                     attempt,
                     float(start_pos[2]),
                     spawn_err,
+                    f"{float(d_fwd):.1f}" if d_fwd is not None else "n/a",
                 )
             return ep_try, obs, spawn_err, False
         if attempt + 1 < len(variants):
@@ -173,9 +194,10 @@ def reset_with_spawn_retries(
                 np.asarray(variants[attempt + 1]["pos"], dtype=np.float64).reshape(-1, 3)[0, 2]
             )
             logger.warning(
-                "eval spawn fail err=%.1fm collided=%s — retry at z=%.1f",
+                "eval spawn fail err=%.1fm collided=%s d_fwd=%s — retry at z=%.1f",
                 spawn_err,
                 collided,
+                f"{float(d_fwd):.1f}" if d_fwd is not None else "n/a",
                 z_next,
             )
     return ep_try, last_obs, last_err, True

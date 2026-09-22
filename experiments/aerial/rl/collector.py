@@ -130,6 +130,7 @@ class RolloutCollector:
         min_spawn_z: float = 0.0,
         spawn_z_retry_m: float = 0.0,
         spawn_z_max_retries: int = 0,
+        min_spawn_clear_m: float = 0.0,
         depth_predictor: Optional[Any] = None,
         tau_predictor: Optional[Any] = None,
         planner: Optional[Any] = None,
@@ -150,6 +151,7 @@ class RolloutCollector:
         self.min_spawn_z = float(min_spawn_z)
         self.spawn_z_retry_m = float(spawn_z_retry_m)
         self.spawn_z_max_retries = int(spawn_z_max_retries)
+        self.min_spawn_clear_m = float(min_spawn_clear_m)
         # Optional sink invoked with every completed episode (e.g. persist to
         # disk). None -> collector stays purely in-memory (offline tests / V0).
         self.on_episode = on_episode
@@ -197,6 +199,21 @@ class RolloutCollector:
                 "(spawn-inside-geometry; start pose may need resampling)"
             )
             return [], CollectStats(episodes=0, skipped=1)
+        need_clear = float(self.min_spawn_clear_m)
+        if need_clear > 0.0 and getattr(obs, "depth", None) is not None:
+            from experiments.aerial.rl.depth_geometry import directional_clearance_m
+
+            d_fwd = directional_clearance_m(
+                np.asarray(obs.depth, dtype=np.float64),
+                np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            )
+            if np.isfinite(float(d_fwd)) and float(d_fwd) < need_clear:
+                logger.warning(
+                    "reset spawn d_fwd=%.2fm < min_clear=%.2fm — skipping episode",
+                    float(d_fwd),
+                    need_clear,
+                )
+                return [], CollectStats(episodes=0, skipped=1)
         if hasattr(self.policy, "reset"):
             self.policy.reset()
         reset_pred = getattr(self.depth_predictor, "reset", None)
@@ -330,6 +347,7 @@ class RolloutCollector:
                 if self._latent is not None
                 else None
             )
+            action_actor = np.asarray(action, dtype=np.float64).reshape(4).copy()
             if self.planner is not None:
                 set_goal = getattr(self.planner, "set_goal", None)
                 if callable(set_goal):
@@ -351,6 +369,34 @@ class RolloutCollector:
                         getattr(self.reward_cfg, "forbid_backward_motion", False)
                     ),
                 )
+                plan_meta = getattr(self.planner, "last_plan_meta", None)
+                if isinstance(obs.info, dict) and isinstance(plan_meta, dict):
+                    obs.info["planner_meta"] = dict(plan_meta)
+                    obs.info["action_actor"] = action_actor.tolist()
+                    obs.info["chose_climb"] = bool(plan_meta.get("chose_climb"))
+                    obs.info["offer_escape"] = bool(plan_meta.get("offer_escape"))
+                    obs.info["chosen_idx"] = plan_meta.get("chosen_idx")
+                    # Online OA probe: does climb beat wall-fwd under the head?
+                    if (
+                        feature_t is not None
+                        and self.dynamics is not None
+                        and bool(getattr(self.dynamics, "obstacle_cost_trained", False))
+                        and hasattr(self.dynamics, "predict_obstacle_cost")
+                    ):
+                        a_fwd = np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64)
+                        a_climb = np.array([0.2, 0.0, 0.7, 0.0], dtype=np.float64)
+                        lim = np.asarray(step_limits, dtype=np.float64).reshape(4)
+                        a_fwd = np.clip(a_fwd, -lim, lim)
+                        a_climb = np.clip(a_climb, -lim, lim)
+                        oc_fwd = float(
+                            self.dynamics.predict_obstacle_cost(feature_t, a_fwd)
+                        )
+                        oc_climb = float(
+                            self.dynamics.predict_obstacle_cost(feature_t, a_climb)
+                        )
+                        obs.info["oc_fwd"] = oc_fwd
+                        obs.info["oc_climb"] = oc_climb
+                        obs.info["oc_climb_beats_fwd"] = bool(oc_climb + 1e-4 < oc_fwd)
             intervened = False
             # Safety shield sits ABOVE the learned policy (spec §2#6).
             # Probe p_coll on the *pre-shield* action (policy/planner intent) so
@@ -480,6 +526,14 @@ class RolloutCollector:
                     "yaw_err_rad",
                     "three_zone_speed_cap_m_s",
                     "tii_speed_cap_m_s",
+                    "planner_meta",
+                    "action_actor",
+                    "chose_climb",
+                    "offer_escape",
+                    "chosen_idx",
+                    "oc_fwd",
+                    "oc_climb",
+                    "oc_climb_beats_fwd",
                 ):
                     if k in obs.info and k not in ep_info:
                         ep_info[k] = obs.info[k]
@@ -531,23 +585,37 @@ class RolloutCollector:
         from experiments.aerial.rl.spawn_utils import collect_episode_with_spawn_retries
 
         total = CollectStats()
+        n_pool = len(episodes) if episodes else 0
+        # When one route's spawn is unrecoverable, try the next routes in the
+        # focus pool before giving up the slot (interior urban spawn noise).
+        max_route_fallback = max(1, min(4, n_pool)) if n_pool else 1
         for i in range(int(num_episodes)):
-            ep = None
-            if episodes:
-                ep = episodes[(int(episode_offset) + i) % len(episodes)]
-            if ep is not None and (
-                self.min_spawn_z > 0
-                or (self.spawn_z_retry_m > 0 and self.spawn_z_max_retries > 0)
-            ):
-                _, _, s = collect_episode_with_spawn_retries(
-                    self,
-                    ep,
-                    min_spawn_z=self.min_spawn_z,
-                    spawn_z_retry_m=self.spawn_z_retry_m,
-                    spawn_z_max_retries=self.spawn_z_max_retries,
-                )
-            else:
-                _, s = self.collect_episode(ep)
+            s = None
+            for fb in range(max_route_fallback):
+                ep = None
+                if episodes:
+                    ep = episodes[(int(episode_offset) + i + fb) % len(episodes)]
+                if ep is not None and (
+                    self.min_spawn_z > 0
+                    or (self.spawn_z_retry_m > 0 and self.spawn_z_max_retries > 0)
+                    or self.min_spawn_clear_m > 0
+                ):
+                    _, _, s = collect_episode_with_spawn_retries(
+                        self,
+                        ep,
+                        min_spawn_z=self.min_spawn_z,
+                        spawn_z_retry_m=self.spawn_z_retry_m,
+                        spawn_z_max_retries=self.spawn_z_max_retries,
+                    )
+                else:
+                    _, s = self.collect_episode(ep)
+                if s is not None and int(s.steps) > 0 and not bool(s.skipped):
+                    if fb > 0:
+                        logger.info(
+                            "route fallback +%d ok (steps=%d)", fb, int(s.steps)
+                        )
+                    break
+            assert s is not None
             total.episodes += s.episodes
             total.steps += s.steps
             total.seconds += s.seconds
