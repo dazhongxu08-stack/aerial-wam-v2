@@ -2,7 +2,7 @@
 
 | ID | Experiment | Status | Notes |
 |----|------------|--------|-------|
-| E1 | Phase-2 16-route urban benchmark (SR, progress, collision) | ✅ Done | **Cite 81.25% (13/16)** — `wam_phase2_e2_tti25_full16_20260908` / work overview. Do **not** cite legacy 86.7% until re-verified. |
+| E1 | Phase-2 16-route urban benchmark (SR, progress, collision) | ✅ Done | **Cite 86.7% (13/15 scored)** — tag `phase2-pass-20260908`, eval `wam_phase2_e2_tti25_full16_20260908.json`; route_idx=8 spawn anomaly excluded from scored (protocol). Naive 13/16=81.25% is **not** the gate number. |
 | E2a | Ablate ImaginationPlanner (actor-only) | ✅ Done | Phase-2 `seen_airsim16_long_routes`: **SR 0/16 (0%)**, IR **58.1%**, SCR 18.8%, Prog 44.4% — `artifacts/e2_ablation_phase2_20260923_091203/e2a_no_planner/full16.json` |
 | E2b | Ablate ThreeZone shield (shield-off) | ✅ Done | Same set: **SR 10/16 (62.5%)**, SPL 58.8%, IR **0%**, SCR 12.5%, Prog 80.3% — `.../e2b_no_shield/full16.json` |
 | E2c | Ablate subgoals (single-scale `direct_g`) | ✅ Done | **SR 8/16 (50%)**, SPL 49.2%, IR **75.2%**, SCR 12.5%, Prog 66.2% — `artifacts/e2c_direct_g_phase2_20260923_165130/full16.json` |

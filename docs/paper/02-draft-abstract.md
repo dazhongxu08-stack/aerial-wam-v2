@@ -113,7 +113,7 @@ Real-world outdoor flight statistics are ongoing work.
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Phase-2 16-route SR | **81.25% (13/16)** — authoritative `wam_phase2_e2_tti25_full16_20260908` | work overview / RUNBOOK gate |
+| Phase-2 16-route SR | **86.7% (13/15 scored)** — `phase2-pass-20260908` / `wam_phase2_e2_tti25_full16_20260908.json` (route 8 spawn excluded) | git tag + eval JSON |
 | Step-G 16-route SR | **93.33%** (14/15) | Step G declare 2026-08-28 |
 | Step-G mean progress | **97.52%** | same |
 | Step-G max route | **153.7 m** | Route 06 |
@@ -124,7 +124,7 @@ Real-world outdoor flight statistics are ongoing work.
 | RSSM latent dim | 1536 (h‖z) | architecture table |
 | Image / WM input | 224×224 RGB | frozen spec |
 
-> **Note:** Reconcile 86.7% vs 81.25% (13/16) before submission — cite the signed acceptance document only.
+> **Note:** Gate SR is **86.7% = 13/15 scored** (spawn_fail excluded). Naive 13/16=81.25% appears in some overviews as a raw count — do not substitute it for the PASS tag number.
 
 ---
 

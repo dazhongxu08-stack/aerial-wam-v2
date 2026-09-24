@@ -1,16 +1,15 @@
 # Table 2 draft — main results (Phase-2)
 
-**Protocol to cite**: `artifacts/seen_airsim16_long_routes.json`, V11 stack (polyline + rolling-global + planner H=1 + ThreeZone), cruise 10 m/s.
+**Protocol to cite**: `artifacts/seen_airsim16_long_routes.json`, E2 ckpt + `tti_coeff=2.5`, cruise 10 m/s, toward_g (tag-era stack).  
+**Acceptance artifact**: `wam_phase2_e2_tti25_full16_20260908.json` · milestone **`phase2-pass-20260908`**.
 
 | System | SR | SPL | IR | SCR | Notes |
 |--------|----|-----|----|-----|-------|
-| **Ours (Phase-2 mainline)** | **81.25% (13/16)** | — | — | — | Authoritative: `wam_phase2_e2_tti25_full16_20260908` / work overview |
-| Step-G closed-loop (prior) | 93.33% (14/15)* | — | 0.80% | 0% | Different protocol / route set — do not mix into Phase-2 row |
-| Legacy marketing “86.7%” | — | — | — | — | **Do not cite** — reconcile artifact; superseded by 13/16 |
+| **Ours (Phase-2 PASS)** | **86.7% (13/15 scored)** | — | — | **6.7%** | Tag message: route_idx=8 excluded as spawn anomaly; scored denominator = 15 |
+| Naive 13/16 | 81.25% | — | — | — | Includes spawn_fail in denominator — **not** the gate / PASS number |
+| Step-G closed-loop (prior) | 93.33% (14/15) | — | 0.80% | 0% | Different protocol — do not mix into Phase-2 row |
 
-\*Step-G DECLARE 2026-08-28; not the Phase-2 16 outdoor-long gate.
-
-### Ablation contrast (same Phase-2 16 routes)
+### Ablation contrast (same Phase-2 16 routes; V11 polyline stack 2026-09-23)
 
 | Variant | SR | IR | vs mainline |
 |---------|----|----|-------------|
@@ -20,6 +19,6 @@
 
 ### Action items before camera-ready
 
-- [ ] Pull `wam_phase2_e2_tti25_full16_20260908` JSON (or re-run V11 full16) and fill SPL / IR / SCR / Prog for Ours row
-- [ ] Add baseline columns (e.g. actor-only already in E2a; open-loop teacher if any)
-- [ ] E3 GT-depth row when overnight eval finishes
+- [ ] Attach SPL / IR / Prog from `wam_phase2_e2_tti25_full16_20260908.json` to Ours row
+- [ ] Note ablation stack (V11 polyline) vs PASS-era toward_g if protocols differ in methods
+- [ ] E3 GT-depth row when eval finishes

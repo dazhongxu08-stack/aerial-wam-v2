@@ -5,12 +5,12 @@
 
 | Variant | Change vs mainline | SR | SPL | IR | SCR | Prog |
 |---------|--------------------|----|-----|----|-----|------|
-| E1 (cite) | Full stack (planner + shield + polyline) | **81.25% (13/16)** | — | — | — | — |
+| E1 (cite) | Full stack (planner + shield + polyline) | **86.7% (13/15)** | — | — | — | — |
 | **E2a** | `--no-planner` (actor-only) | **0/16 (0%)** | 0.0% | **58.1%** | 18.8% | 44.4% |
 | **E2b** | `--no-shield` | **10/16 (62.5%)** | 58.8% | **0%** | 12.5% | 80.3% |
 | **E2c** | `--subgoal-source direct_g` (no polyline / rolling-global) | **8/16 (50%)** | 49.2% | **75.2%** | 12.5% | 66.2% |
 
-\*E1 = Phase-2 authoritative 13/16 (`wam_phase2_e2_tti25_full16_20260908`). Do not cite legacy 86.7%.
+\*E1 = Phase-2 PASS tag `phase2-pass-20260908`: **SR=13/15=86.7%**, SCR=6.7%, `route_idx=8` spawn anomaly excluded from scored (same rule as `aggregate_metrics`). Do not cite naive 13/16=81.25%.
 
 ### Interpretation
 
