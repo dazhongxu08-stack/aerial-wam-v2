@@ -113,7 +113,7 @@ Real-world outdoor flight statistics are ongoing work.
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Phase-2 16-route SR | **86.7%** (13/15 in one report; verify 13/16 = 81.25% vs 86.7% — use handover declare) | `WAM_PHASE2_SIGNOFF` / work overview |
+| Phase-2 16-route SR | **81.25% (13/16)** — authoritative `wam_phase2_e2_tti25_full16_20260908` | work overview / RUNBOOK gate |
 | Step-G 16-route SR | **93.33%** (14/15) | Step G declare 2026-08-28 |
 | Step-G mean progress | **97.52%** | same |
 | Step-G max route | **153.7 m** | Route 06 |

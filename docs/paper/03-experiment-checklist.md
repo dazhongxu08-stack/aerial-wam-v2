@@ -2,13 +2,13 @@
 
 | ID | Experiment | Status | Notes |
 |----|------------|--------|-------|
-| E1 | Phase-2 16-route urban benchmark (SR, progress, collision) | ✅ Done | 86.7% cited — verify against signoff JSON |
+| E1 | Phase-2 16-route urban benchmark (SR, progress, collision) | ✅ Done | **Cite 81.25% (13/16)** — `wam_phase2_e2_tti25_full16_20260908` / work overview. Do **not** cite legacy 86.7% until re-verified. |
 | E2a | Ablate ImaginationPlanner (actor-only) | ✅ Done | Phase-2 `seen_airsim16_long_routes`: **SR 0/16 (0%)**, IR **58.1%**, SCR 18.8%, Prog 44.4% — `artifacts/e2_ablation_phase2_20260923_091203/e2a_no_planner/full16.json` |
 | E2b | Ablate ThreeZone shield (shield-off) | ✅ Done | Same set: **SR 10/16 (62.5%)**, SPL 58.8%, IR **0%**, SCR 12.5%, Prog 80.3% — `.../e2b_no_shield/full16.json` |
 | E2c | Ablate subgoals (single-scale `direct_g`) | ✅ Done | **SR 8/16 (50%)**, SPL 49.2%, IR **75.2%**, SCR 12.5%, Prog 66.2% — `artifacts/e2c_direct_g_phase2_20260923_165130/full16.json` |
-| E3 | GT depth upper bound vs predicted $\hat{D}$ | 🔲 TODO | Quantify monocular contract cost |
-| E4 | Horizon $H \in \{1,3,5,10\}$ | 🔲 Partial | Planner sweep — runner ready (`run_e4_horizon_sweep_full16.sh`) |
-| E5 | Orin real flight ≥10 episodes | 🔲 **Blocker** | Short demo route; log traj + video |
+| E3 | GT depth upper bound vs predicted $\hat{D}$ | 🔲 Ready to run | `--use-gt-depth` + `run_e3_gt_depth_full16.sh` (after E4 frees AirSim) |
+| E4 | Horizon $H \in \{1,3,5,10\}$ | 🔄 Likely running | `run_e4_horizon_sweep_full16.sh` on ablation-4090; confirm when SSH up |
+| E5 | Orin real flight ≥10 episodes | 🔲 **Deferred to tomorrow** | Short demo route; log traj + video |
 | E6 | Ground sim zero-shot transfer | 🔲 Planned | G0/G1 from work overview |
 
 ## E2 takeaway (for Table 3 / discussion)
@@ -29,7 +29,7 @@
 ## Tables still to generate
 
 - [ ] Table 1: Related work (LaTeX in `01-related-work.md`)
-- [ ] Table 2: Main results vs baselines
+- [x] Table 2: Main results vs baselines — draft in `05-main-results-table2.md` (SR locked; fill SPL/IR)
 - [x] Table 3: Ablations (E2) — E2a/E2b/E2c numbers locked
 - [ ] Figure 1: System overview
 - [ ] Figure 2: Distillation pipeline

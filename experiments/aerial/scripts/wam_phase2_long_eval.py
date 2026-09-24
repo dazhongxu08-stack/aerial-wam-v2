@@ -266,6 +266,41 @@ def main() -> int:
         default=None,
         help="If set, write per-route expert rollouts to this directory (episode_XXXXX.npz)",
     )
+    parser.add_argument(
+        "--save-dataset-append",
+        action="store_true",
+        help="Do not wipe existing episode_*.npz; write at next free index",
+    )
+    parser.add_argument(
+        "--save-arrived-only",
+        action="store_true",
+        help="Only write npz when episode arrived (teacher collect)",
+    )
+    parser.add_argument(
+        "--stuck-abort-after-s",
+        type=float,
+        default=0.0,
+        help="Abort episode after this many seconds with <stuck-abort-progress-m "
+             "improvement in rem-band (0=off). Speeds failed R0 teacher attempts.",
+    )
+    parser.add_argument(
+        "--stuck-abort-progress-m",
+        type=float,
+        default=1.0,
+        help="Min d_to_goal improvement to reset stuck-abort timer",
+    )
+    parser.add_argument(
+        "--stuck-abort-rem-lo",
+        type=float,
+        default=25.0,
+        help="Only apply stuck-abort when d_to_goal >= this (m)",
+    )
+    parser.add_argument(
+        "--stuck-abort-rem-hi",
+        type=float,
+        default=45.0,
+        help="Only apply stuck-abort when d_to_goal <= this (m)",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--planner", action="store_true")
     parser.add_argument("--planner-horizon", type=int, default=5)
@@ -279,11 +314,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--planner-mock",
-        choices=("pass", "rules", "wm_bare"),
+        choices=("pass", "rules", "wm_bare", "wm_escape"),
         default=None,
         help="Planner ablations: pass=return π unchanged; "
              "rules=same candidates+hand biases, geometric progress (no WM); "
-             "wm_bare=same candidates, WM return only (no hand biases).",
+             "wm_bare=same candidates, WM return only (no hand biases); "
+             "wm_escape=WM return + open-side escape/stuck bias only.",
     )
     parser.add_argument(
         "--goal-feat-mode",
@@ -294,6 +330,12 @@ def main() -> int:
     parser.add_argument(
         "--depth-ckpt",
         default="experiments/aerial/rl/artifacts/depth_ckpt_p45mid_s8j_20260825/depth_best_holdout_da3_ft_head.pt",
+    )
+    parser.add_argument(
+        "--use-gt-depth",
+        action="store_true",
+        help="E3 upper bound: ThreeZone/scene depth from AirSim GT DepthPlanar "
+        "(GTDepthAdapter) instead of D̂ checkpoint. Never for deploy claims.",
     )
     parser.add_argument(
         "--tau-ckpt",
@@ -502,7 +544,7 @@ def main() -> int:
     from experiments.aerial.rl.planner import ImaginationPlanner
     from experiments.aerial.rl.reward import RewardConfig
     from experiments.aerial.rl.global_ref_planner import GlobalRefConfig, GlobalRefPlanner
-    from experiments.aerial.rl.depth_predictor import DepthMinPredictor
+    from experiments.aerial.rl.depth_predictor import DepthMinPredictor, GTDepthAdapter
     from experiments.aerial.rl.tau_predictor import make_tau_predictor
     from experiments.aerial.rl.scene_intent import SceneIntentPlanner, TowardGoalIntent
     from experiments.aerial.rl.subgoal_generator import (
@@ -578,17 +620,22 @@ def main() -> int:
         if not Path(args.depth_ckpt).is_absolute()
         else Path(args.depth_ckpt)
     )
-    depth_pred = (
-        DepthMinPredictor.from_checkpoint(depth_path, device=device_str)
-        if (not args.mock and depth_path.is_file())
-        else None
-    )
-    if depth_pred is None and not args.mock:
-        raise SystemExit(
-            f"ABORT: depth checkpoint not found at {depth_path}\n"
-            "ThreeZoneShield forward cap requires depth. "
-            "Pass --depth-ckpt <path> or --mock to run without it."
+    if bool(getattr(args, "use_gt_depth", False)):
+        depth_pred = GTDepthAdapter()
+        logger.warning("E3: using GTDepthAdapter (AirSim GT depth) — not a deploy claim")
+        depth_path = Path("GTDepthAdapter")
+    else:
+        depth_pred = (
+            DepthMinPredictor.from_checkpoint(depth_path, device=device_str)
+            if (not args.mock and depth_path.is_file())
+            else None
         )
+        if depth_pred is None and not args.mock:
+            raise SystemExit(
+                f"ABORT: depth checkpoint not found at {depth_path}\n"
+                "ThreeZoneShield forward cap requires depth. "
+                "Pass --depth-ckpt <path>, --use-gt-depth, or --mock."
+            )
 
     tau_path = (
         (root / args.tau_ckpt).resolve()
@@ -756,6 +803,7 @@ def main() -> int:
 
     results: List[Dict[str, Any]] = []
     save_dir: Path | None = None
+    next_save_slot = 0
     if args.save_dataset:
         from experiments.aerial.rl import dataset as ds_mod
 
@@ -765,9 +813,19 @@ def main() -> int:
             else (root / args.save_dataset).resolve()
         )
         save_dir.mkdir(parents=True, exist_ok=True)
-        for old in save_dir.glob("episode_*.npz"):
-            old.unlink()
-        logger.info("save-dataset: %s", save_dir)
+        if args.save_dataset_append:
+            existing = []
+            for p in save_dir.glob("episode_*.npz"):
+                try:
+                    existing.append(int(p.stem.split("_")[1]))
+                except (IndexError, ValueError):
+                    continue
+            next_save_slot = (max(existing) + 1) if existing else 0
+            logger.info("save-dataset append from slot %d: %s", next_save_slot, save_dir)
+        else:
+            for old in save_dir.glob("episode_*.npz"):
+                old.unlink()
+            logger.info("save-dataset: %s", save_dir)
 
     for slot, ep_idx in enumerate(route_idxs):
         r_info = routes[ep_idx]
@@ -948,6 +1006,10 @@ def main() -> int:
                 nav_reward = NavigationReward(goal_pos, reward_cfg)
                 nav_reward.reset(goal_pos, p_curr)
             prev_obs = obs
+            stuck_abort_s = float(getattr(args, "stuck_abort_after_s", 0.0) or 0.0)
+            stuck_best_d = float(d0)
+            stuck_best_step = 0
+            stuck_aborted = False
 
             for step in range(args.max_steps):
                 d_fwd = None
@@ -1101,6 +1163,7 @@ def main() -> int:
                         oa_step = {
                             "offer_escape": bool(plan_meta.get("offer_escape")),
                             "chose_climb": bool(plan_meta.get("chose_climb")),
+                            "force_peel_exec": bool(plan_meta.get("force_peel_exec")),
                             "chosen_idx": plan_meta.get("chosen_idx"),
                             "n_candidates": plan_meta.get("n_candidates"),
                             "d_fwd_plan": plan_meta.get("d_fwd"),
@@ -1286,6 +1349,9 @@ def main() -> int:
                         "governor_cap": bool(step in governor_cap_steps),
                         "offer_escape": oa_step.get("offer_escape") if oa_step else None,
                         "chose_climb": oa_step.get("chose_climb") if oa_step else None,
+                        "force_peel_exec": (
+                            oa_step.get("force_peel_exec") if oa_step else None
+                        ),
                         "oc_fwd": oa_step.get("oc_fwd") if oa_step else None,
                         "oc_climb": oa_step.get("oc_climb") if oa_step else None,
                         "oc_climb_beats_fwd": (
@@ -1333,13 +1399,65 @@ def main() -> int:
                         severe_coll = True
                     break
 
-            if save_dir is not None and transitions:
-                ds_mod.write_episode(save_dir, slot, transitions)
+                # Mid-course stuck abort (teacher collect throughput): R0 choke ~32m.
+                if stuck_abort_s > 0.0:
+                    d_now = float(np.linalg.norm(goal_pos - p_curr))
+                    rem_lo = float(args.stuck_abort_rem_lo)
+                    rem_hi = float(args.stuck_abort_rem_hi)
+                    prog_need = float(args.stuck_abort_progress_m)
+                    if rem_lo <= d_now <= rem_hi:
+                        if d_now <= stuck_best_d - prog_need:
+                            stuck_best_d = d_now
+                            stuck_best_step = step
+                        else:
+                            elapsed_s = (step - stuck_best_step) / max(
+                                1e-6, float(args.step_hz)
+                            )
+                            if elapsed_s >= stuck_abort_s:
+                                stuck_aborted = True
+                                fail_tag = "stuck_abort"
+                                d_final = d_now
+                                logger.info(
+                                    "Route %02d stuck-abort at step %d d_to=%.1fm "
+                                    "(no ≥%.1fm progress for %.1fs in rem[%.0f,%.0f])",
+                                    ep_idx + 1,
+                                    step,
+                                    d_now,
+                                    prog_need,
+                                    elapsed_s,
+                                    rem_lo,
+                                    rem_hi,
+                                )
+                                break
+                    else:
+                        # Outside band: keep best tracker warm but don't abort.
+                        if d_now < stuck_best_d:
+                            stuck_best_d = d_now
+                            stuck_best_step = step
+
+            save_this = bool(
+                save_dir is not None
+                and transitions
+                and (arrived or not bool(getattr(args, "save_arrived_only", False)))
+            )
+            if save_this:
+                write_slot = int(next_save_slot) if args.save_dataset_append else int(slot)
+                ds_mod.write_episode(save_dir, write_slot, transitions)
+                if args.save_dataset_append:
+                    next_save_slot = write_slot + 1
                 logger.info(
-                    "save-dataset: route %02d -> episode_%05d.npz (%d steps)",
+                    "save-dataset: route %02d -> episode_%05d.npz (%d steps) arrived=%s",
                     ep_idx + 1,
-                    slot,
+                    write_slot,
                     len(transitions),
+                    arrived,
+                )
+            elif save_dir is not None and transitions and args.save_arrived_only:
+                logger.info(
+                    "save-dataset: skip non-arrived route %02d (%d steps, tag=%s)",
+                    ep_idx + 1,
+                    len(transitions),
+                    fail_tag,
                 )
 
             actual_len = (
