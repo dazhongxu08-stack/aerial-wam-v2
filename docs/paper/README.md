@@ -13,4 +13,4 @@ Working title:
 
 Desktop mirror: `~/Desktop/aerial-wam-v2-paper-outline.md` (Chinese planning notes).
 
-**Status (2026-09-23 night)**: E2a/E2b Phase-2 ablations **done** (SR 0% / 62.5%); E2c overnight; real-flight table (**E5**) still the submission blocker.
+**Status (2026-09-24)**: E2a/E2b/E2c Phase-2 ablations **done** (SR 0% / 62.5% / 50%); next sim: E4 horizon sweep; real-flight (**E5**) still the submission blocker.
