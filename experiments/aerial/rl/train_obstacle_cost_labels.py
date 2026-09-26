@@ -268,6 +268,12 @@ def pack_features_from_frames(
                 d_far=float(d_far),
                 percentile=float(percentile),
             )
+            # Prefer collector-provided group when present (left_near is easy to
+            # lose under re-classify when fwd also looks near).
+            if groups is not None:
+                g_i = str(np.asarray(groups).astype(str)[i])
+                if g_i in ("fwd_empty", "fwd_near", "left_near"):
+                    scene = g_i
             if scene is None:
                 continue
             for _name, xyz in _TRAIN_PROBES:
@@ -686,6 +692,19 @@ def _cmd_gate(args: argparse.Namespace) -> int:
             "(run train and save with explicit flag first)"
         )
     report = run_task5_gate(dyn, data["feature"], data["group"])
+    n_left = int((report.get("numbers") or {}).get("n_left_near") or 0)
+    if bool(getattr(args, "require_left_near", False)):
+        min_left = int(getattr(args, "min_left_near", 20) or 20)
+        if n_left < min_left:
+            report["passed"] = False
+            report["checks"] = dict(report.get("checks") or {})
+            report["checks"]["left_near_present"] = False
+            report["checks"]["left_near_skipped"] = False
+            report["require_left_near"] = True
+            report["min_left_near"] = min_left
+        elif report.get("checks", {}).get("left_near_skipped"):
+            report["passed"] = False
+            report["checks"]["left_near_present"] = False
     print(json.dumps(report, indent=2, sort_keys=True))
     if args.report:
         Path(args.report).parent.mkdir(parents=True, exist_ok=True)
@@ -733,6 +752,12 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     pg.add_argument("--labels", type=str, required=True)
     pg.add_argument("--report", type=str, default="")
     pg.add_argument("--device", type=str, default="cpu")
+    pg.add_argument(
+        "--require-left-near",
+        action="store_true",
+        help="Refuse soft-skip: n_left_near must meet --min-left-near",
+    )
+    pg.add_argument("--min-left-near", type=int, default=20)
 
     args = p.parse_args(argv)
     if args.cmd == "label":
