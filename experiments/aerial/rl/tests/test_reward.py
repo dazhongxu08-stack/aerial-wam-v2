@@ -243,3 +243,152 @@ def test_navigation_reward_folds_depth_min_clearance():
     assert terms["collision_risk"] == pytest.approx(expect)
     assert terms["reward"] == pytest.approx(-10.0 * expect)
 
+
+def test_feasible_side_pays_open_yaw_and_withholds_press():
+    from experiments.aerial.rl.reward import feasible_side_progress
+
+    cfg = RewardConfig(
+        feasible_side_progress=True,
+        feasible_fwd_block_m=8.0,
+        feasible_side_margin_m=2.0,
+        feasible_side_credit_m=0.8,
+    )
+    # Nose blocked at 4 m, left opening at 20 m. Chord progress of a forward
+    # step would have been +0.7; that credit is withheld.
+    press = feasible_side_progress(
+        0.7,
+        np.array([0.7, 0.0, 0.0, 0.0]),
+        d_fwd=4.0,
+        d_left=20.0,
+        d_right=5.0,
+        cfg=cfg,
+    )
+    assert press["progress"] == pytest.approx(0.0)
+    assert press["suppress_straight"] == 1.0
+    yaw = feasible_side_progress(
+        -0.02,
+        np.array([0.1, 0.0, 0.0, 0.2]),
+        d_fwd=4.0,
+        d_left=20.0,
+        d_right=5.0,
+        cfg=cfg,
+    )
+    assert yaw["progress"] == pytest.approx(0.8)
+    assert yaw["feasible_side"] == pytest.approx(0.8)
+    # Open street: chord progress is unchanged.
+    clear = feasible_side_progress(
+        0.7,
+        np.array([0.7, 0.0, 0.0, 0.0]),
+        d_fwd=20.0,
+        d_left=20.0,
+        d_right=20.0,
+        cfg=cfg,
+    )
+    assert clear["progress"] == pytest.approx(0.7)
+    assert clear["suppress_straight"] == 0.0
+
+
+def test_feasible_side_off_by_default_and_closed_box_unchanged():
+    from experiments.aerial.rl.reward import feasible_side_progress
+
+    off = feasible_side_progress(
+        0.5,
+        np.array([0.7, 0.0, 0.0, 0.0]),
+        d_fwd=4.0,
+        d_left=20.0,
+        d_right=5.0,
+        cfg=RewardConfig(),
+    )
+    assert off["progress"] == pytest.approx(0.5)
+    boxed = feasible_side_progress(
+        0.5,
+        np.array([0.2, 0.0, 0.0, 0.2]),
+        d_fwd=4.0,
+        d_left=4.5,
+        d_right=4.2,
+        cfg=RewardConfig(feasible_side_progress=True),
+    )
+    assert boxed["progress"] == pytest.approx(0.5)
+
+
+def test_level_goal_climb_is_not_progress_even_when_street_is_open():
+    from experiments.aerial.rl.reward import feasible_side_progress
+
+    cfg = RewardConfig(feasible_side_progress=True, feasible_side_credit_m=0.8)
+    goal = np.array([40.0, 0.0, 0.0, 40.0])
+    climb = feasible_side_progress(
+        0.2,
+        np.array([0.02, 0.1, 0.49, 0.05]),
+        d_fwd=20.0,
+        d_left=9.0,
+        d_right=7.0,
+        goal_rel=goal,
+        cfg=cfg,
+    )
+    assert climb["progress"] <= 0.0
+    assert climb["climb_cost"] >= 0.8
+    forward = feasible_side_progress(
+        0.7,
+        np.array([0.7, 0.0, 0.0, 0.0]),
+        d_fwd=20.0,
+        d_left=9.0,
+        d_right=7.0,
+        goal_rel=goal,
+        cfg=cfg,
+    )
+    assert forward["progress"] == pytest.approx(0.7)
+    assert forward["climb_cost"] == pytest.approx(0.0)
+    above = feasible_side_progress(
+        0.4,
+        np.array([0.0, 0.0, 0.4, 0.0]),
+        d_fwd=20.0,
+        d_left=9.0,
+        d_right=7.0,
+        goal_rel=np.array([10.0, 0.0, 5.0, 11.2]),
+        cfg=cfg,
+    )
+    assert above["climb_cost"] == pytest.approx(0.0)
+    assert above["progress"] == pytest.approx(0.4)
+
+
+def test_early_yaw_is_paid_and_sideslip_is_not():
+    from experiments.aerial.rl.reward import feasible_side_progress
+
+    cfg = RewardConfig(
+        feasible_side_progress=True,
+        feasible_early_turn_m=18.0,
+        feasible_side_credit_m=0.8,
+    )
+    # Building still ahead: left is open, right is the facade. Turn now.
+    yaw = feasible_side_progress(
+        -0.02,
+        np.array([0.1, 0.0, 0.0, 0.2]),
+        d_fwd=14.0,
+        d_left=16.0,
+        d_right=6.0,
+        cfg=cfg,
+    )
+    assert yaw["progress"] == pytest.approx(0.8)
+    assert yaw["feasible_side"] == pytest.approx(0.8)
+    # The flown failure: constant body-left slide while a side is already short.
+    slide = feasible_side_progress(
+        0.5,
+        np.array([0.0, 0.4, 0.05, 0.0]),
+        d_fwd=14.0,
+        d_left=16.0,
+        d_right=6.0,
+        cfg=cfg,
+    )
+    assert slide["progress"] <= 0.0
+    assert slide["feasible_side"] == pytest.approx(0.0)
+    into = feasible_side_progress(
+        0.4,
+        np.array([0.0, -0.4, 0.0, 0.0]),
+        d_fwd=12.0,
+        d_left=16.0,
+        d_right=6.0,
+        cfg=cfg,
+    )
+    assert into["progress"] <= 0.0
+    assert into["slide_cost"] >= 0.8
+

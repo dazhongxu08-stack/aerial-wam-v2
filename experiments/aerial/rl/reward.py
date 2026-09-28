@@ -94,8 +94,32 @@ class RewardConfig:
     gate_progress_by_heading: bool = False
     curiosity_fwd_thresh_m: float = 3.5   # Trigger exploration when forward depth <= thresh
     curiosity_max_bonus: float = 2.0      # Max curiosity bonus per step
+    # Clearance-centering / anti-stick (overnight Phase C′): jam-band peel.
+    # Defaults 0 = no-op until overlay enables them.
+    w_clearance_center: float = 0.0       # bonus: yaw/strafe toward open side
+    w_press_wall: float = 0.0             # tax: +dx into near wall while stuck
+    center_fwd_thresh_m: float = 8.0
+    center_progress_eps: float = 0.15
+    # Soft: keep the near-wall tax/peel when the goal is still getting closer.
+    # Default False so a shrinking goal distance still silences the jam band.
+    peel_despite_progress: bool = False
+    # Turn toward the open side before the nose reaches the wall. A late
+    # sideslip is not that turn. Default off.
+    feasible_side_progress: bool = False
+    feasible_fwd_block_m: float = 8.0
+    feasible_early_turn_m: float = 18.0
+    feasible_side_margin_m: float = 2.0
+    feasible_side_credit_m: float = 0.8
+    # Climb is withheld unless the goal itself is this far above the aircraft.
+    feasible_climb_allow_m: float = 1.0
+    center_min_lat_adv_m: float = 2.0
+    center_yaw_scale: float = 1.0
     success_dist_m: float = DEFAULT_ONLINE_SUCCESS_DIST_M
     success_bonus: float = 10.0
+    # Soft→Hard curriculum (breakout plan): Soft sets False so contact still
+    # costs via w_collision / obstacle_cost but does not end the episode —
+    # allows "leave-wall" positives. Hard keeps True (default).
+    terminate_on_collision: bool = True
     # Maneuver-penalty curriculum (design doc §2.4): keep the aggressive-maneuver
     # penalty small early (exploration matters more than smoothness), then ramp it
     # up as competence rises. ``w_maneuver`` is the start; the effective weight
@@ -471,17 +495,128 @@ def descent_flight_cost(
     return w * float(-dz)
 
 
+def _level_goal_climb_cost(
+    action: np.ndarray,
+    goal_rel: Optional[np.ndarray],
+    cfg: RewardConfig,
+) -> float:
+    """Cost of climbing when the goal is not above the aircraft.
+
+    The street in front can still be open. Climbing the sky slot is not the
+    side route. Inactive when the goal itself sits above ``feasible_climb_allow_m``.
+    """
+    if goal_rel is None:
+        return 0.0
+    g = np.asarray(goal_rel, dtype=np.float64).reshape(-1)
+    gz = float(g[2]) if g.size > 2 else 0.0
+    allow = float(getattr(cfg, "feasible_climb_allow_m", 1.0) or 1.0)
+    if gz > allow:
+        return 0.0
+    a = np.asarray(action, dtype=np.float64).reshape(-1)
+    dz = float(a[2]) if a.size > 2 else 0.0
+    if dz <= 0.05:
+        return 0.0
+    credit = float(getattr(cfg, "feasible_side_credit_m", 0.8) or 0.8)
+    return credit * float(np.clip(dz / 0.15, 0.0, 1.5))
+
+
+def feasible_side_progress(
+    progress: float,
+    action: np.ndarray,
+    *,
+    d_fwd: Optional[float],
+    d_left: Optional[float],
+    d_right: Optional[float],
+    goal_rel: Optional[np.ndarray] = None,
+    cfg: RewardConfig = RewardConfig(),
+) -> Dict[str, float]:
+    """Pay an early yaw toward the open side. A late sideslip is not progress.
+
+    When one side cone is already short and the other is clearer, yaw toward
+    the clear side counts as progress while the building is still ahead
+    (forward out to ``feasible_early_turn_m``). Body strafe does not: chord
+    closure from sliding into the facade is withheld, and strafing into the
+    shorter cone is charged. Climb is withheld unless the goal is above.
+    Inactive unless ``feasible_side_progress``.
+    """
+    raw = float(progress)
+    unchanged = {
+        "progress": raw,
+        "suppress_straight": 0.0,
+        "feasible_side": 0.0,
+        "climb_cost": 0.0,
+        "slide_cost": 0.0,
+    }
+    if not bool(getattr(cfg, "feasible_side_progress", False)):
+        return unchanged
+    climb = _level_goal_climb_cost(action, goal_rel, cfg)
+    a = np.asarray(action, dtype=np.float64).reshape(-1)
+    dx = float(a[0]) if a.size > 0 else 0.0
+    dy = float(a[1]) if a.size > 1 else 0.0
+    dz = float(a[2]) if a.size > 2 else 0.0
+    dyaw = float(a[3]) if a.size > 3 else 0.0
+    climb_dominated = climb > 0.0 and dz >= abs(dy) and dz >= abs(dyaw)
+
+    def _finish(result: Dict[str, float]) -> Dict[str, float]:
+        result["climb_cost"] = float(climb)
+        result["slide_cost"] = float(result.get("slide_cost", 0.0))
+        if climb_dominated:
+            result["progress"] = min(float(result["progress"]), 0.0)
+            result["feasible_side"] = 0.0
+            result["suppress_straight"] = 1.0
+        return result
+
+    if any(v is None or not np.isfinite(float(v)) for v in (d_fwd, d_left, d_right)):
+        return _finish(dict(unchanged))
+    fwd = float(d_fwd)
+    left = float(d_left)
+    right = float(d_right)
+    early = float(getattr(cfg, "feasible_early_turn_m", 18.0) or 18.0)
+    margin = float(getattr(cfg, "feasible_side_margin_m", 2.0) or 2.0)
+    credit = float(getattr(cfg, "feasible_side_credit_m", 0.8) or 0.8)
+    disparity = max(left, right) >= min(left, right) + margin
+    open_sign = 1.0 if left >= right else -1.0
+    yaw_toward = open_sign * dyaw
+    strafe_dom = abs(dy) >= 0.15 and abs(dy) >= abs(dx) and abs(dy) >= abs(dyaw)
+    into_short = disparity and dy * open_sign < -0.05
+    slide = credit * float(np.clip(abs(dy) / 0.15, 0.0, 1.5)) if into_short else 0.0
+    pressing = dx >= 0.25 and dx >= abs(dy) and abs(dyaw) < 0.08
+    beside = disparity and min(left, right) <= early
+    in_turn_band = disparity and fwd <= early
+    out = dict(unchanged)
+    out["slide_cost"] = slide
+    if in_turn_band and pressing:
+        out["progress"] = min(raw, 0.0)
+        out["suppress_straight"] = 1.0
+        return _finish(out)
+    if in_turn_band and yaw_toward > 0.02 and dx <= 0.55 and not strafe_dom:
+        paid = credit * float(np.clip(yaw_toward / 0.12, 0.0, 1.0))
+        out["progress"] = paid if into_short else max(raw, paid)
+        out["feasible_side"] = paid
+        return _finish(out)
+    if (beside and strafe_dom) or into_short:
+        out["progress"] = min(raw, 0.0)
+        out["suppress_straight"] = 1.0
+        return _finish(out)
+    return _finish(out)
+
+
 def path_shaping_terms(
     action: np.ndarray,
     goal_rel: np.ndarray,
     progress: float,
     *,
     hist_level: bool = False,
+    suppress_straight: bool = False,
     cfg: RewardConfig = RewardConfig(),
 ) -> Dict[str, float]:
     """Straight − idle − away − level − backward − descent. Pure; real and imagined."""
     prog = nose_aligned_progress(progress, goal_rel, cfg=cfg)
-    straight = straight_to_goal_bonus(action, goal_rel, cfg=cfg)
+    straight = (
+        0.0
+        if suppress_straight
+        else straight_to_goal_bonus(action, goal_rel, cfg=cfg)
+    )
     idle = idle_body_cost(action, goal_rel, cfg=cfg)
     away = away_from_goal_cost(prog, cfg=cfg)
     level = level_flight_cost(action, prog, hist_level=hist_level, cfg=cfg)
@@ -499,6 +634,73 @@ def path_shaping_terms(
     }
 
 
+def clearance_centering_bonus(
+    action: np.ndarray,
+    *,
+    d_fwd: Optional[float],
+    d_left: Optional[float] = None,
+    d_right: Optional[float] = None,
+    progress: float = 0.0,
+    cfg: RewardConfig = RewardConfig(),
+) -> Dict[str, float]:
+    """Anti-stick shaping when jammed near a wall with an open side.
+
+    - ``w_press_wall``: tax forward body motion into a near wall. With the
+      default gate this applies only while progress is stalled. Soft sets
+      ``peel_despite_progress`` so closing distance through the wall does not
+      turn the tax off.
+    - ``w_clearance_center``: bonus for yaw/strafe toward the clearer side when
+      ``max(L,R) - d_fwd`` is large enough.
+
+    Imagination often has only ``d_fwd`` → press tax still applies; centering
+    needs L/R cones (real path / richer WM).
+    """
+    w_c = float(getattr(cfg, "w_clearance_center", 0.0) or 0.0)
+    w_p = float(getattr(cfg, "w_press_wall", 0.0) or 0.0)
+    zero = {"center_bonus": 0.0, "press_cost": 0.0, "clearance_centering": 0.0}
+    if w_c <= 0.0 and w_p <= 0.0:
+        return zero
+    if d_fwd is None or not np.isfinite(float(d_fwd)):
+        return zero
+    fwd = float(d_fwd)
+    thr = float(getattr(cfg, "center_fwd_thresh_m", 8.0) or 8.0)
+    if fwd > thr:
+        return zero
+    progress_eps = float(getattr(cfg, "center_progress_eps", 0.15) or 0.15)
+    keep_peel = bool(getattr(cfg, "peel_despite_progress", False))
+    if float(progress) > progress_eps and not keep_peel:
+        return zero
+    a = np.asarray(action, dtype=np.float64).reshape(-1)
+    dx = float(a[0]) if a.size > 0 else 0.0
+    dy = float(a[1]) if a.size > 1 else 0.0
+    dyaw = float(a[3]) if a.size > 3 else 0.0
+    # Stronger tax as wall gets closer.
+    press = w_p * max(0.0, dx) * (1.0 - fwd / max(thr, 1e-3))
+    center = 0.0
+    if (
+        w_c > 0.0
+        and d_left is not None
+        and d_right is not None
+        and np.isfinite(float(d_left))
+        and np.isfinite(float(d_right))
+    ):
+        left = float(d_left)
+        right = float(d_right)
+        open_sign = 1.0 if left >= right else -1.0
+        lat_adv = max(left, right) - fwd
+        min_adv = float(getattr(cfg, "center_min_lat_adv_m", 2.0) or 2.0)
+        if lat_adv >= min_adv:
+            yaw_s = float(getattr(cfg, "center_yaw_scale", 1.0) or 1.0)
+            peel = open_sign * (yaw_s * dyaw + 0.5 * dy)
+            center = w_c * max(0.0, peel) * float(np.clip(lat_adv / 10.0, 0.0, 1.5))
+    total = float(center - press)
+    return {
+        "center_bonus": float(center),
+        "press_cost": float(press),
+        "clearance_centering": total,
+    }
+
+
 def reward_terms(
     progress: float,
     collision_risk: float,
@@ -507,6 +709,9 @@ def reward_terms(
     curiosity_gain: float = 0.0,
     efficiency_cost_val: float = 0.0,
     path_shaping_val: float = 0.0,
+    clearance_centering_val: float = 0.0,
+    climb_cost: float = 0.0,
+    slide_cost: float = 0.0,
 ) -> Dict[str, float]:
     """Pure term breakdown + scalar reward. Used by both real and imagined paths."""
     r = (
@@ -516,6 +721,9 @@ def reward_terms(
         + cfg.w_curiosity * float(np.clip(curiosity_gain, 0.0, cfg.curiosity_max_bonus))
         - float(efficiency_cost_val)
         + float(path_shaping_val)
+        + float(clearance_centering_val)
+        - float(climb_cost)
+        - float(slide_cost)
     )
     return {
         "reward": float(r),
@@ -525,6 +733,9 @@ def reward_terms(
         "curiosity_gain": float(curiosity_gain),
         "efficiency_cost": float(efficiency_cost_val),
         "path_shaping": float(path_shaping_val),
+        "clearance_centering": float(clearance_centering_val),
+        "climb_cost": float(climb_cost),
+        "slide_cost": float(slide_cost),
     }
 
 
@@ -663,10 +874,30 @@ class NavigationReward:
         eff = efficiency_cost(
             action, yaw_err_rad=yaw_err, ds_true_m=ds_true, cfg=self.cfg
         )
+        d_left = (
+            float(cones.get("left"))
+            if isinstance(cones, dict) and cones.get("left") is not None
+            else None
+        )
+        d_right = (
+            float(cones.get("right"))
+            if isinstance(cones, dict) and cones.get("right") is not None
+            else None
+        )
+        side = feasible_side_progress(
+            float(progress),
+            a_arr,
+            d_fwd=float(d_fwd) if d_fwd is not None and np.isfinite(float(d_fwd)) else None,
+            d_left=d_left,
+            d_right=d_right,
+            goal_rel=goal_rel,
+            cfg=self.cfg,
+        )
+        progress_paid = float(side["progress"])
         level_step = (
             abs(float(a_arr[2]) if a_arr.size > 2 else 0.0) <= float(self.cfg.level_dz_thr_m)
             and abs(float(a_arr[3]) if a_arr.size > 3 else 0.0) <= float(self.cfg.level_dyaw_thr_rad)
-            and float(progress) <= 0.0
+            and progress_paid <= 0.0
         )
         self._level_flags.append(bool(level_step))
         wlen = max(1, int(self.cfg.level_window))
@@ -674,9 +905,30 @@ class NavigationReward:
             self._level_flags = self._level_flags[-wlen:]
         hist_level = len(self._level_flags) >= wlen and all(self._level_flags)
         shaping = path_shaping_terms(
-            a_arr, goal_rel, float(progress), hist_level=hist_level, cfg=self.cfg
+            a_arr,
+            goal_rel,
+            progress_paid,
+            hist_level=hist_level,
+            suppress_straight=bool(side["suppress_straight"]),
+            cfg=self.cfg,
         )
         prog_eff = float(shaping.get("progress_eff", progress))
+        center = clearance_centering_bonus(
+            a_arr,
+            d_fwd=float(d_fwd) if d_fwd is not None and np.isfinite(float(d_fwd)) else None,
+            d_left=(
+                float(cones.get("left"))
+                if isinstance(cones, dict) and cones.get("left") is not None
+                else None
+            ),
+            d_right=(
+                float(cones.get("right"))
+                if isinstance(cones, dict) and cones.get("right") is not None
+                else None
+            ),
+            progress=float(progress),
+            cfg=self.cfg,
+        )
         terms = reward_terms(
             prog_eff,
             collision_risk,
@@ -685,11 +937,18 @@ class NavigationReward:
             curiosity_gain=curiosity_gain,
             efficiency_cost_val=float(eff["efficiency_cost"]),
             path_shaping_val=float(shaping["path_shaping"]),
+            clearance_centering_val=float(center["clearance_centering"]),
+            climb_cost=float(side["climb_cost"]),
+            slide_cost=float(side["slide_cost"]),
         )
         terms.update({k: eff[k] for k in ("strafe_ratio", "strafe_excess", "heading_term", "idle")})
+        terms.update({k: center[k] for k in ("center_bonus", "press_cost")})
         terms.update(shaping)
         terms["clearance_risk"] = float(clear_risk)
         terms["progress_raw"] = float(progress)
+        terms["feasible_side"] = float(side["feasible_side"])
+        terms["climb_cost"] = float(side["climb_cost"])
+        terms["slide_cost"] = float(side["slide_cost"])
 
         intervention_cost = 0.0
         hard_brake = False
@@ -710,6 +969,8 @@ class NavigationReward:
         arrived = dist is not None and dist < self.cfg.success_dist_m
         if arrived:
             terms["reward"] += self.cfg.success_bonus
-        done = bool(obs.collided or arrived)
+        coll_done = bool(obs.collided) and bool(self.cfg.terminate_on_collision)
+        done = bool(coll_done or arrived)
         terms["arrived"] = float(arrived)
+        terms["terminate_on_collision"] = float(bool(self.cfg.terminate_on_collision))
         return terms["reward"], done, terms

@@ -38,9 +38,11 @@ from experiments.aerial.rl.goal_features import (
 )
 from experiments.aerial.rl.reward import (
     RewardConfig,
+    clearance_centering_bonus,
     clearance_m_along_action,
     clearance_risk_from_depth,
     efficiency_cost,
+    feasible_side_progress,
     path_shaping_terms,
     reward_terms,
 )
@@ -235,10 +237,21 @@ def imagine(
                 clear_risk = clearance_risk_from_depth(d_hat)
                 collision_risk = float(max(float(out.p_coll), float(clear_risk)))
             a_arr = np.asarray(a, dtype=np.float64).reshape(-1)
+            d_hat = getattr(out, "d_fwd_hat", None)
+            side = feasible_side_progress(
+                float(prog),
+                a_arr,
+                d_fwd=float(d_hat) if d_hat is not None and np.isfinite(float(d_hat)) else None,
+                d_left=getattr(out, "d_left_hat", None),
+                d_right=getattr(out, "d_right_hat", None),
+                goal_rel=g_rel,
+                cfg=cfg,
+            )
+            prog_paid = float(side["progress"])
             level_step = (
                 abs(float(a_arr[2]) if a_arr.size > 2 else 0.0) <= float(cfg.level_dz_thr_m)
                 and abs(float(a_arr[3]) if a_arr.size > 3 else 0.0) <= float(cfg.level_dyaw_thr_rad)
-                and float(prog) <= 0.0
+                and prog_paid <= 0.0
             )
             level_flags[b].append(bool(level_step))
             wlen = max(1, int(cfg.level_window))
@@ -246,13 +259,28 @@ def imagine(
                 level_flags[b] = level_flags[b][-wlen:]
             hist_level = len(level_flags[b]) >= wlen and all(level_flags[b])
             shaping = path_shaping_terms(
-                a_arr, g_rel, float(prog), hist_level=hist_level, cfg=cfg,
+                a_arr,
+                g_rel,
+                prog_paid,
+                hist_level=hist_level,
+                suppress_straight=bool(side["suppress_straight"]),
+                cfg=cfg,
             )
             prog_eff = float(shaping.get("progress_eff", prog))
+            d_hat = getattr(out, "d_fwd_hat", None)
+            center = clearance_centering_bonus(
+                a_arr,
+                d_fwd=float(d_hat) if d_hat is not None and np.isfinite(float(d_hat)) else None,
+                progress=float(prog),
+                cfg=cfg,
+            )
             r = reward_terms(
                 prog_eff, collision_risk, maneuver, cfg,
                 efficiency_cost_val=float(eff["efficiency_cost"]),
                 path_shaping_val=float(shaping["path_shaping"]),
+                clearance_centering_val=float(center["clearance_centering"]),
+                climb_cost=float(side["climb_cost"]),
+                slide_cost=float(side["slide_cost"]),
             )["reward"]
             # Intervention proxy only on legacy clearance path (shield analogue).
             hard_m = float(getattr(cfg, "hard_brake_depth_m", 3.0) or 3.0)

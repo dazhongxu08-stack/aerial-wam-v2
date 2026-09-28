@@ -1,0 +1,9 @@
+# Turn toward the open side while the building is still ahead.
+# A late sideslip is not progress. Shield stays off at train and eval.
+reward:
+  feasible_side_progress: true
+  feasible_fwd_block_m: 8.0
+  feasible_early_turn_m: 18.0
+  feasible_side_margin_m: 2.0
+  feasible_side_credit_m: 0.8
+  feasible_climb_allow_m: 1.0

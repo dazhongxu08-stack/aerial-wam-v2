@@ -399,17 +399,27 @@ def _build_planner(cfg: Any, dynamics: Any, reward_cfg: RewardConfig) -> Optiona
     pc = _get(cfg, "planner", {})
     if not bool(_get(pc, "enable", False)):
         return None
+    import os
+
     from experiments.aerial.rl.planner import ImaginationPlanner
 
     step_hz = float(_get(_get(cfg, "env", {}), "step_hz", DEFAULT_STEP_HZ))
     limits = body_delta_limits(1.0 / step_hz)
     rollout_mode = str(_get(pc, "rollout_mode", "open_loop") or "open_loop")
+    # Overnight: distill wm_escape teacher (open-side bias) via OA_PLANNER_MOCK.
+    mock_raw = _get(pc, "mock_mode", None)
+    if mock_raw is None:
+        mock_raw = os.environ.get("OA_PLANNER_MOCK") or None
+    mock_mode = str(mock_raw).strip() if mock_raw else None
+    if mock_mode == "":
+        mock_mode = None
     return ImaginationPlanner(
         dynamics,
         horizon=int(_get(pc, "horizon", 5)),
         reward_cfg=reward_cfg,
         action_limits=limits,
         rollout_mode=rollout_mode,
+        mock_mode=mock_mode,
         # closed_loop tail_policy wired after actor warm-start in train_v4_ac.
         tail_policy=None,
     )
@@ -603,10 +613,27 @@ def build_from_config(cfg: Any) -> SerialCorrectorLoop:
         blend_clearance_risk=bool(_get(rc, "blend_clearance_risk", False)),
         near_miss_d_fwd_m=float(_get(rc, "near_miss_d_fwd_m", 3.0)),
         near_miss_d_clear_m=float(_get(rc, "near_miss_d_clear_m", 12.0)),
+        # Anti-stick / clearance-centering (overnight C′). Default 0 = no-op;
+        # must be read here or yaml overlays silently do nothing (diagnosed 2026-09-23).
+        w_clearance_center=float(_get(rc, "w_clearance_center", 0.0)),
+        w_press_wall=float(_get(rc, "w_press_wall", 0.0)),
+        center_fwd_thresh_m=float(_get(rc, "center_fwd_thresh_m", 8.0)),
+        center_progress_eps=float(_get(rc, "center_progress_eps", 0.15)),
+        peel_despite_progress=bool(_get(rc, "peel_despite_progress", False)),
+        feasible_side_progress=bool(_get(rc, "feasible_side_progress", False)),
+        feasible_fwd_block_m=float(_get(rc, "feasible_fwd_block_m", 8.0)),
+        feasible_early_turn_m=float(_get(rc, "feasible_early_turn_m", 18.0)),
+        feasible_side_margin_m=float(_get(rc, "feasible_side_margin_m", 2.0)),
+        feasible_side_credit_m=float(_get(rc, "feasible_side_credit_m", 0.8)),
+        feasible_climb_allow_m=float(_get(rc, "feasible_climb_allow_m", 1.0)),
+        center_min_lat_adv_m=float(_get(rc, "center_min_lat_adv_m", 2.0)),
+        center_yaw_scale=float(_get(rc, "center_yaw_scale", 1.0)),
         # Online arrival/termination radius — tighter than the eval SR metric
         # (EVAL_SUCCESS_DIST_M=20 m); falls back to the tight online default.
         success_dist_m=float(_get(rc, "success_dist_m", DEFAULT_ONLINE_SUCCESS_DIST_M)),
         success_bonus=float(_get(rc, "success_bonus", 10.0)),
+        # Soft→Hard: Soft overlays set false (contact costs, episode continues).
+        terminate_on_collision=bool(_get(rc, "terminate_on_collision", True)),
         # Maneuver-penalty curriculum (§2.4); defaults leave it a no-op.
         w_maneuver_final=float(_get(rc, "w_maneuver_final", w_maneuver)),
         maneuver_curriculum_threshold=float(_get(rc, "maneuver_curriculum_threshold", 0.0)),
