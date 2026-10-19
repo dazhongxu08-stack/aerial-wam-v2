@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from experiments.aerial.rl.scene_intent import annotation_yaw_rad
 from experiments.aerial.rl.env.action import (
     body_delta_limits,
     body_delta_to_velocity_ned,
@@ -126,7 +127,7 @@ class AirSimDroneEnv:
             positions = np.asarray(episode["pos"], dtype=np.float64)
             yaws = np.asarray(episode["yaw"], dtype=np.float64).reshape(-1)
             start = positions[0].copy()
-            yaw0 = float(yaws[0])
+            yaw0 = annotation_yaw_rad(float(yaws[0]))
             self._goal = positions[-1].copy()
         else:
             self._goal = None
@@ -145,7 +146,8 @@ class AirSimDroneEnv:
             # Pause physics while teleporting + first observe. On some Outdoor
             # hosts (.110) an unpaused reset drops through collision (~25 m Z)
             # during the depth grab RPC and fails spawn gates.
-            if hasattr(client, "simPause"):
+            # AIRSIM_RESET_PAUSE=0 when several vehicles share one sim: simPause freezes all of them.
+            if hasattr(client, "simPause") and os.environ.get("AIRSIM_RESET_PAUSE", "1") != "0":
                 client.simPause(True)
                 paused = True
             client.simSetVehiclePose(pose, True, **self._vk)
@@ -363,6 +365,16 @@ class AirSimDroneEnv:
                 "ang_vel": [d.angular_velocity.x_val, d.angular_velocity.y_val, d.angular_velocity.z_val],
                 "lin_acc": [d.linear_acceleration.x_val, d.linear_acceleration.y_val, d.linear_acceleration.z_val],
             }
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def collision_info(self) -> Dict[str, Any]:
+        """Latest AirSim contact: object name, impact point (NED), penetration, timestamp."""
+        try:
+            c = self._connect().simGetCollisionInfo(**self._vk)
+            return {"has_collided": bool(c.has_collided), "object_name": str(c.object_name),
+                    "impact_ned": [c.impact_point.x_val, c.impact_point.y_val, c.impact_point.z_val],
+                    "penetration_m": float(c.penetration_depth), "time_stamp": int(c.time_stamp)}
         except Exception:  # noqa: BLE001
             return {}
 

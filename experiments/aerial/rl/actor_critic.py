@@ -92,6 +92,11 @@ class ActorCriticConfig:
     #:   * ``g_norm`` — ``[û_xyz, log1p(d)]`` (F9; R1/R2 ckpts only)
     condition_on_goal: bool = True
     goal_feat_mode: str = "meter"
+    #: Floor on the yaw-axis pre-tanh ``log_std`` (last action dim). ``None``
+    #: leaves the learned std alone. Set when the yaw mean sits on the
+    #: ``±0.314`` limit: at ``log_std≈-0.5`` the opposite yaw is almost never
+    #: sampled, so the goal-aligned turn never enters the policy gradient.
+    yaw_log_std_min: Optional[float] = None
     device: str = "cpu"
 
     def __post_init__(self) -> None:
@@ -278,6 +283,7 @@ class LatentActorCritic:
                 step_hz=float(cfg.get("step_hz", DEFAULT_STEP_HZ)),
                 condition_on_goal=bool(cfg.get("condition_on_goal", True)),
                 goal_feat_mode=str(cfg.get("goal_feat_mode", "meter")),
+                yaw_log_std_min=cfg.get("yaw_log_std_min", None),
                 device=str(cfg.get("device", "cpu")),
             )
             return cls(config=ac_cfg)
@@ -294,6 +300,7 @@ class LatentActorCritic:
                 step_hz=float(getattr(cfg, "step_hz", DEFAULT_STEP_HZ)),
                 condition_on_goal=bool(getattr(cfg, "condition_on_goal", True)),
                 goal_feat_mode=str(getattr(cfg, "goal_feat_mode", "meter")),
+                yaw_log_std_min=getattr(cfg, "yaw_log_std_min", None),
                 device=str(getattr(cfg, "device", "cpu")),
             )
         )
@@ -474,6 +481,8 @@ class LatentActorCritic:
             list(self._actor.parameters()) + [self._log_std], cfg.grad_clip,
         )
         self._actor_opt.step()
+        self.apply_yaw_log_std_floor()
+        dyaw = a_alive[:, 3] if a_alive.shape[-1] > 3 else a_alive[:, -1]
 
         return {
             "status": "updated",
@@ -486,7 +495,20 @@ class LatentActorCritic:
             "mean_entropy": float(ent.mean().item()),
             "condition_on_goal": bool(cfg.condition_on_goal),
             "goal_feat_mode": str(cfg.goal_feat_mode),
+            "yaw_log_std": float(self._log_std[-1].detach().cpu()),
+            "yaw_pos_frac": float(np.mean(dyaw > 0.05)),
+            "yaw_neg_frac": float(np.mean(dyaw < -0.05)),
         }
+
+    def apply_yaw_log_std_floor(self) -> None:
+        """Keep the yaw-axis exploration std from collapsing below the floor."""
+        floor = self.config.yaw_log_std_min
+        if floor is None or self._log_std is None:
+            return
+        with torch.no_grad():
+            yaw = self._log_std[-1]
+            if float(yaw) < float(floor):
+                self._log_std[-1] = float(floor)
 
     def update_bc(
         self,
@@ -546,6 +568,7 @@ class LatentActorCritic:
             list(self._actor.parameters()) + [self._log_std], cfg.grad_clip,
         )
         self._actor_opt.step()
+        self.apply_yaw_log_std_floor()
         with torch.no_grad():
             mae = (pred - a_t).abs().mean()
         return {
@@ -692,7 +715,7 @@ class LatentActorDeployPolicy:
         ):
             z = self._dynamics.observe_and_advance(self._latent, self._prev_act, obs)
         else:
-            z = self._dynamics.encode(obs)
+            z = self._dynamics.encode(obs, mode=self.deterministic)
         self._latent = np.asarray(z, dtype=np.float64).copy()
 
         if goal is not None:

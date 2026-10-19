@@ -96,6 +96,8 @@ def imagine(
     body_vel0: Optional[np.ndarray] = None,
     propagate_goal_rel: bool = True,
     action_limits: Optional[np.ndarray] = None,
+    cones0: Optional[np.ndarray] = None,
+    profile0: Optional[np.ndarray] = None,
 ) -> ImaginedRollout:
     """Roll ``z0_batch`` forward ``horizon`` steps through ``dynamics``.
 
@@ -154,6 +156,15 @@ def imagine(
 
     alive = np.ones(batch, dtype=bool)
     level_flags = [[] for _ in range(batch)]
+    cones_state = None
+    if cones0 is not None:
+        cones_state = np.asarray(cones0, dtype=np.float64).reshape(batch, 3).copy()
+    profile_state = None
+    if profile0 is not None:
+        profile_state = np.asarray(profile0, dtype=np.float64)
+        if profile_state.ndim == 1:
+            profile_state = np.repeat(profile_state.reshape(1, -1), batch, axis=0)
+        profile_state = profile_state.reshape(batch, -1).copy()
     for t in range(horizon):
         for b in range(batch):
             if not alive[b]:
@@ -172,11 +183,27 @@ def imagine(
                 from experiments.aerial.rl.env.action import forbid_backward_dx
 
                 a = forbid_backward_dx(a)
+            if profile_state is not None:
+                setter = getattr(dynamics, "set_image_profile", None)
+                if callable(setter):
+                    setter(profile_state[b])
+            elif cones_state is not None:
+                setter = getattr(dynamics, "set_image_cones", None)
+                if callable(setter):
+                    setter(cones_state[b])
             step_kw: dict = {}
             if use_aux:
                 step_kw["goal_rel"] = goal_rel_t[b]
                 step_kw["body_vel"] = body_vel_t[b]
             out = dynamics.step(zs[b, t], a, **step_kw)
+            if profile_state is not None:
+                advanced = getattr(dynamics, "_image_profile", None)
+                if advanced is not None:
+                    profile_state[b] = np.asarray(advanced, dtype=np.float64).reshape(-1)
+            elif cones_state is not None:
+                advanced = getattr(dynamics, "_image_cones", None)
+                if advanced is not None:
+                    cones_state[b] = np.asarray(advanced, dtype=np.float64).reshape(3)
             zs[b, t + 1] = np.asarray(out.z_next, dtype=np.float64).reshape(latent_dim)
             acts[b, t] = a
             pcs[b, t] = out.p_coll
@@ -238,10 +265,17 @@ def imagine(
                 collision_risk = float(max(float(out.p_coll), float(clear_risk)))
             a_arr = np.asarray(a, dtype=np.float64).reshape(-1)
             d_hat = getattr(out, "d_fwd_hat", None)
+            cone_fwd = getattr(out, "d_fwd_cone_hat", None)
+            if cone_fwd is not None and np.isfinite(float(cone_fwd)):
+                side_fwd = float(cone_fwd)
+            elif d_hat is not None and np.isfinite(float(d_hat)):
+                side_fwd = float(d_hat)
+            else:
+                side_fwd = None
             side = feasible_side_progress(
                 float(prog),
                 a_arr,
-                d_fwd=float(d_hat) if d_hat is not None and np.isfinite(float(d_hat)) else None,
+                d_fwd=side_fwd,
                 d_left=getattr(out, "d_left_hat", None),
                 d_right=getattr(out, "d_right_hat", None),
                 goal_rel=g_rel,
@@ -258,12 +292,23 @@ def imagine(
             if len(level_flags[b]) > wlen:
                 level_flags[b] = level_flags[b][-wlen:]
             hist_level = len(level_flags[b]) >= wlen and all(level_flags[b])
+            cones_hat = {}
+            if side_fwd is not None:
+                cones_hat["forward"] = float(side_fwd)
+            d_left_hat = getattr(out, "d_left_hat", None)
+            d_right_hat = getattr(out, "d_right_hat", None)
+            if d_left_hat is not None and np.isfinite(float(d_left_hat)):
+                cones_hat["left"] = float(d_left_hat)
+            if d_right_hat is not None and np.isfinite(float(d_right_hat)):
+                cones_hat["right"] = float(d_right_hat)
             shaping = path_shaping_terms(
                 a_arr,
                 g_rel,
                 prog_paid,
                 hist_level=hist_level,
                 suppress_straight=bool(side["suppress_straight"]),
+                turn_credit=float(side["feasible_side"]),
+                clearance_m=clearance_m_along_action(a_arr, cones_hat, side_fwd),
                 cfg=cfg,
             )
             prog_eff = float(shaping.get("progress_eff", prog))
@@ -305,6 +350,10 @@ def imagine(
                 goal_rel_t[b] = advance_goal_rel_body(goal_rel_t[b], a)
             if goal_rel_t is not None:
                 goals_hist[b, t + 1] = goal_rel_t[b]
+
+    clearer = getattr(dynamics, "clear_image_cones", None)
+    if callable(clearer):
+        clearer()
 
     return ImaginedRollout(
         z=zs, actions=acts, rewards=rews, p_coll=pcs, progress=progs, done=dones,

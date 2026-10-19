@@ -194,6 +194,39 @@ def goal_ahead_cos(goal_rel: np.ndarray) -> float:
     return gx / n
 
 
+def surface_before_goal(
+    goal_rel: np.ndarray,
+    clearance_m: Optional[float],
+    *,
+    near_m: float = 12.0,
+    margin_m: float = 1.0,
+) -> bool:
+    """True when this step is already into a near wall that stands before the goal.
+
+    Clearance beyond ``near_m`` is still an open street: the goal is often
+    farther than the visible end of that street, and that flight keeps
+    progress. Missing clearance does not count as a known obstacle.
+    """
+    if clearance_m is None:
+        return False
+    try:
+        clearance = float(clearance_m)
+    except (TypeError, ValueError):
+        return False
+    if not np.isfinite(clearance) or clearance > float(near_m):
+        return False
+    g = np.asarray(goal_rel, dtype=np.float64).reshape(-1)
+    if g.size >= 4 and np.isfinite(float(g[3])):
+        dist = float(g[3])
+    elif g.size >= 3:
+        dist = float(np.linalg.norm(g[:3]))
+    else:
+        return False
+    if not np.isfinite(dist):
+        return False
+    return clearance + float(margin_m) < dist
+
+
 def nose_aligned_progress(
     progress: float,
     goal_rel: np.ndarray,
@@ -532,12 +565,13 @@ def feasible_side_progress(
 ) -> Dict[str, float]:
     """Pay an early yaw toward the open side. A late sideslip is not progress.
 
-    When one side cone is already short and the other is clearer, yaw toward
-    the clear side counts as progress while the building is still ahead
-    (forward out to ``feasible_early_turn_m``). Body strafe does not: chord
-    closure from sliding into the facade is withheld, and strafing into the
-    shorter cone is charged. Climb is withheld unless the goal is above.
-    Inactive unless ``feasible_side_progress``.
+    The turn is paid only when a side is at least as open as forward (the
+    building is ahead) and forward is still inside ``feasible_early_turn_m``,
+    or the nose is already inside ``feasible_fwd_block_m``. A street whose
+    flanks merely differ keeps chord progress. Body strafe beside a short
+    cone is charged even toward the longer image side. Any climb while the
+    goal is level drops positive progress, including a slow climb mixed with
+    strafe. Inactive unless ``feasible_side_progress``.
     """
     raw = float(progress)
     unchanged = {
@@ -555,12 +589,11 @@ def feasible_side_progress(
     dy = float(a[1]) if a.size > 1 else 0.0
     dz = float(a[2]) if a.size > 2 else 0.0
     dyaw = float(a[3]) if a.size > 3 else 0.0
-    climb_dominated = climb > 0.0 and dz >= abs(dy) and dz >= abs(dyaw)
 
     def _finish(result: Dict[str, float]) -> Dict[str, float]:
         result["climb_cost"] = float(climb)
         result["slide_cost"] = float(result.get("slide_cost", 0.0))
-        if climb_dominated:
+        if climb > 0.0:
             result["progress"] = min(float(result["progress"]), 0.0)
             result["feasible_side"] = 0.0
             result["suppress_straight"] = 1.0
@@ -572,33 +605,87 @@ def feasible_side_progress(
     left = float(d_left)
     right = float(d_right)
     early = float(getattr(cfg, "feasible_early_turn_m", 18.0) or 18.0)
+    block = float(getattr(cfg, "feasible_fwd_block_m", 8.0) or 8.0)
     margin = float(getattr(cfg, "feasible_side_margin_m", 2.0) or 2.0)
     credit = float(getattr(cfg, "feasible_side_credit_m", 0.8) or 0.8)
-    disparity = max(left, right) >= min(left, right) + margin
+    open_side = max(left, right)
+    short_side = min(left, right)
+    disparity = open_side >= short_side + margin
     open_sign = 1.0 if left >= right else -1.0
     yaw_toward = open_sign * dyaw
     strafe_dom = abs(dy) >= 0.15 and abs(dy) >= abs(dx) and abs(dy) >= abs(dyaw)
     into_short = disparity and dy * open_sign < -0.05
-    slide = credit * float(np.clip(abs(dy) / 0.15, 0.0, 1.5)) if into_short else 0.0
+    wall_beside = short_side <= early
+    slide = (
+        credit * float(np.clip(abs(dy) / 0.15, 0.0, 1.5))
+        if (strafe_dom and wall_beside) or into_short
+        else 0.0
+    )
     pressing = dx >= 0.25 and dx >= abs(dy) and abs(dyaw) < 0.08
-    beside = disparity and min(left, right) <= early
-    in_turn_band = disparity and fwd <= early
+    # Flank difference alone is a street. Turn only when the open side is at
+    # least as clear as forward, or the nose is already inside the block.
+    building_ahead = disparity and (
+        (fwd <= early and open_side >= fwd) or fwd <= block
+    )
     out = dict(unchanged)
     out["slide_cost"] = slide
-    if in_turn_band and pressing:
+    if building_ahead and pressing:
         out["progress"] = min(raw, 0.0)
         out["suppress_straight"] = 1.0
         return _finish(out)
-    if in_turn_band and yaw_toward > 0.02 and dx <= 0.55 and not strafe_dom:
+    if building_ahead and yaw_toward > 0.02 and dx <= 0.55 and not strafe_dom:
         paid = credit * float(np.clip(yaw_toward / 0.12, 0.0, 1.0))
-        out["progress"] = paid if into_short else max(raw, paid)
+        out["progress"] = paid if (into_short or strafe_dom) else max(raw, paid)
         out["feasible_side"] = paid
         return _finish(out)
-    if (beside and strafe_dom) or into_short:
+    if (strafe_dom and wall_beside) or into_short:
         out["progress"] = min(raw, 0.0)
         out["suppress_straight"] = 1.0
         return _finish(out)
     return _finish(out)
+
+
+def open_side_yaw_action(
+    d_fwd: Optional[float],
+    d_left: Optional[float],
+    d_right: Optional[float],
+    *,
+    cfg: RewardConfig = RewardConfig(),
+    limits: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    """Yaw toward the open side when a building is ahead. ``None`` on an open street.
+
+    The learned actor samples strafe and almost never this yaw, so the turn
+    credit never enters the policy gradient. Imagination substitutes this
+    action on part of the batch. It is not used at deploy time.
+    """
+    if not bool(getattr(cfg, "feasible_side_progress", False)):
+        return None
+    if any(v is None or not np.isfinite(float(v)) for v in (d_fwd, d_left, d_right)):
+        return None
+    fwd = float(d_fwd)
+    left = float(d_left)
+    right = float(d_right)
+    early = float(getattr(cfg, "feasible_early_turn_m", 18.0) or 18.0)
+    block = float(getattr(cfg, "feasible_fwd_block_m", 8.0) or 8.0)
+    margin = float(getattr(cfg, "feasible_side_margin_m", 2.0) or 2.0)
+    open_side = max(left, right)
+    short_side = min(left, right)
+    disparity = open_side >= short_side + margin
+    building_ahead = disparity and (
+        (fwd <= early and open_side >= fwd) or fwd <= block
+    )
+    if not building_ahead:
+        return None
+    open_sign = 1.0 if left >= right else -1.0
+    dx = 0.15
+    dyaw = 0.25 * open_sign
+    if limits is not None:
+        lim = np.abs(np.asarray(limits, dtype=np.float64).reshape(-1))
+        if lim.size >= 4:
+            dx = min(dx, float(lim[0]))
+            dyaw = float(np.clip(dyaw, -float(lim[3]), float(lim[3])))
+    return np.array([dx, 0.0, 0.0, dyaw], dtype=np.float64)
 
 
 def path_shaping_terms(
@@ -608,13 +695,23 @@ def path_shaping_terms(
     *,
     hist_level: bool = False,
     suppress_straight: bool = False,
+    turn_credit: float = 0.0,
+    clearance_m: Optional[float] = None,
     cfg: RewardConfig = RewardConfig(),
 ) -> Dict[str, float]:
     """Straight − idle − away − level − backward − descent. Pure; real and imagined."""
     prog = nose_aligned_progress(progress, goal_rel, cfg=cfg)
+    blocked = surface_before_goal(goal_rel, clearance_m)
+    if blocked and prog > 0.0:
+        prog = 0.0
+    # The heading gate drops positive progress once the goal swings abeam.
+    # That is exactly when an early yaw has started. Keep the turn credit.
+    credit = float(turn_credit)
+    if credit > prog:
+        prog = credit
     straight = (
         0.0
-        if suppress_straight
+        if suppress_straight or blocked
         else straight_to_goal_bonus(action, goal_rel, cfg=cfg)
     )
     idle = idle_body_cost(action, goal_rel, cfg=cfg)
@@ -910,6 +1007,12 @@ class NavigationReward:
             progress_paid,
             hist_level=hist_level,
             suppress_straight=bool(side["suppress_straight"]),
+            turn_credit=float(side["feasible_side"]),
+            clearance_m=clearance_m_along_action(
+                a_arr,
+                cones if isinstance(cones, dict) else None,
+                float(d_fwd) if d_fwd is not None and np.isfinite(float(d_fwd)) else None,
+            ),
             cfg=self.cfg,
         )
         prog_eff = float(shaping.get("progress_eff", progress))

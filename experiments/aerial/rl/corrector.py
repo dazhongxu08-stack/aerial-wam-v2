@@ -205,7 +205,15 @@ class SerialCorrectorLoop:
                 # (was poisoning hard014 with 0-step "updated" noise).
                 if int(stats.steps) <= 0:
                     wm = {"status": "skipped", "reason": "empty collect"}
-                    rl = {"status": "skipped", "reason": "empty collect"}
+                    # BC-only has no env steps. Still clone the expert actions.
+                    if (
+                        not bool(self.config.enable_policy_update)
+                        and bool(self.config.enable_bc_update)
+                        and self.expert_transitions
+                    ):
+                        rl = self._update_policy()
+                    else:
+                        rl = {"status": "skipped", "reason": "empty collect"}
                 else:
                     wm = self._update_world_model()
                     rl = self._update_policy()
@@ -405,18 +413,55 @@ class SerialCorrectorLoop:
         goal_rel0 = np.stack([goal_rel_from_obs(t.obs) for t in transitions], axis=0)
         body_vel0 = np.stack([body_vel_from_obs(t.obs) for t in transitions], axis=0)
         z0 = np.stack([self.dynamics.encode(t.obs) for t in transitions], axis=0)
+        cones0 = None
+        profile0 = None
+        from experiments.aerial.rl.cone_transition import cones_from_obs
+
+        profiles = []
+        profile_ok = True
+        width = None
+        for t in transitions:
+            info = getattr(t.obs, "info", None)
+            prof = info.get("depth_profile_pred") if isinstance(info, dict) else None
+            if prof is None:
+                profile_ok = False
+                break
+            row = np.asarray(prof, dtype=np.float64).reshape(-1)
+            if width is None:
+                width = int(row.shape[0])
+            if int(row.shape[0]) != width:
+                profile_ok = False
+                break
+            profiles.append(row)
+        if profile_ok and profiles:
+            profile0 = np.stack(profiles, axis=0)
+            logger.info("imagine profile0 shape=%s", tuple(profile0.shape))
+        else:
+            logger.warning("imagine profile0 missing on this batch")
+        if profile0 is None and getattr(self.dynamics, "_cone_transition", None) is not None:
+            rows = [cones_from_obs(t.obs) for t in transitions]
+            if all(row is not None for row in rows):
+                cones0 = np.stack(rows, axis=0)
         # Imagine inside the DEPLOYED action set (C2, 2026-08-18): the AC owns the
         # box (= ``body_delta_limits(1/step_hz)``) and its sampling law already
         # respects it, so this is a no-op guard whose ``n_action_clipped`` counter
         # is what proves the two spaces agree.
         ac = getattr(self, "actor_critic", None)
         act_limits = getattr(ac, "action_limits", None) if ac is not None else None
+        # Training configs may set horizon > default §9 cap (15); raise max_horizon
+        # explicitly so imagine() accepts the configured H (e.g. outcome_A H=40/80).
+        from experiments.aerial.rl.imagination import MAX_IMAGINATION_HORIZON
+
+        H = int(self.config.imagine_horizon)
         rollout = imagine(
-            self.dynamics, self.imagination_policy, z0, self.config.imagine_horizon,
+            self.dynamics, self.imagination_policy, z0, H,
             reward_cfg=getattr(self.collector, "reward_cfg", None),  # match real weights + bonus
+            max_horizon=max(MAX_IMAGINATION_HORIZON, H),
             goal_rel0=goal_rel0,
             body_vel0=body_vel0,
             action_limits=act_limits,
+            cones0=cones0,
+            profile0=profile0,
         )
         if rollout.n_action_clipped:
             logger.warning(

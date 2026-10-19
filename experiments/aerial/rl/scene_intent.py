@@ -9,6 +9,7 @@ No GT polyline. Stop / rem_dist semantics are Euclidean to G.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -56,6 +57,170 @@ def _safe_speed_from_depth(
         v_term = min_creep_speed + t_term * (cruise_speed - min_creep_speed)
         v_safe = float(min(v_safe, v_term))
     return float(v_safe)
+
+
+def _wrap_rad(angle: float) -> float:
+    return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def annotation_yaw_rad(yaw: float) -> float:
+    """OpenFly street annotations store yaw in degrees (0, 90, -90, 180).
+
+    AirSim and the planner use radians. A value already inside ±π is left
+    alone; 90 degrees passed through as radians faces about 117°.
+    """
+    y = float(yaw)
+    if abs(y) > 2.0 * math.pi + 1e-3:
+        return math.radians(y)
+    return y
+
+
+@dataclass
+class RoadCenterIntent:
+    """Follow the commanded street heading. Remember a side street toward the
+
+    goal once its bearing opens to about 70°, but keep the carrot on the
+    street until the vehicle is about 8 m from the corner. A 25 m ray swung
+    earlier cuts through the corner building. No GT polyline.
+    """
+
+    r_m: float = 20.0
+    cruise_speed: float = 8.0
+    d_danger: float = 3.0
+    d_clear: float = 22.0
+    min_creep_speed: float = 1.0
+    road_open_m: float = 12.0
+    side_closed_m: float = 18.0
+    side_jump_m: float = 24.0
+    side_margin_m: float = 8.0
+    commit_err_rad: float = 0.40
+    corner_err_rad: float = 1.22
+    corner_release_rad: float = 1.43
+    side_release_m: float = 16.0
+    release_m: float = 12.0
+
+    def reset(self, heading: Optional[float] = None) -> None:
+        self._heading: Optional[float] = None if heading is None else float(heading)
+        self._committed = False
+        self._turn = 0
+
+    def compute(
+        self,
+        curr_pos: np.ndarray,
+        curr_yaw: float,
+        goal: np.ndarray,
+        d_fwd_hat: Optional[float] = None,
+        depth_cones: Optional[Dict[str, Optional[float]]] = None,
+        **_kwargs: Any,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        if not hasattr(self, "_turn"):
+            self.reset()
+        p = np.asarray(curr_pos, dtype=np.float64).reshape(3)
+        g = np.asarray(goal, dtype=np.float64).reshape(3)
+        yaw = float(curr_yaw)
+        cones = depth_cones or {}
+        d_fwd = cones.get("forward", d_fwd_hat)
+        left = cones.get("left")
+        right = cones.get("right")
+        # No commanded street heading: latch the measured yaw once the nose
+        # is actually open, so a short wall at spawn is not the street.
+        if (
+            self._heading is None
+            and d_fwd is not None
+            and np.isfinite(float(d_fwd))
+            and float(d_fwd) >= float(self.road_open_m)
+        ):
+            self._heading = yaw
+        bearing = float(math.atan2(float(g[1] - p[1]), float(g[0] - p[0])))
+        heading_now = float(self._heading if self._heading is not None else yaw)
+        err = _wrap_rad(bearing - heading_now)
+        aligned = abs(_wrap_rad(yaw - heading_now)) < 0.35
+
+        def _finite(value: Optional[float]) -> bool:
+            return value is not None and bool(np.isfinite(float(value)))
+
+        # ~70° is still ~20 m out: remember a full street (24 m) and stay on
+        # the centre. ~82° is the corner itself. There a 17 m opening toward
+        # the goal is the exit; waiting for 24 m drives through it.
+        side_need = (
+            float(self.side_release_m)
+            if abs(err) > float(self.corner_release_rad)
+            else float(self.side_jump_m)
+        )
+        if (
+            self._turn == 0
+            and not self._committed
+            and aligned
+            and abs(err) > float(self.corner_err_rad)
+        ):
+            if err > 0.0 and _finite(left) and float(left) >= side_need:
+                self._turn = 1
+            elif err < 0.0 and _finite(right) and float(right) >= side_need:
+                self._turn = -1
+        if (
+            self._turn != 0
+            and not self._committed
+            and aligned
+            and abs(err) > float(self.corner_release_rad)
+        ):
+            self._heading = _wrap_rad(heading_now + self._turn * math.pi / 2.0)
+            self._committed = True
+
+        d_to_g = float(np.linalg.norm(g - p))
+        heading = float(self._heading if self._heading is not None else yaw)
+        hx, hy = math.cos(heading), math.sin(heading)
+        along = float((g[0] - p[0]) * hx + (g[1] - p[1]) * hy)
+        if self._committed:
+            # The exit centerline passes through the goal. A ray from the
+            # vehicle, still short of the corner, runs parallel to that line
+            # and into the near wall.
+            t_exit = float((p[0] - g[0]) * hx + (p[1] - g[1]) * hy)
+            if t_exit >= -1.0:
+                target = g.copy()
+            else:
+                step = float(min(self.release_m, -t_exit))
+                target = np.array(
+                    [
+                        g[0] + (t_exit + step) * hx,
+                        g[1] + (t_exit + step) * hy,
+                        p[2],
+                    ],
+                    dtype=np.float64,
+                )
+        else:
+            reach = float(min(self.r_m, max(d_to_g, 1.0)))
+            target = np.array(
+                [p[0] + reach * hx, p[1] + reach * hy, p[2]],
+                dtype=np.float64,
+            )
+            if d_to_g <= float(self.r_m) and abs(_wrap_rad(bearing - heading)) < 0.50:
+                target = g.copy()
+        g_rel = goal_rel_body(p, yaw, target)
+        v_safe = _safe_speed_from_depth(
+            cruise_speed=self.cruise_speed,
+            min_creep_speed=self.min_creep_speed,
+            d_danger=self.d_danger,
+            d_clear=self.d_clear,
+            d_fwd_hat=float(d_fwd) if d_fwd is not None else d_fwd_hat,
+            d_to_g=d_to_g,
+        )
+        yaw_err = 0.0
+        if float(np.hypot(g_rel[0], g_rel[1])) > 1e-6:
+            yaw_err = float(np.arctan2(float(g_rel[1]), float(g_rel[0])))
+        info: Dict[str, Any] = {
+            "subgoal_source": "road_center",
+            "target_world": target.tolist(),
+            "rem_dist": d_to_g,
+            "s_progress": 0.0,
+            "safe_speed_limit": v_safe,
+            "cte_m": None,
+            "r_lookahead": float(np.linalg.norm(target - p)),
+            "seg_idx": 0,
+            "yaw_err_rad": yaw_err,
+            "road_heading": heading,
+            "road_committed": bool(self._committed),
+        }
+        return g_rel, info
 
 
 @dataclass
@@ -177,6 +342,30 @@ class SceneIntentPlanner:
     stuck_escape_extra_yaw_offsets_deg: Sequence[float] = field(
         default_factory=lambda: (120.0, -120.0, 150.0, -150.0, 180.0)
     )
+    # Mid-course wall peel (opt-in; collect enables via retry variants / CLI).
+    # 0 = legacy (stuck-escape / normal scoring only). Daytime R0/R1 choke
+    # (2026-09-23) needs peel_fwd_m≈18–20 when collecting urban demos.
+    peel_fwd_m: float = 0.0
+    peel_side_advantage_m: float = 3.0
+    peel_min_rem_m: float = 20.0
+    peel_hold_s: float = 8.0
+    #: Extra altitude (m, +up) added to peel/stuck-escape targets so street-level
+    #: facade pins can clear rooftops / lintels instead of grinding the wall.
+    peel_climb_m: float = 4.0
+    #: Min clearance gap over d_fwd to accept a side peel when L/R are similar.
+    peel_clear_margin_m: float = 2.0
+    peel_yaw_offsets_deg: Sequence[float] = field(
+        default_factory=lambda: (45.0, -45.0, 60.0, -60.0, 75.0, -75.0, 90.0, -90.0, 105.0, -105.0)
+    )
+    #: Forced open-side peel while rem ∈ [lo, hi] (metres). Independent of
+    #: ``peel_fwd_m`` — used to break the R1 ~57 m facade collision before the
+    #: nose is tight enough for depth-triggered peel. 0/0 disables.
+    force_peel_rem_lo_m: float = 0.0
+    force_peel_rem_hi_m: float = 0.0
+    #: Prefer |yaw| ≥ this (deg) when force-peeling so lat builds like morning +7 m.
+    force_peel_min_yaw_deg: float = 75.0
+    #: 0=auto (clearer cone / goal side); +1=force left; −1=force right.
+    force_peel_side: float = 0.0
 
     _c_prev: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _steps_since_replan: int = field(default=10**9, init=False, repr=False)
@@ -192,7 +381,10 @@ class SceneIntentPlanner:
     _best_d_to_g: Optional[float] = field(default=None, init=False, repr=False)
     _no_improve_steps: int = field(default=0, init=False, repr=False)
     _escape_hold_left: int = field(default=0, init=False, repr=False)
+    _holding_peel: bool = field(default=False, init=False, repr=False)
+    _holding_force_peel: bool = field(default=False, init=False, repr=False)
     escape_count: int = field(default=0, init=False, repr=False)
+    peel_count: int = field(default=0, init=False, repr=False)
 
     def reset(self) -> None:
         self._c_prev = None
@@ -207,7 +399,10 @@ class SceneIntentPlanner:
         self._best_d_to_g = None
         self._no_improve_steps = 0
         self._escape_hold_left = 0
+        self._holding_peel = False
+        self._holding_force_peel = False
         self.escape_count = 0
+        self.peel_count = 0
 
     def _candidates(
         self,
@@ -302,6 +497,92 @@ class SceneIntentPlanner:
         if v is None or not np.isfinite(float(v)):
             v = depth_cones.get("forward")
         return float(v) if v is not None and np.isfinite(float(v)) else None
+
+    def _commit_side_peel(
+        self,
+        p: np.ndarray,
+        yaw: float,
+        g: np.ndarray,
+        *,
+        side_sign: float,
+        d_fwd: float,
+        depth_cones: Optional[Dict[str, Optional[float]]],
+        depth_azimuth: Optional[Dict[str, Any]],
+        min_yaw_deg: float = 20.0,
+        yaw_offsets: Optional[Sequence[float]] = None,
+    ) -> Tuple[np.ndarray, int, int]:
+        """Pick/commit a same-side peel target. Returns (target, chosen_idx, n_cands)."""
+        offsets = tuple(yaw_offsets) if yaw_offsets is not None else tuple(
+            self.peel_yaw_offsets_deg
+        )
+        side_offsets = tuple(
+            deg
+            for deg in offsets
+            if (side_sign > 0.0 and float(deg) > 0.0)
+            or (side_sign < 0.0 and float(deg) < 0.0)
+        )
+        if not side_offsets:
+            side_offsets = (90.0 * side_sign,)
+        cands = self._candidates(p, yaw, g, extra_yaw_offsets_deg=side_offsets)
+        best_idx, best, best_clear = 0, cands[0], -1.0
+        min_yaw = float(min_yaw_deg)
+        for i, c in enumerate(cands):
+            bearing = self._body_bearing_deg(p, c, yaw)
+            if side_sign > 0.0 and bearing < min_yaw:
+                continue
+            if side_sign < 0.0 and bearing > -min_yaw:
+                continue
+            dc = self._azimuth_depth(bearing, depth_azimuth)
+            if dc is None:
+                dc = self._cone_depth(bearing, depth_cones)
+            if dc is None:
+                dc = abs(bearing)
+            if float(dc) > best_clear:
+                best_clear = float(dc)
+                best_idx = i
+                best = c
+        if best_clear < 0.0:
+            best_idx = 1 if len(cands) > 1 else 0
+            best = cands[best_idx]
+        target = best.copy()
+        climb = float(self.peel_climb_m)
+        if climb > 0.0:
+            target[2] = float(target[2]) + climb
+        return target, int(best_idx), len(cands)
+
+    def _resolve_peel_side(
+        self,
+        p: np.ndarray,
+        yaw: float,
+        g: np.ndarray,
+        d_fwd: float,
+        depth_cones: Optional[Dict[str, Optional[float]]],
+    ) -> float:
+        forced = float(self.force_peel_side)
+        if forced != 0.0:
+            return 1.0 if forced > 0.0 else -1.0
+        d_left = None
+        d_right = None
+        if isinstance(depth_cones, dict):
+            raw_l = depth_cones.get("left")
+            raw_r = depth_cones.get("right")
+            if raw_l is not None and np.isfinite(float(raw_l)):
+                d_left = float(raw_l)
+            if raw_r is not None and np.isfinite(float(raw_r)):
+                d_right = float(raw_r)
+        adv_need = float(self.peel_side_advantage_m)
+        if d_left is not None and d_right is not None:
+            adv = d_left - d_right
+            if abs(adv) >= adv_need:
+                return 1.0 if adv > 0.0 else -1.0
+            if max(d_left, d_right) >= d_fwd + float(self.peel_clear_margin_m):
+                return 1.0 if d_left >= d_right else -1.0
+        elif d_left is not None and d_left >= d_fwd + float(self.peel_clear_margin_m):
+            return 1.0
+        elif d_right is not None and d_right >= d_fwd + float(self.peel_clear_margin_m):
+            return -1.0
+        g_rel_xy = goal_rel_body(p, yaw, g)
+        return 1.0 if float(g_rel_xy[1]) >= 0.0 else -1.0
 
     def _blocked(
         self,
@@ -416,11 +697,15 @@ class SceneIntentPlanner:
             self._no_improve_steps += 1
 
         escape_active = False
+        peel_active = False
+        force_peel_active = False
         replan = False
         if self.stuck_escape_after_s > 0.0 and self._escape_hold_left > 0:
-            # Committed to an escape heading; hold it regardless of the raw
+            # Committed to an escape/peel heading; hold it regardless of the raw
             # toward-goal pull (that pull is exactly what re-traps it).
             escape_active = True
+            peel_active = bool(getattr(self, "_holding_peel", False))
+            force_peel_active = bool(getattr(self, "_holding_force_peel", False))
             assert self._c_prev is not None
             target = self._c_prev.copy()
             cands = [target]
@@ -431,6 +716,8 @@ class SceneIntentPlanner:
                 self._best_d_to_g = d_to_g
                 self._no_improve_steps = 0
                 self._steps_since_replan = 10**9
+                self._holding_peel = False
+                self._holding_force_peel = False
         elif self.stuck_escape_after_s > 0.0 and self._no_improve_steps >= max(
             1, int(round(float(self.stuck_escape_after_s) * float(self.step_hz)))
         ):
@@ -464,9 +751,14 @@ class SceneIntentPlanner:
                     best_idx = i
                     best = c
             target = best.copy()
+            climb = float(self.peel_climb_m)
+            if climb > 0.0:
+                target[2] = float(target[2]) + climb
             self._c_prev = target.copy()
             hold_steps = max(1, int(round(float(self.stuck_escape_hold_s) * float(self.step_hz))))
             self._escape_hold_left = hold_steps - 1
+            self._holding_peel = False
+            self._holding_force_peel = False
             self._steps_since_replan = 0
             self._stall_steps = 0
             self.replan_count += 1
@@ -474,6 +766,79 @@ class SceneIntentPlanner:
             self.escape_count += 1
             self._last_choice_idx = best_idx
             self._last_n_feasible = len(cands)
+        elif (
+            (
+                float(self.force_peel_rem_lo_m) > 0.0
+                and float(self.force_peel_rem_hi_m) > float(self.force_peel_rem_lo_m)
+                and float(self.force_peel_rem_lo_m)
+                <= d_to_g
+                <= float(self.force_peel_rem_hi_m)
+            )
+            or (
+                float(self.peel_fwd_m) > 0.0
+                and d_to_g >= float(self.peel_min_rem_m)
+                and d_fwd_hat is not None
+                and np.isfinite(float(d_fwd_hat))
+                and float(d_fwd_hat) < float(self.peel_fwd_m)
+            )
+        ):
+            # Mid-course / forced open-side peel.
+            force_band = (
+                float(self.force_peel_rem_lo_m) > 0.0
+                and float(self.force_peel_rem_hi_m) > float(self.force_peel_rem_lo_m)
+                and float(self.force_peel_rem_lo_m)
+                <= d_to_g
+                <= float(self.force_peel_rem_hi_m)
+            )
+            d_fwd = (
+                float(d_fwd_hat)
+                if d_fwd_hat is not None and np.isfinite(float(d_fwd_hat))
+                else 99.0
+            )
+            side_sign = self._resolve_peel_side(p, yaw, g, d_fwd, depth_cones)
+            min_yaw = (
+                float(self.force_peel_min_yaw_deg) if force_band else 20.0
+            )
+            force_offsets = (
+                75.0,
+                -75.0,
+                90.0,
+                -90.0,
+                105.0,
+                -105.0,
+                120.0,
+                -120.0,
+            )
+            target, best_idx, n_cands = self._commit_side_peel(
+                p,
+                yaw,
+                g,
+                side_sign=side_sign,
+                d_fwd=d_fwd,
+                depth_cones=depth_cones,
+                depth_azimuth=depth_azimuth,
+                min_yaw_deg=min_yaw,
+                yaw_offsets=force_offsets if force_band else None,
+            )
+            peel_active = True
+            force_peel_active = bool(force_band)
+            escape_active = True
+            cands = [target]
+            self._c_prev = target.copy()
+            hold_s = float(self.peel_hold_s)
+            if force_band:
+                hold_s = max(hold_s, 12.0)
+            hold_steps = max(1, int(round(hold_s * float(self.step_hz))))
+            self._escape_hold_left = hold_steps - 1
+            self._holding_peel = True
+            self._holding_force_peel = bool(force_band)
+            self._steps_since_replan = 0
+            self._stall_steps = 0
+            self.replan_count += 1
+            self.offaxis_count += 1
+            self.peel_count += 1
+            self._last_choice_idx = best_idx
+            self._last_n_feasible = int(n_cands)
 
         if not escape_active:
             replan = self._should_replan(d_to_g, d_fwd_hat)
@@ -561,5 +926,8 @@ class SceneIntentPlanner:
             "n_fan_starved": int(self.n_fan_starved),
             "in_escape": bool(escape_active),
             "escape_count": int(self.escape_count),
+            "in_peel": bool(peel_active),
+            "peel_count": int(self.peel_count),
+            "force_peel": bool(force_peel_active),
         }
         return g_rel, info

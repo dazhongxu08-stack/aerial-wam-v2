@@ -308,6 +308,9 @@ class RolloutCollector:
                                 k: (float(v) if v is not None else None)
                                 for k, v in cones.items()
                             }
+                from experiments.aerial.rl.cone_transition import stamp_column_profile
+
+                stamp_column_profile(obs, self.depth_predictor)
             if self.tau_predictor is not None:
                 tau = self.tau_predictor.predict_tau(obs)
                 if tau is not None:

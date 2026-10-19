@@ -28,6 +28,7 @@ SEARCH regime, not CTBR racing. ``MAX_IMAGINATION_HORIZON`` stays 15.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any, Dict, Optional, Tuple
 
@@ -36,6 +37,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from experiments.aerial.rl.depth_geometry import forward_min_depth_torch
 from experiments.aerial.rl.dreamer_recipe import (
     BETA_DYN,
     BETA_PRED,
@@ -55,6 +57,16 @@ from experiments.aerial.rl.goal_features import (
     REWARD_AUX_DIM,
 )
 from experiments.aerial.rl.wm_data import windows_to_arrays
+
+# Geometric conditional hinge: only when forward is blocked AND a side is clearer
+# by at least this margin (m). See docs/handover/WAM_COLL_GEOM_125_PROMPT_20260828.md.
+_COLL_HINGE_LAT_CLEAR_M = 0.5
+_COLL_FWD_CENTER_FRAC = 0.5
+# Early-band BCE target cap. A wall near 8 m lands here; closer than ~4 m
+# the inner ramp can go higher, and hard contact is still 1.
+_COLL_EARLY_TARGET_CAP = 0.55
+_COLL_PAIR_FWD = (0.7, 0.0, 0.0, 0.0)
+_COLL_PAIR_YAW = 0.25
 
 try:  # FastWAM's distributed-safe logger when available; std logging otherwise.
     from fastwam.utils.logging_config import get_logger  # type: ignore
@@ -77,6 +89,130 @@ def _symlog(x: torch.Tensor) -> torch.Tensor:
 def _symexp(y: torch.Tensor) -> torch.Tensor:
     """Inverse of :func:`_symlog` — matches :func:`dreamer_recipe.symexp`."""
     return torch.sign(y) * torch.expm1(torch.abs(y))
+
+
+def _cone_side_loss(pred_symlog: torch.Tensor, gt_m: torch.Tensor) -> torch.Tensor:
+    """Order of left vs right cones, plus a light magnitude match.
+
+    Pixel MSE can stay low while the decoded map is one template with the
+    near side always on the left. This term is zero unless the ground-truth
+    cones differ by more than 25%.
+    """
+    from experiments.aerial.rl.depth_geometry import cone_mins_torch
+
+    pred_m = _symexp(pred_symlog)
+    _pf, pl, pr = cone_mins_torch(pred_m)
+    gf, gl, gr = cone_mins_torch(gt_m)
+    gdiff = torch.log(gl.clamp_min(1e-3)) - torch.log(gr.clamp_min(1e-3))
+    pdiff = torch.log(pl.clamp_min(1e-3)) - torch.log(pr.clamp_min(1e-3))
+    ok = torch.isfinite(gdiff) & torch.isfinite(pdiff) & torch.isfinite(gf) & torch.isfinite(gl) & torch.isfinite(gr)
+    side = ok & (gdiff.abs() > math.log(1.25))
+    if bool(side.any()):
+        order = torch.relu(-pdiff[side] * torch.sign(gdiff[side])).mean()
+    else:
+        order = pred_symlog.new_zeros(())
+    acc = pred_symlog.new_zeros(())
+    n_mag = 0
+    for p, g in ((_pf, gf), (pl, gl), (pr, gr)):
+        m = ok & torch.isfinite(p) & (g > 0.5) & (g < 80.0) & (p > 0.0)
+        if bool(m.any()):
+            acc = acc + F.mse_loss(_symlog(p[m]), _symlog(g[m]))
+            n_mag += 1
+    mag = acc / n_mag if n_mag else pred_symlog.new_zeros(())
+    return order + 0.25 * mag
+
+
+def _center_median_match(pred_m: torch.Tensor, gt_m: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    """Per-image symlog error of the center median.
+
+    Averaging the medians first lets a 3 m frame and a 9 m frame cancel into
+    one 5 m reading. Each frame is matched on its own.
+    """
+    terms = []
+    for i in range(int(pred_m.shape[0])):
+        mask = valid[i]
+        if int(mask.sum()) < 8:
+            continue
+        ordered, _ = torch.sort(pred_m[i][mask].reshape(-1))
+        n = int(ordered.numel())
+        if n % 2 == 1:
+            pred_med = ordered[n // 2]
+        else:
+            pred_med = 0.5 * (ordered[n // 2 - 1] + ordered[n // 2])
+        gt_med = gt_m[i][mask].median().detach()
+        terms.append((_symlog(pred_med) - _symlog(gt_med)) ** 2)
+    if not terms:
+        return pred_m.sum() * 0.0
+    return torch.stack(terms).mean()
+
+
+def _forward_center_depth_loss(
+    pred_symlog: torch.Tensor,
+    gt_m: torch.Tensor,
+    *,
+    near_m: float = 18.0,
+    band_frac: float = 0.5,
+) -> torch.Tensor:
+    """Match the forward-view center in metres, per frame.
+
+    Pixel symlog MSE over the whole frame is fit by a mid-range field, and a
+    few metres of error is small in symlog. The crop matches
+    :func:`depth_geometry.forward_view_mass`. Each frame pays smooth-L1 in
+    metres on its own center, including distances past 80 m. Pixels whose true
+    depth is past 40 m pay extra when the decode is closer than the truth.
+    """
+    if pred_symlog.ndim == 2:
+        pred_symlog = pred_symlog.unsqueeze(0)
+        gt_m = gt_m.unsqueeze(0)
+    pred_m = _symexp(pred_symlog)
+    _b, h, w = int(gt_m.shape[0]), int(gt_m.shape[-2]), int(gt_m.shape[-1])
+    dh = max(1, int(h * float(max(0.05, min(1.0, band_frac)))))
+    r0 = (h - dh) // 2
+    c0, c1 = w // 4, (3 * w) // 4
+    if c1 <= c0:
+        c0, c1 = 0, w
+    pred_c = pred_m[:, r0 : r0 + dh, c0:c1]
+    sym_c = pred_symlog[:, r0 : r0 + dh, c0:c1]
+    gt_c = gt_m[:, r0 : r0 + dh, c0:c1]
+    valid = torch.isfinite(gt_c) & (gt_c > 1e-3) & (gt_c < 200.0) & torch.isfinite(pred_c)
+    if not bool(valid.any()):
+        return pred_symlog.sum() * 0.0
+    terms = []
+    for i in range(int(pred_c.shape[0])):
+        mask = valid[i]
+        if int(mask.sum()) < 8:
+            continue
+        sp = sym_c[i][mask]
+        gg = gt_c[i][mask]
+        pp = pred_c[i][mask]
+        sg = _symlog(gg)
+        mse_i = F.mse_loss(sp, sg)
+        mag_i = (sp - sg).abs().mean()
+        near = gg <= float(near_m)
+        if bool(near.any()):
+            rel_i = ((pp[near] - gg[near]).abs() / gg[near].clamp_min(1.0)).mean()
+        else:
+            rel_i = pred_symlog.new_zeros(())
+        metre_m = (gg > 1.0) & (gg < 150.0)
+        if bool(metre_m.any()):
+            metre_i = F.smooth_l1_loss(pp[metre_m], gg[metre_m])
+        else:
+            metre_i = pred_symlog.new_zeros(())
+        gt_med = float(gg.median().detach())
+        far = gg > 40.0
+        if gt_med > 40.0 and bool(far.any()):
+            close_bias = torch.relu(gg[far].clamp(max=90.0) - pp[far]).mean()
+        else:
+            close_bias = pred_symlog.new_zeros(())
+        med_i = _center_median_match(pred_c[i : i + 1], gt_c[i : i + 1], valid[i : i + 1])
+        if gt_med <= 18.0:
+            weight = 3.0
+        else:
+            weight = 2.0
+        terms.append(weight * (0.25 * mse_i + 0.25 * mag_i + rel_i + med_i + metre_i + close_bias))
+    if not terms:
+        return pred_symlog.sum() * 0.0
+    return torch.stack(terms).mean()
 
 
 def _twohot_targets(x: torch.Tensor, bins: torch.Tensor) -> torch.Tensor:
@@ -600,6 +736,28 @@ class DA3DepthHead(nn.Module):
         """Convenience: window RGB → ``(D̂, log_σ)`` for the **last** frame."""
         return self.forward(self._prep_last_frame(rgb_nhwc))
 
+    def encode_env(self, rgb_nhwc: torch.Tensor) -> torch.Tensor:
+        """Window RGB → ``[B, ENV_DIM]`` scene vector of the last frame (encoder only)."""
+        feats, _aux = self.encoder(
+            self._prep_last_frame(rgb_nhwc).unsqueeze(1), cam_token=None, export_feat_layers=[]
+        )
+        return da3_env_vector(feats)
+
+
+# Encoder outputs ``(patch [B,1,P,C], cls [B,1,C])`` per ``out_layers`` entry; the
+# mid (layer 11) and last (layer 23) blocks carry the scene vector.
+DA3_ENV_LAYERS = (1, 3)
+DA3_ENV_DIM = 4 * 1024
+
+
+def da3_env_vector(feats) -> torch.Tensor:
+    """Patch-mean and class token of the ``DA3_ENV_LAYERS`` blocks, concatenated."""
+    parts = []
+    for i in DA3_ENV_LAYERS:
+        patch, cls = feats[i]
+        parts += [patch[:, 0].mean(1), cls[:, 0]]
+    return torch.cat(parts, dim=-1).float()
+
 
 def build_depth_head(spec: Optional[Dict[str, Any]]):
     """Construct a depth head from a fresh config dict OR a checkpoint payload.
@@ -958,6 +1116,18 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         reward_dt: float = DEFAULT_REWARD_DT,
         reward_feat_proj_dim: int = 64,
         w_maneuver: float = DEFAULT_MANEUVER_W,
+        # Collision geometry supervision (default 0 → plain BCE, backward-compat).
+        coll_pos_weight: float = 0.0,
+        coll_near_depth_m: float = 0.0,
+        coll_rank_hinge_weight: float = 0.0,
+        coll_rank_hinge_margin: float = 0.15,
+        coll_hinge_fwd_max_m: float = 4.0,
+        coll_fwd_depth_aux_weight: float = 0.0,
+        coll_early_fwd_m: float = 0.0,
+        coll_early_yaw_hinge_weight: float = 0.0,
+        coll_early_yaw_margin: float = 0.10,
+        center_depth_weight: float = 0.0,
+        coll_loss_scale: float = 1.0,
     ) -> None:
         nn.Module.__init__(self)
         if int(image_size) < 16 or int(image_size) % 16 != 0:
@@ -981,6 +1151,8 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         self.beta_rep = float(beta_rep)
         self.beta_reward = float(beta_reward)
         self.beta_depth = float(beta_depth)
+        # Side-order term on the depth decoder. 0 keeps the pixel MSE loss unchanged.
+        self.cone_depth_weight = 0.0
         self.grad_clip = float(grad_clip)
         self.train_steps_per_update = int(train_steps_per_update)
         self.decoder_train_only = bool(decoder_train_only)
@@ -1034,7 +1206,22 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             nn.Linear(hidden_dim, int(num_bins)),
         )
         self.continue_head = nn.Linear(feature_dim, 1)
-        self.coll_head = nn.Linear(feature_dim, 1)
+        # Action-conditioned collision head: p(coll | z, a) via MLP(feat ‖ action).
+        self.coll_head = nn.Sequential(
+            nn.Linear(feature_dim + int(action_dim), hidden_dim), nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.coll_pos_weight = float(coll_pos_weight)
+        self.coll_near_depth_m = float(coll_near_depth_m)
+        self.coll_rank_hinge_weight = float(coll_rank_hinge_weight)
+        self.coll_rank_hinge_margin = float(coll_rank_hinge_margin)
+        self.coll_hinge_fwd_max_m = float(coll_hinge_fwd_max_m)
+        self.coll_fwd_depth_aux_weight = float(coll_fwd_depth_aux_weight)
+        self.coll_early_fwd_m = float(coll_early_fwd_m)
+        self.coll_early_yaw_hinge_weight = float(coll_early_yaw_hinge_weight)
+        self.coll_early_yaw_margin = float(coll_early_yaw_margin)
+        self.center_depth_weight = float(center_depth_weight)
+        self.coll_loss_scale = float(coll_loss_scale)
         # Directional obstacle cost: feature=[h‖z] + action → scalar ≥ 0.
         # Online reward uses this only when ``obstacle_cost_trained`` is True.
         self.obstacle_cost_head = nn.Sequential(
@@ -1129,6 +1316,17 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             decoder_train_only=bool(dec.get("train_only", True)) if isinstance(dec, dict) else True,
             device=str(g("device", "cuda")),
             reward_dt=float(reward_dt),
+            coll_pos_weight=float(g("coll_pos_weight", 0.0)),
+            coll_near_depth_m=float(g("coll_near_depth_m", 0.0)),
+            coll_rank_hinge_weight=float(g("coll_rank_hinge_weight", 0.0)),
+            coll_rank_hinge_margin=float(g("coll_rank_hinge_margin", 0.15)),
+            coll_hinge_fwd_max_m=float(g("coll_hinge_fwd_max_m", 4.0)),
+            coll_fwd_depth_aux_weight=float(g("coll_fwd_depth_aux_weight", 0.0)),
+            coll_early_fwd_m=float(g("coll_early_fwd_m", 0.0)),
+            coll_early_yaw_hinge_weight=float(g("coll_early_yaw_hinge_weight", 0.0)),
+            coll_early_yaw_margin=float(g("coll_early_yaw_margin", 0.10)),
+            center_depth_weight=float(g("center_depth_weight", 0.0)),
+            coll_loss_scale=float(g("coll_loss_scale", 1.0)),
         )
 
     def _reward_aux_torch(
@@ -1158,6 +1356,462 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         aux = self._reward_aux_torch(goal_rel, body_vel, action)
         return self.reward_head(torch.cat([feat_p, action, aux], dim=-1))
 
+    def _coll_logits(self, feature: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        """Action-conditioned collision logits: ``coll_head(feat ‖ action)``."""
+        feat = feature
+        act = action.to(dtype=feat.dtype, device=feat.device)
+        # Broadcast action over leading dims of feature when needed.
+        while act.dim() < feat.dim():
+            act = act.unsqueeze(0)
+        if act.shape[:-1] != feat.shape[:-1]:
+            act = act.expand(*feat.shape[:-1], act.shape[-1])
+        if act.shape[-1] < int(self.action_dim):
+            pad = torch.zeros(
+                *act.shape[:-1], int(self.action_dim) - act.shape[-1],
+                device=act.device, dtype=act.dtype,
+            )
+            act = torch.cat([act, pad], dim=-1)
+        elif act.shape[-1] > int(self.action_dim):
+            act = act[..., : int(self.action_dim)]
+        return self.coll_head(torch.cat([feat, act], dim=-1)).squeeze(-1)
+
+    @staticmethod
+    def _fwd_lateral_depths_torch(
+        depth: torch.Tensor, *, center_frac: float = _COLL_FWD_CENTER_FRAC,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Batched forward / left / right clearances from GT depth.
+
+        Forward = centre-crop min (``forward_min_depth_torch``). Left/right use
+        the same row band but columns *outside* the centre crop so a central
+        obstacle does not dominate lateral clearance (needed for geometric hinge).
+        ``depth``: ``[..., H, W]``.
+        """
+        leading = depth.shape[:-2]
+        flat = depth.reshape(-1, depth.shape[-2], depth.shape[-1])
+        n, h, w = flat.shape
+        cf = float(max(0.05, min(1.0, center_frac)))
+        dh, dw = max(1, int(h * cf)), max(1, int(w * cf))
+        r0, c0 = (h - dh) // 2, (w - dw) // 2
+        d_fwd = forward_min_depth_torch(flat, center_frac=cf)
+        band = flat[:, r0 : r0 + dh, :]
+        left_region = band[:, :, :c0] if c0 > 0 else band[:, :, : max(1, w // 4)]
+        right_start = c0 + dw
+        right_region = (
+            band[:, :, right_start:] if right_start < w
+            else band[:, :, max(0, 3 * w // 4) :]
+        )
+
+        def _min_pos(region: torch.Tensor) -> torch.Tensor:
+            valid = torch.isfinite(region) & (region > 0)
+            filled = region.masked_fill(~valid, float("inf"))
+            return filled.reshape(n, -1).min(dim=-1).values
+
+        d_left = _min_pos(left_region)
+        d_right = _min_pos(right_region)
+        shape = leading if leading else ()
+        return (
+            d_fwd.reshape(*shape) if shape else d_fwd.reshape(()),
+            d_left.reshape(*shape) if shape else d_left.reshape(()),
+            d_right.reshape(*shape) if shape else d_right.reshape(()),
+        )
+
+    @staticmethod
+    def _center_forward_percentile_torch(
+        depth: torch.Tensor, *, center_frac: float = _COLL_FWD_CENTER_FRAC, q: float = 0.10,
+    ) -> torch.Tensor:
+        """10th percentile of the centre crop. Invalid pixels are ignored."""
+        leading = depth.shape[:-2]
+        flat = depth.reshape(-1, depth.shape[-2], depth.shape[-1])
+        n, h, w = flat.shape
+        cf = float(max(0.05, min(1.0, center_frac)))
+        dh, dw = max(1, int(h * cf)), max(1, int(w * cf))
+        r0, c0 = (h - dh) // 2, (w - dw) // 2
+        crop = flat[:, r0 : r0 + dh, c0 : c0 + dw].reshape(n, -1)
+        valid = torch.isfinite(crop) & (crop > 0)
+        filled = crop.masked_fill(~valid, float("nan"))
+        pct = torch.nanquantile(filled, float(q), dim=-1)
+        pct = torch.where(valid.any(dim=-1), pct, torch.full_like(pct, float("inf")))
+        shape = leading if leading else ()
+        return pct.reshape(*shape) if shape else pct.reshape(())
+
+    @staticmethod
+    def _side_median_torch(
+        depth: torch.Tensor, *, center_frac: float = _COLL_FWD_CENTER_FRAC,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Median depth on the outside-crop left and right bands."""
+        leading = depth.shape[:-2]
+        flat = depth.reshape(-1, depth.shape[-2], depth.shape[-1])
+        n, h, w = flat.shape
+        cf = float(max(0.05, min(1.0, center_frac)))
+        dh, dw = max(1, int(h * cf)), max(1, int(w * cf))
+        r0, c0 = (h - dh) // 2, (w - dw) // 2
+        band = flat[:, r0 : r0 + dh, :]
+        left = band[:, :, :c0] if c0 > 0 else band[:, :, : max(1, w // 4)]
+        right_start = c0 + dw
+        right = (
+            band[:, :, right_start:] if right_start < w
+            else band[:, :, max(0, 3 * w // 4) :]
+        )
+
+        def _med(region: torch.Tensor) -> torch.Tensor:
+            cols = region.reshape(n, -1)
+            valid = torch.isfinite(cols) & (cols > 0)
+            filled = cols.masked_fill(~valid, float("nan"))
+            med = torch.nanquantile(filled, 0.5, dim=-1)
+            return torch.where(valid.any(dim=-1), med, torch.full_like(med, float("inf")))
+
+        shape = leading if leading else ()
+        dl, dr = _med(left), _med(right)
+        if not shape:
+            return dl.reshape(()), dr.reshape(())
+        return dl.reshape(*shape), dr.reshape(*shape)
+
+    def _stable_frontal_press_mask(
+        self, depth: torch.Tensor, action: torch.Tensor, early: float,
+    ) -> torch.Tensor:
+        """Frames inside a straight run that actually closes on a frontal obstacle.
+
+        Forward is the centre-crop 10th percentile. One side median must be at
+        least 2 m clearer. The run needs 3 frames, a drop of 0.5 m, and no
+        step jump above 2 m.
+        """
+        from experiments.aerial.rl.depth_geometry import stable_approach
+
+        d_pct = self._center_forward_percentile_torch(depth)
+        d_left, d_right = self._side_median_torch(depth)
+        longer = torch.maximum(d_left, d_right)
+        act = action.to(device=depth.device, dtype=depth.dtype)
+        press = (act[..., 0] > 0.25) & (act[..., 3].abs() < 0.08)
+        raw = (
+            torch.isfinite(d_pct)
+            & (d_pct > 8.0)
+            & (d_pct <= float(early))
+            & torch.isfinite(longer)
+            & (longer >= d_pct + 2.0)
+            & press
+        )
+        active = torch.zeros_like(raw)
+        if raw.ndim == 1:
+            raw = raw.unsqueeze(0)
+            d_pct = d_pct.unsqueeze(0)
+            active = active.unsqueeze(0)
+            squeeze = True
+        else:
+            squeeze = False
+        pct_cpu = d_pct.detach().float().cpu()
+        raw_cpu = raw.detach().cpu()
+        for b in range(int(raw_cpu.shape[0])):
+            flags = [bool(v) for v in raw_cpu[b].tolist()]
+            values = [float(v) for v in pct_cpu[b].tolist()]
+            t = 0
+            n = len(flags)
+            while t < n:
+                if not flags[t]:
+                    t += 1
+                    continue
+                start = t
+                while t < n and flags[t]:
+                    t += 1
+                if stable_approach(values[start:t]):
+                    active[b, start:t] = True
+        if squeeze:
+            active = active.squeeze(0)
+        return active
+
+    def _center_proximity_target(self, d_pct: torch.Tensor) -> torch.Tensor:
+        """Collision target in ``[0, 1]`` from the centre-crop 10th percentile.
+
+        Inside ``coll_near_depth_m`` the ramp is ``(near - d) / near``. Out to
+        ``coll_early_fwd_m`` it is ``(early - d) / early``, capped at 0.55.
+        The two ramps are combined with a maximum, so a wall sitting on the
+        8 m edge stays near 0.55 instead of falling to 0. Farther than the
+        early band, or a non-finite depth, is 0. This does not look at the
+        flown action and does not require a multi-frame press.
+        """
+        d = d_pct.to(dtype=self.torch_dtype)
+        out = torch.zeros_like(d)
+        finite = torch.isfinite(d) & (d > 0)
+        near = float(self.coll_near_depth_m)
+        early = float(getattr(self, "coll_early_fwd_m", 0.0) or 0.0)
+        if near > 0.0:
+            t_near = ((near - d) / near).clamp(0.0, 1.0)
+            out = torch.where(finite & (d <= near), t_near, out)
+        if early > 0.0:
+            t_early = ((early - d) / early).clamp(0.0, _COLL_EARLY_TARGET_CAP)
+            out = torch.maximum(
+                out,
+                torch.where(finite & (d <= early), t_early, torch.zeros_like(d)),
+            )
+        return out.clamp(0.0, 1.0)
+
+    def _center_pair_loss(
+        self,
+        feature: torch.Tensor,
+        depth: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, int]:
+        """BCE on a synthetic forward and a synthetic yaw, same latent.
+
+        Forward ``[0.7, 0, 0, 0]`` gets :meth:`_center_proximity_target`.
+        Yaw ``±0.25`` toward the longer side gets 0. Unweighted, so the
+        optimum equals the label. ``coll_fwd_depth_aux_weight`` is not applied.
+        """
+        zero = torch.zeros((), device=feature.device, dtype=feature.dtype)
+        early = float(getattr(self, "coll_early_fwd_m", 0.0) or 0.0)
+        if depth is None or early <= 0.0:
+            return zero, 0
+        d_pct = self._center_forward_percentile_torch(depth)
+        d_left, d_right = self._side_median_torch(depth)
+        lead = feature.shape[:-1]
+        if d_pct.shape != lead:
+            d_pct = d_pct.reshape(lead)
+            d_left = d_left.reshape(lead)
+            d_right = d_right.reshape(lead)
+        target = self._center_proximity_target(d_pct).to(dtype=feature.dtype)
+        valid = torch.isfinite(d_pct)
+        if not bool(valid.any()):
+            return zero, 0
+        a_fwd = torch.zeros(
+            *lead, self.action_dim, device=feature.device, dtype=feature.dtype,
+        )
+        a_yaw = torch.zeros_like(a_fwd)
+        a_fwd[..., 0] = _COLL_PAIR_FWD[0]
+        yaw = torch.where(
+            d_left >= d_right,
+            torch.full_like(d_left, _COLL_PAIR_YAW),
+            torch.full_like(d_left, -_COLL_PAIR_YAW),
+        )
+        a_yaw[..., 3] = yaw.to(dtype=feature.dtype)
+        logits_fwd = self._coll_logits(feature, a_fwd)
+        logits_yaw = self._coll_logits(feature, a_yaw)
+        # Occupied frames are the minority. A single mean lets the zero targets
+        # (empty forward, and every yaw) set the bias, and the forward label
+        # never reaches 0.3–0.55. Average the occupied-forward term on its own
+        # so its optimum stays the label and its gradient is not diluted.
+        pos = valid & (target > 0)
+        neg = valid & ~pos
+        parts = []
+        if bool(pos.any()):
+            parts.append(F.binary_cross_entropy_with_logits(logits_fwd[pos], target[pos]))
+        if bool(neg.any()):
+            parts.append(F.binary_cross_entropy_with_logits(
+                logits_fwd[neg], torch.zeros_like(logits_fwd[neg]),
+            ))
+        parts.append(F.binary_cross_entropy_with_logits(
+            logits_yaw[valid], torch.zeros_like(logits_yaw[valid]),
+        ))
+        n_pos = int(pos.sum().item())
+        return torch.stack(parts).mean(), n_pos
+
+    def _collision_train_targets(
+        self,
+        collided: torch.Tensor,
+        depth: Optional[torch.Tensor],
+        action: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Soft near-depth targets + auto/fixed BCE ``pos_weight``.
+
+        * Hard contact (``collided=1``) always wins.
+        * When ``coll_early_fwd_m > 0``, a forward action (``a[...,0] > 0``)
+          takes the centre-crop p10 proximity. One frame is enough. Pure yaw
+          stays 0. ``coll_fwd_depth_aux_weight`` does not scale the target.
+        * Otherwise, soft near boost only when action is forward:
+          continuous proximity ``((near - d_fwd) / near).clamp(0,1)`` in **[0,1]**.
+          ``coll_fwd_depth_aux_weight`` is **not** a target multiplier (legacy bug
+          scaled targets to >1 and saturated ``p_coll≈1`` for all arms); it only
+          gates whether soft proximity is used (``>0`` → continuous; ``<=0`` and
+          ``near>0`` → binary soft ``0.5``).
+        * Targets are always clamped to ``[0, 1]`` before BCE.
+        * ``coll_pos_weight <= 0`` → auto ``n_neg / n_pos`` (floored at 1).
+        """
+        target = collided.to(device=self.device, dtype=self.torch_dtype).clamp(0.0, 1.0)
+        near = float(self.coll_near_depth_m)
+        aux_w = float(self.coll_fwd_depth_aux_weight)
+        early = float(getattr(self, "coll_early_fwd_m", 0.0) or 0.0)
+        if depth is not None and early > 0.0:
+            d = depth.to(device=self.device, dtype=self.torch_dtype)
+            d_pct = self._center_forward_percentile_torch(d)
+            prox = self._center_proximity_target(d_pct)
+            while prox.dim() < target.dim():
+                prox = prox.unsqueeze(-1)
+            if prox.shape != target.shape:
+                prox = prox.reshape(target.shape)
+            if action is not None:
+                act = action.to(device=self.device, dtype=self.torch_dtype)
+                is_fwd = act[..., 0] > 0.0
+                while is_fwd.dim() < target.dim():
+                    is_fwd = is_fwd.unsqueeze(-1)
+                if is_fwd.shape != target.shape:
+                    is_fwd = is_fwd.reshape(target.shape)
+                prox = torch.where(is_fwd, prox, torch.zeros_like(prox))
+            else:
+                prox = torch.zeros_like(prox)
+            target = torch.maximum(target, prox.to(dtype=target.dtype)).clamp(0.0, 1.0)
+        elif depth is not None and (near > 0.0 or aux_w > 0.0):
+            d = depth.to(device=self.device, dtype=self.torch_dtype)
+            d_fwd, _, _ = self._fwd_lateral_depths_torch(d)
+            # Align leading dims with collided/target (depth may be [B,L,H,W]).
+            while d_fwd.dim() < target.dim():
+                d_fwd = d_fwd.unsqueeze(-1) if d_fwd.numel() == 1 else d_fwd
+            if d_fwd.shape != target.shape:
+                d_fwd = d_fwd.reshape(target.shape)
+            if aux_w > 0.0 and near > 0.0:
+                # Soft label ∈ [0,1] only — never multiply by aux_w (saturates BCE).
+                prox = ((near - d_fwd) / near).clamp(0.0, 1.0)
+            elif near > 0.0:
+                prox = torch.where(
+                    d_fwd < near,
+                    torch.full_like(d_fwd, 0.5),
+                    torch.zeros_like(d_fwd),
+                )
+            else:
+                prox = torch.zeros_like(d_fwd)
+            if action is not None:
+                act = action.to(device=self.device, dtype=self.torch_dtype)
+                is_fwd = act[..., 0] > 0.0
+                # Match target rank (action is [..., action_dim]).
+                while is_fwd.dim() < target.dim():
+                    is_fwd = is_fwd.unsqueeze(-1)
+                if is_fwd.shape != target.shape:
+                    is_fwd = is_fwd.reshape(target.shape)
+                prox = torch.where(is_fwd, prox, torch.zeros_like(prox))
+            else:
+                prox = torch.zeros_like(prox)
+            target = torch.maximum(target, prox.to(dtype=target.dtype)).clamp(0.0, 1.0)
+
+        if float(self.coll_pos_weight) > 0.0:
+            pw = torch.tensor(
+                float(self.coll_pos_weight), device=self.device, dtype=self.torch_dtype,
+            )
+        else:
+            n_pos = (target > 0.0).to(self.torch_dtype).sum().clamp_min(1.0)
+            n_neg = (target <= 0.0).to(self.torch_dtype).sum()
+            pw = (n_neg / n_pos).clamp_min(1.0)
+        return target, pw
+
+    def _coll_rank_hinge_loss(
+        self,
+        feat: torch.Tensor,
+        target: torch.Tensor,
+        depth: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Conditional forward-vs-lateral ranking hinge.
+
+        Active only where ``target > 0``. When ``depth`` is given, further mask
+        to frames with ``d_fwd <= coll_hinge_fwd_max_m`` and lateral clearer than
+        forward by ``_COLL_HINGE_LAT_CLEAR_M`` (open space / corridor → 0).
+        """
+        zero = torch.zeros((), device=feat.device, dtype=feat.dtype)
+        lead = feat.shape[:-1]
+        a_fwd = torch.zeros(*lead, self.action_dim, device=feat.device, dtype=feat.dtype)
+        a_left = a_fwd.clone()
+        a_right = a_fwd.clone()
+        a_fwd[..., 0] = 1.0
+        a_left[..., 1] = 1.0
+        a_right[..., 1] = -1.0
+        p_fwd = torch.sigmoid(self._coll_logits(feat, a_fwd))
+        p_left = torch.sigmoid(self._coll_logits(feat, a_left))
+        p_right = torch.sigmoid(self._coll_logits(feat, a_right))
+        p_lat = torch.minimum(p_left, p_right)
+        gap = p_fwd - p_lat
+        per = torch.relu(float(self.coll_rank_hinge_margin) - gap)
+
+        tgt = target.to(device=feat.device, dtype=feat.dtype)
+        if tgt.shape != lead and tgt.shape == (*lead, 1):
+            tgt = tgt.squeeze(-1)
+        if tgt.shape != lead:
+            tgt = tgt.reshape(lead)
+        active = tgt > 0.0
+
+        if depth is not None:
+            d = depth.to(device=feat.device, dtype=feat.dtype)
+            d_fwd, d_left, d_right = self._fwd_lateral_depths_torch(d)
+            if d_fwd.shape != lead:
+                d_fwd = d_fwd.reshape(lead)
+                d_left = d_left.reshape(lead)
+                d_right = d_right.reshape(lead)
+            d_lat = torch.maximum(d_left, d_right)
+            geom = (
+                torch.isfinite(d_fwd)
+                & (d_fwd <= float(self.coll_hinge_fwd_max_m))
+                & torch.isfinite(d_lat)
+                & (d_lat > d_fwd + _COLL_HINGE_LAT_CLEAR_M)
+            )
+            active = active & geom
+
+        if bool(active.any()):
+            loss = per[active].mean()
+            gap_out = gap[active].mean().detach()
+        else:
+            loss = zero
+            gap_out = zero
+        return loss, gap_out
+
+    def _early_yaw_hinge_loss(
+        self,
+        feat: torch.Tensor,
+        depth: Optional[torch.Tensor],
+        action: Optional[torch.Tensor] = None,
+    ):
+        """Rank a straight sequence above yaw-then-forward.
+
+        Active only inside a stable frontal press: forward p10 in
+        (8 m, ``coll_early_fwd_m``], one side median at least 2 m clearer,
+        three or more straight frames closing by at least 0.5 m. The yaw sign
+        is the longer side. The score is the max collision probability over 10
+        straight steps versus 2 yaw steps then 8 straight steps. The margin is
+        0.05, the same gap the early-yaw readout requires.
+
+        Returns ``(loss, mean gap on active frames, active count)``.
+        """
+        zero = torch.zeros((), device=feat.device, dtype=feat.dtype)
+        early = float(getattr(self, "coll_early_fwd_m", 0.0) or 0.0)
+        if depth is None or action is None or early <= 0.0:
+            return zero, zero, 0
+        lead = feat.shape[:-1]
+        d = depth.to(device=feat.device, dtype=feat.dtype)
+        act = action.to(device=feat.device, dtype=feat.dtype)
+        active = self._stable_frontal_press_mask(d, act, early)
+        if active.shape != lead:
+            active = active.reshape(lead)
+        if not bool(active.any()):
+            return zero, zero, 0
+        d_left, d_right = self._side_median_torch(d)
+        if d_left.shape != lead:
+            d_left = d_left.reshape(lead)
+            d_right = d_right.reshape(lead)
+        flat_feat = feat.reshape(-1, feat.shape[-1])
+        flat_active = active.reshape(-1)
+        picked = flat_feat[flat_active]
+        h = picked[:, : self.recurrent_dim]
+        z = picked[:, self.recurrent_dim :]
+        open_left = (d_left.reshape(-1)[flat_active] >= d_right.reshape(-1)[flat_active])
+        n = int(picked.shape[0])
+        a_fwd = torch.zeros(n, self.action_dim, device=feat.device, dtype=feat.dtype)
+        a_yaw = torch.zeros(n, self.action_dim, device=feat.device, dtype=feat.dtype)
+        a_fwd[:, 0] = 0.7
+        a_yaw[:, 3] = torch.where(
+            open_left,
+            torch.full((n,), 0.25, device=feat.device, dtype=feat.dtype),
+            torch.full((n,), -0.25, device=feat.device, dtype=feat.dtype),
+        )
+
+        def _max_p(actions: list) -> torch.Tensor:
+            hh, zz = h, z
+            pmax = None
+            for action in actions:
+                feature = torch.cat([hh, zz], dim=-1)
+                p = torch.sigmoid(self._coll_logits(feature, action))
+                pmax = p if pmax is None else torch.maximum(pmax, p)
+                hh = self.rssm.advance_h(hh, zz, action)
+                zz = self.rssm._sample(self.rssm.prior_probs(hh))
+            return pmax
+
+        yaw_actions = [a_yaw, a_yaw] + [a_fwd] * 8
+        straight_actions = [a_fwd] * 10
+        gap = _max_p(straight_actions) - _max_p(yaw_actions)
+        per = torch.relu(0.05 - gap)
+        return per.mean(), gap.mean().detach(), n
+
     # -- embedding -----------------------------------------------------------
     def _embed(self, rgb: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
         """RGB (uint8 [N,H,W,3] or float [N,C,H,W]) + proprio → embedding."""
@@ -1166,6 +1820,41 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         return torch.cat([self.encoder(rgb), self.proprio_mlp(proprio)], dim=-1)
 
     # -- training loss (FastWAM signature) -----------------------------------
+    def _mirror_cone_loss(
+        self,
+        rgb: torch.Tensor,
+        proprio: torch.Tensor,
+        depth: torch.Tensor,
+    ) -> torch.Tensor:
+        """Side-order loss on a horizontal mirror of the same window.
+
+        Urban GT in the current corpora has the farther cone on the right in
+        every disagreed frame, so an unflipped loss keeps a right-far template.
+        The mirror gives the encoder the opposite case. Recurrent state stays
+        at zero, matching ``encode`` / ``cone_hats``.
+        """
+        if rgb.dim() == 5 and rgb.shape[-1] in (1, 3):
+            rgb_f = rgb.flip(-2)
+        else:
+            rgb_f = rgb.flip(-1)
+        depth_f = depth.flip(-1)
+        b = int(proprio.shape[0])
+        h0 = self.rssm.initial_h(b, self.device, self.torch_dtype)
+        losses = []
+        for t in range(int(proprio.shape[1])):
+            embed = self._embed(rgb_f[:, t], proprio[:, t])
+            post = self.rssm.post_probs(h0, embed)
+            z = self.rssm._sample(post)
+            pred = self.depth_decoder(torch.cat([h0, z], dim=-1)).squeeze(1)
+            gt = depth_f[:, t]
+            if pred.shape[-2:] != gt.shape[-2:]:
+                pred = F.interpolate(
+                    pred.unsqueeze(1), size=gt.shape[-2:],
+                    mode="bilinear", align_corners=False,
+                ).squeeze(1)
+            losses.append(_cone_side_loss(pred, gt))
+        return torch.stack(losses).mean()
+
     def training_loss(self, sample: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         """One-batch DreamerV3 world-model loss over a ``[B, L, ...]`` window.
 
@@ -1245,8 +1934,20 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
                 loss_depth_aux = F.mse_loss(depth_pred[valid], target[valid])
             else:
                 loss_depth_aux = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+            cone_w = float(getattr(self, "cone_depth_weight", 0.0) or 0.0)
+            if cone_w > 0.0 and bool(valid.any()):
+                loss_cone_side = _cone_side_loss(depth_pred, depth_gt)
+                loss_cone_side = loss_cone_side + self._mirror_cone_loss(rgb, proprio, depth_sample)
+            else:
+                loss_cone_side = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+            if float(getattr(self, "center_depth_weight", 0.0) or 0.0) > 0.0 and bool(valid.any()):
+                loss_center_depth = _forward_center_depth_loss(depth_pred, depth_gt)
+            else:
+                loss_center_depth = torch.zeros((), device=self.device, dtype=self.torch_dtype)
         else:
             loss_depth_aux = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+            loss_cone_side = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+            loss_center_depth = torch.zeros((), device=self.device, dtype=self.torch_dtype)
 
         # Goal+velocity-conditioned reward: same concat timing as :meth:`step`.
         act = action.to(self.torch_dtype)
@@ -1257,14 +1958,69 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         cont_target = (~done.bool()).to(self.torch_dtype)   # continue = 1 - done
         loss_cont = F.binary_cross_entropy_with_logits(
             self.continue_head(feature).squeeze(-1), cont_target)
-        loss_coll = F.binary_cross_entropy_with_logits(
-            self.coll_head(feature).squeeze(-1), collided.to(self.torch_dtype))
+
+        # Collision: action-conditioned logits; soft near-depth targets + optional
+        # geometric forward/lateral hinge (weights default 0 → plain BCE).
+        use_soft_coll = (
+            float(self.coll_near_depth_m) > 0.0
+            or float(self.coll_fwd_depth_aux_weight) > 0.0
+            or float(self.coll_pos_weight) > 0.0
+            or float(getattr(self, "coll_early_fwd_m", 0.0) or 0.0) > 0.0
+        )
+        if use_soft_coll:
+            coll_target, coll_pw = self._collision_train_targets(
+                collided, depth_sample, action=act,
+            )
+            loss_coll = F.binary_cross_entropy_with_logits(
+                self._coll_logits(feature, act),
+                coll_target,
+                pos_weight=coll_pw,
+            )
+        else:
+            coll_target = collided.to(self.torch_dtype)
+            loss_coll = F.binary_cross_entropy_with_logits(
+                self._coll_logits(feature, act), coll_target,
+            )
+            coll_pw = torch.ones((), device=self.device, dtype=self.torch_dtype)
+
+        loss_coll_pair = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+        coll_pair_n = 0
+        if (
+            float(getattr(self, "coll_loss_scale", 1.0) or 0.0) > 0.0
+            and float(getattr(self, "coll_early_fwd_m", 0.0) or 0.0) > 0.0
+        ):
+            loss_coll_pair, coll_pair_n = self._center_pair_loss(feature, depth_sample)
+
+        if float(self.coll_rank_hinge_weight) > 0.0:
+            loss_coll_hinge, coll_hinge_gap_t = self._coll_rank_hinge_loss(
+                feature, coll_target, depth=depth_sample,
+            )
+        else:
+            loss_coll_hinge = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+            coll_hinge_gap_t = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+        if float(getattr(self, "coll_early_yaw_hinge_weight", 0.0) or 0.0) > 0.0:
+            loss_early_yaw, early_yaw_gap_t, early_yaw_n = self._early_yaw_hinge_loss(
+                feature, depth_sample, action=act,
+            )
+        else:
+            loss_early_yaw = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+            early_yaw_gap_t = torch.zeros((), device=self.device, dtype=self.torch_dtype)
+            early_yaw_n = 0
 
         # ``beta_reward`` up-weights the two-hot reward term inside βpred (recon
         # MSE on 224² frames otherwise dwarfs reward CE; V1-② fidelity needs it).
+        # ``coll_loss_scale`` 0 drops collision terms so a depth finetune does
+        # not keep moving the collision head.
+        coll_scale = float(getattr(self, "coll_loss_scale", 1.0))
         loss_pred = (
-            loss_recon + self.beta_reward * loss_reward + loss_cont + loss_coll
+            loss_recon + self.beta_reward * loss_reward + loss_cont
+            + coll_scale * loss_coll
+            + coll_scale * loss_coll_pair
+            + coll_scale * float(self.coll_rank_hinge_weight) * loss_coll_hinge
+            + coll_scale * float(getattr(self, "coll_early_yaw_hinge_weight", 0.0) or 0.0) * loss_early_yaw
             + self.beta_depth * loss_depth_aux
+            + float(getattr(self, "cone_depth_weight", 0.0) or 0.0) * loss_cone_side
+            + float(getattr(self, "center_depth_weight", 0.0) or 0.0) * loss_center_depth
         )
 
         # -- dynamics / representation KL (βdyn / βrep) ---------------------
@@ -1288,7 +2044,18 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             "loss_rep": float(loss_rep.detach().item()),
             "loss_recon": float(loss_recon.detach().item()),
             "loss_reward": float(loss_reward.detach().item()),
+            "loss_coll": float(loss_coll.detach().item()),
+            "loss_coll_pair": float(loss_coll_pair.detach().item()),
+            "coll_pair_n": int(coll_pair_n),
+            "loss_coll_hinge": float(loss_coll_hinge.detach().item()),
+            "coll_hinge_gap": float(coll_hinge_gap_t.detach().item()),
+            "loss_early_yaw": float(loss_early_yaw.detach().item()),
+            "early_yaw_gap": float(early_yaw_gap_t.detach().item()) if torch.is_tensor(early_yaw_gap_t) else float(early_yaw_gap_t),
+            "early_yaw_n": int(early_yaw_n),
+            "coll_pos_weight": float(coll_pw.detach().item()) if torch.is_tensor(coll_pw) else float(coll_pw),
             "loss_depth_aux": float(loss_depth_aux.detach().item()),
+            "loss_center_depth": float(loss_center_depth.detach().item()),
+            "loss_cone_side": float(loss_cone_side.detach().item()),
             "has_depth_batch": bool(depth_sample is not None),
             "recon_err": float(loss_recon.detach().item()),
             "post_entropy": float(ent.item()),
@@ -1298,6 +2065,23 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
 
     def forward(self, *args, **kwargs):  # FastWAM aliases forward -> training_loss
         return self.training_loss(*args, **kwargs)
+
+    def freeze_backbone_train_collision_head(self, *, lr: float = 1e-4, early_fwd_m: float = 18.0) -> list:
+        """Train only ``coll_head``. Depth and the RSSM stay at the loaded weights.
+
+        Turns collision BCE back on, including the early forward band, and drops
+        the yaw hinge so this step does not try to move the world model.
+        """
+        for name, param in self.named_parameters():
+            param.requires_grad = name.startswith("coll_head.")
+        self.coll_loss_scale = 1.0
+        self.coll_early_fwd_m = float(early_fwd_m)
+        self.coll_early_yaw_hinge_weight = 0.0
+        self.coll_rank_hinge_weight = 0.0
+        self.center_depth_weight = 0.0
+        head_params = [p for p in self.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(head_params, lr=float(lr), betas=(0.9, 0.95))
+        return head_params
 
     def apply_freeze_backbone_train_reward_head(self) -> list:
         """Freeze encoder/RSSM/decoder/cont/coll; train ``reward_feat_proj`` + head only."""
@@ -1438,14 +2222,30 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         return out
 
     # -- imagination interface (V4; see class docstring) --------------------
+    def set_image_cones(self, cones: np.ndarray) -> None:
+        """Cones the next ``step`` reports, before any transition."""
+        self._image_cones = np.asarray(cones, dtype=np.float64).reshape(3).copy()
+
+    def set_image_profile(self, profile: np.ndarray) -> None:
+        """Column depths from the image head. ``step`` shifts them by yaw."""
+        from experiments.aerial.rl.cone_transition import cones_from_column_profile
+
+        self._image_profile = np.asarray(profile, dtype=np.float64).reshape(-1).copy()
+        self._image_cones = cones_from_column_profile(self._image_profile)
+
+    def clear_image_cones(self) -> None:
+        self._image_cones = None
+        self._image_profile = None
+
     @torch.no_grad()
-    def encode(self, obs: Observation) -> np.ndarray:
+    def encode(self, obs: Observation, *, mode: bool = False) -> np.ndarray:
         """Single observation → packed latent ``[h ‖ z]`` (numpy, width latent_dim).
 
         No history is available for a lone observation, so ``h`` starts at zero and
-        ``z`` is the posterior sample given that ``h`` — the standard RSSM initial
-        state. Packing ``h`` inside the returned vector lets :meth:`step` advance
-        the recurrent state without changing the numpy ``imagine()`` signature.
+        ``z`` is the posterior given that ``h``. ``mode`` uses the argmax code;
+        otherwise ``z`` is a sample. Packing ``h`` inside the returned vector lets
+        :meth:`step` advance the recurrent state without changing the numpy
+        ``imagine()`` signature.
         """
         self.eval()
         rgb = torch.from_numpy(np.ascontiguousarray(obs.rgb)).unsqueeze(0).to(self.device)
@@ -1453,7 +2253,13 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             np.ascontiguousarray(obs.proprio4())).to(self.torch_dtype).unsqueeze(0).to(self.device)
         h = self.rssm.initial_h(1, self.device, self.torch_dtype)
         embed = self._embed(rgb, proprio)
-        z = self.rssm._sample(self.rssm.post_probs(h, embed))
+        probs = self.rssm.post_probs(h, embed)
+        if mode:
+            index = probs.argmax(dim=-1)
+            z = F.one_hot(index, probs.shape[-1]).to(dtype=probs.dtype)
+            z = z.reshape(probs.shape[0], -1)
+        else:
+            z = self.rssm._sample(probs)
         return torch.cat([h, z], dim=-1).squeeze(0).float().cpu().numpy()
 
     @torch.no_grad()
@@ -1482,6 +2288,51 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         embed = self._embed(rgb, proprio)
         z_next = self.rssm._sample(self.rssm.post_probs(h_next, embed))
         return torch.cat([h_next, z_next], dim=-1).squeeze(0).float().cpu().numpy()
+
+    @torch.no_grad()
+    def predicted_depth(self, z: np.ndarray) -> Optional[np.ndarray]:
+        """Decoded metric depth map for the current latent, before the action.
+
+        Same map :meth:`cone_hats` collapses into three minima. ``None`` when
+        the depth decoder was not loaded.
+        """
+        depth_dec = getattr(self, "depth_decoder", None)
+        if depth_dec is None or not bool(getattr(self, "depth_decoder_trained", False)):
+            return None
+        self.eval()
+        packed = torch.from_numpy(np.ascontiguousarray(z)).to(
+            self.device, self.torch_dtype
+        ).reshape(1, self.latent_dim)
+        h = packed[:, : self.recurrent_dim]
+        z_flat = packed[:, self.recurrent_dim :]
+        feature = torch.cat([h, z_flat], dim=-1)
+        depth_sym = depth_dec(feature).squeeze(0).squeeze(0)
+        if depth_sym.ndim == 3:
+            depth_sym = depth_sym[0]
+        return _symexp(depth_sym).detach().float().cpu().numpy()
+
+    @torch.no_grad()
+    def cone_hats(self, z: np.ndarray) -> Optional[tuple]:
+        """Forward/left/right cone minima from the current latent, before the action.
+
+        Same depth map as :meth:`step`. ``None`` when the depth decoder is not
+        trained. Imagination uses this to offer a yaw the actor does not sample.
+        """
+        depth_m = self.predicted_depth(z)
+        if depth_m is None:
+            return None
+        from experiments.aerial.rl.depth_geometry import cone_clearances
+
+        cmap = cone_clearances(depth_m)
+
+        def _finite(key: str) -> Optional[float]:
+            val = float(cmap[key])
+            return val if np.isfinite(val) else None
+
+        fwd, left, right = _finite("forward"), _finite("left"), _finite("right")
+        if fwd is None or left is None or right is None:
+            return None
+        return fwd, left, right
 
     @torch.no_grad()
     def step(
@@ -1537,7 +2388,7 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         feature = torch.cat([h, z_flat], dim=-1)
         reward_probs = F.softmax(self._reward_logits(feature, a, g, v), dim=-1)
         progress = float(_symexp(_twohot_decode(reward_probs, self.bins)).item())
-        p_coll = float(torch.sigmoid(self.coll_head(feature)).item())
+        p_coll = float(torch.sigmoid(self._coll_logits(feature, a)).item())
         cont = float(torch.sigmoid(self.continue_head(feature)).item())
         done = bool(cont < 0.5 or p_coll >= 1.0)
 
@@ -1547,6 +2398,9 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
         # loaded depth_decoder.* — pre-aux / random-init weights would inject
         # garbage clearance_risk into OA rewards (2026-09-21 audit).
         d_fwd_hat: Optional[float] = None
+        d_left_hat: Optional[float] = None
+        d_right_hat: Optional[float] = None
+        d_fwd_cone_hat: Optional[float] = None
         depth_dec = getattr(self, "depth_decoder", None)
         if depth_dec is not None and bool(getattr(self, "depth_decoder_trained", False)):
             depth_sym = depth_dec(feature).squeeze(0).squeeze(0)  # [H, W] or [1,H,W]
@@ -1560,6 +2414,42 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             finite = patch[torch.isfinite(patch) & (patch > 0)]
             if finite.numel() > 0:
                 d_fwd_hat = float(finite.median().item())
+            from experiments.aerial.rl.depth_geometry import cone_clearances
+
+            cmap = cone_clearances(depth_m.detach().float().cpu().numpy())
+            def _finite_clearance(key: str) -> Optional[float]:
+                val = float(cmap[key])
+                return val if np.isfinite(val) else None
+
+            d_left_hat = _finite_clearance("left")
+            d_right_hat = _finite_clearance("right")
+            d_fwd_cone_hat = _finite_clearance("forward")
+
+        # Image-depth cones, when the caller supplied them, replace the
+        # decoder map. The small transition then advances them for the next
+        # imagined step. Absent both, the decoder hats above are unchanged.
+        profile_now = getattr(self, "_image_profile", None)
+        cones_now = getattr(self, "_image_cones", None)
+        cone_model = getattr(self, "_cone_transition", None)
+        if profile_now is not None:
+            from experiments.aerial.rl.cone_transition import cones_from_column_profile, yaw_shift_profile
+
+            cones_now = cones_from_column_profile(profile_now)
+            d_fwd_cone_hat = float(cones_now[0])
+            d_left_hat = float(cones_now[1])
+            d_right_hat = float(cones_now[2])
+            dyaw = float(np.asarray(action, dtype=np.float64).reshape(-1)[3])
+            self._image_profile = yaw_shift_profile(profile_now, dyaw)
+            self._image_cones = cones_from_column_profile(self._image_profile)
+        elif cones_now is not None:
+            d_fwd_cone_hat = float(cones_now[0])
+            d_left_hat = float(cones_now[1])
+            d_right_hat = float(cones_now[2])
+            if cone_model is not None:
+                self._image_cones = np.asarray(
+                    cone_model.predict_np(cones_now, np.asarray(action, dtype=np.float64)),
+                    dtype=np.float64,
+                )
 
         obstacle_cost: Optional[float] = None
         if bool(getattr(self, "obstacle_cost_trained", False)):
@@ -1576,6 +2466,9 @@ class TorchRSSMDynamics(LatentDynamics, nn.Module):
             done=done,
             arrived=False,
             d_fwd_hat=d_fwd_hat,
+            d_left_hat=d_left_hat,
+            d_right_hat=d_right_hat,
+            d_fwd_cone_hat=d_fwd_cone_hat,
             obstacle_cost=obstacle_cost,
         )
 

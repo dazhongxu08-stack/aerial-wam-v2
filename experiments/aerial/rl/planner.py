@@ -19,6 +19,8 @@ test-time imagination scoring path — distinct from V4 actor-critic training.
 """
 from __future__ import annotations
 
+import inspect
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -59,14 +61,54 @@ _ESCAPE_STUCK_TAX = 0.5
 #: Disable *mid-open* peel only in the last metres. Hard-block (<3 m) and
 #: tight-mid (<5 m) always offer escape even near goal (urban crash ~25 m rem).
 _ESCAPE_DISABLE_NEAR_GOAL_M = 8.0
+#: Final approach band where open-nose gating may starve escape atoms
+#: (CL-FT stall ~15–25 m rem). Modes: see ``resolve_approach_escape_mode``.
+_ESCAPE_FORCE_APPROACH_M = 25.0
+_APPROACH_ESCAPE_MODES = ("off", "side_climb", "side_only")
+
+
+def resolve_approach_escape_mode(
+    explicit: Optional[str] = None,
+) -> str:
+    """``off`` | ``side_climb`` | ``side_only`` (env ``OA_APPROACH_ESCAPE``)."""
+    raw = explicit if explicit is not None else os.environ.get("OA_APPROACH_ESCAPE", "off")
+    mode = str(raw or "off").strip().lower()
+    if mode not in _APPROACH_ESCAPE_MODES:
+        raise ValueError(
+            f"approach_escape_mode={mode!r}; expected one of {_APPROACH_ESCAPE_MODES}"
+        )
+    return mode
 
 
 def oa_offer_escape(
     d_fwd: Optional[float],
     *,
     near_goal: bool,
+    goal_rem_xy: Optional[float] = None,
+    approach_mode: str = "off",
 ) -> bool:
-    """When to add climb/side escape atoms under directional OA."""
+    """When to add climb/side escape atoms under directional OA.
+
+    ``approach_mode`` only affects the open-nose / starved case inside
+    ``_ESCAPE_FORCE_APPROACH_M``; jam-band natural offers are unchanged.
+    """
+    natural = _oa_offer_escape_natural(d_fwd, near_goal=near_goal)
+    if natural:
+        return True
+    mode = resolve_approach_escape_mode(approach_mode)
+    if mode == "off":
+        return False
+    if goal_rem_xy is not None and float(goal_rem_xy) < float(_ESCAPE_FORCE_APPROACH_M):
+        return True
+    return False
+
+
+def _oa_offer_escape_natural(
+    d_fwd: Optional[float],
+    *,
+    near_goal: bool,
+) -> bool:
+    """Pre-approach-force gating (tight / mid-open / open nose)."""
     if d_fwd is None:
         return not near_goal
     d = float(d_fwd)
@@ -201,12 +243,16 @@ def escape_clearer_cone_candidates(
     obs: Observation,
     limits: Optional[np.ndarray] = None,
     goal_rel: Optional[np.ndarray] = None,
+    *,
+    include_climb: bool = True,
 ) -> List[np.ndarray]:
     """Tight-nose escape: strafe + turn toward clearer side (or goal-side fallback).
 
     Keeps the ability to leave a tight nose without pure wall-slide crabbing.
     Body +y / +dyaw = left. When left/right cones are missing (common on some
     deploy paths), fall back to carrot side / both sides so escape still exists.
+
+    ``include_climb=False`` keeps side peel only (approach ablation C).
     """
     side = escape_side(obs, goal_rel=goal_rel)
     lim_dy = 0.4
@@ -229,14 +275,16 @@ def escape_clearer_cone_candidates(
     def _atom(s: float) -> np.ndarray:
         return np.array([creep, s * dy, 0.0, s * turn], dtype=np.float64)
 
-    # Climb escapes: gate-passed obstacle head ranks these under wall-fwd; without
-    # them the planner can only peel sideways and urban runs sink into canyons.
-    climbs = [
-        np.array([creep, 0.0, climb, 0.0], dtype=np.float64),
-        np.array([0.0, 0.0, climb, 0.0], dtype=np.float64),
-        np.array([creep, 0.0, climb, turn], dtype=np.float64),
-        np.array([creep, 0.0, climb, -turn], dtype=np.float64),
-    ]
+    # Climb escapes: optional — jam-band natural offers keep them; approach
+    # ``side_only`` mode omits them so we do not over-rely on climb.
+    climbs: List[np.ndarray] = []
+    if include_climb:
+        climbs = [
+            np.array([creep, 0.0, climb, 0.0], dtype=np.float64),
+            np.array([0.0, 0.0, climb, 0.0], dtype=np.float64),
+            np.array([creep, 0.0, climb, turn], dtype=np.float64),
+            np.array([creep, 0.0, climb, -turn], dtype=np.float64),
+        ]
 
     if side is None or side == 0.0:
         return [
@@ -247,13 +295,15 @@ def escape_clearer_cone_candidates(
             *climbs,
         ]
     s = float(side)
-    return [
+    out = [
         _atom(s),
         np.array([0.0, s * dy, 0.0, s * turn], dtype=np.float64),
         _atom(-s),  # backup opposite
         *climbs,
-        np.array([creep, s * dy, climb, s * turn], dtype=np.float64),
     ]
+    if include_climb:
+        out.append(np.array([creep, s * dy, climb, s * turn], dtype=np.float64))
+    return out
 
 
 def _cone_lr(obs: Observation) -> tuple[Optional[float], Optional[float]]:
@@ -273,6 +323,68 @@ def _cone_lr(obs: Observation) -> tuple[Optional[float], Optional[float]]:
         return v if np.isfinite(v) else None
 
     return _f("left"), _f("right")
+
+
+_YAW_SIDE_CLEAR_M = 2.0
+_YAW_BURST_STEPS = 3
+_FORWARD_AFTER_YAW_STEPS = 4
+# Above this, the road ahead is already open. A side cone a few metres longer
+# is the flanking building, not a reason to yaw off the street.
+_YAW_DETOUR_MAX_FWD_M = 12.0
+# One control step of yaw while the road centre is still short. Re-measure
+# every step and stop when the centre opens, instead of a three-step full-rate burst.
+_YAW_STEP_RAD = 0.10
+_YAW_BUDGET_RAD = 1.2
+# Road centre still open, but the subgoal has swung into a side street.
+# One small yaw tracks that bearing; a goal still down the street does not.
+_CORNER_YAW_ERR_RAD = 0.40
+
+
+def yaw_detour_sign(
+    d_fwd: Optional[float],
+    left: Optional[float],
+    right: Optional[float],
+) -> Optional[float]:
+    """+1 left / -1 right when one side is the open detour.
+
+    A street whose nose is already open flies forward. A detour exists only
+    when the nose is the short direction and one side is clearly longer.
+    ``None`` means fly forward toward the goal.
+    """
+    if d_fwd is None or left is None or right is None:
+        return None
+    d, l, r = float(d_fwd), float(left), float(right)
+    if not all(np.isfinite(v) for v in (d, l, r)):
+        return None
+    if d >= float(_YAW_DETOUR_MAX_FWD_M):
+        return None
+    if d >= l and d >= r:
+        return None
+    # A side only a couple of metres longer than the nose is the flanking
+    # building. Yawing into it walks the vehicle off the street.
+    if l >= r + _YAW_SIDE_CLEAR_M and l >= d + 4.0:
+        return 1.0
+    if r >= l + _YAW_SIDE_CLEAR_M and r >= d + 4.0:
+        return -1.0
+    return None
+
+
+def yaw_only_candidates(
+    sign: float, limits: Optional[np.ndarray] = None
+) -> List[np.ndarray]:
+    """A small yaw toward the latched open side. No strafe and no climb.
+
+    The step stays well under the body yaw limit so the next frame can see
+    whether the road centre has opened.
+    """
+    lim_dyaw = 0.3141592653589793
+    if limits is not None:
+        lim_dyaw = float(np.abs(np.asarray(limits, dtype=np.float64).reshape(4)[3]))
+    turn = float(np.sign(sign)) * min(float(_YAW_STEP_RAD), lim_dyaw)
+    return [
+        np.array([0.0, 0.0, 0.0, turn], dtype=np.float64),
+        np.array([0.15, 0.0, 0.0, turn], dtype=np.float64),
+    ]
 
 
 def escape_side(
@@ -376,6 +488,9 @@ class ImaginationPlanner:
     #: progress (no WM imagine) — ablation: "are rules enough?".
     #: ``wm_bare``: same candidates; score = WM return only (no face/escape/
     #: strafe/stuck biases) — ablation: "can WM decide alone?".
+    #: ``wm_escape``: WM return + open-side escape/stuck score only (no face /
+    #: strafe tax). Overnight R1 forensics: L≫R yet climb wins under wm_bare
+    #: because escape_score_w was stripped with the full hand pack.
     #: Use ``horizon=1`` for one-step WM scoring without adding a separate mode.
     mock_mode: Optional[str] = None
     #: Extra score weight on residual |yaw_err - dyaw| when forward is open.
@@ -397,20 +512,41 @@ class ImaginationPlanner:
     rollout_mode: str = "open_loop"
     #: Deploy actor used as imagination tail when ``rollout_mode=closed_loop``.
     tail_policy: Any = None
+    #: Approach-band escape injection: ``off`` | ``side_climb`` | ``side_only``.
+    #: Default from env ``OA_APPROACH_ESCAPE`` (else ``off``). Natural jam-band
+    #: offers always keep climb atoms; ``side_only`` only strips climb on the
+    #: *forced* open-nose approach inject.
+    approach_escape_mode: Optional[str] = None
     #: Filled by the last ``plan()`` call (eval / distill diagnostics).
     last_plan_meta: Dict[str, Any] = field(default_factory=dict)
+    #: Hold open-side escape commitment for this many steps (0=off). Stops L/R
+    #: flip-flop when WM scores chatter (R0 yaw churn forensics 2026-09-23).
+    escape_commit_steps: int = 10
+    #: Cap |Δdyaw| vs previous planned action (rad). 0 disables.
+    max_ddyaw: float = 0.12
+    _esc_commit_side: float = field(default=0.0, init=False, repr=False)
+    _esc_commit_left: int = field(default=0, init=False, repr=False)
+    _yaw_latch: float = field(default=0.0, init=False, repr=False)
+    _yaw_burst_left: int = field(default=0, init=False, repr=False)
+    _yaw_turned: float = field(default=0.0, init=False, repr=False)
+    _forward_commit_left: int = field(default=0, init=False, repr=False)
+    _prev_planned: Optional[np.ndarray] = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.mock_mode is not None and self.mock_mode not in (
             "pass",
             "rules",
             "wm_bare",
+            "wm_escape",
         ):
             raise ValueError(f"unsupported mock_mode={self.mock_mode!r}")
         if self.rollout_mode not in ("open_loop", "closed_loop"):
             raise ValueError(f"unsupported rollout_mode={self.rollout_mode!r}")
         if self.rollout_mode == "closed_loop" and self.mock_mode in ("pass", "rules"):
             raise ValueError("closed_loop requires WM scoring")
+        self.approach_escape_mode = resolve_approach_escape_mode(
+            self.approach_escape_mode
+        )
         self.horizon = int(self.horizon)
         if self.action_limits is not None:
             lim = np.abs(np.asarray(self.action_limits, dtype=np.float64).reshape(-1))
@@ -427,8 +563,15 @@ class ImaginationPlanner:
             )
 
     def reset(self) -> None:
-        """Per-episode hook (stateless; matches deploy policy interface)."""
-        return
+        """Per-episode hook — clear escape/yaw commitment state."""
+        self._esc_commit_side = 0.0
+        self._esc_commit_left = 0
+        self._yaw_latch = 0.0
+        self._yaw_burst_left = 0
+        self._yaw_turned = 0.0
+        self._forward_commit_left = 0
+        self._prev_planned = None
+        self.last_plan_meta = {}
 
     def set_goal(self, goal: Optional[np.ndarray]) -> None:
         set_goal = getattr(self.dynamics, "set_goal", None)
@@ -458,6 +601,7 @@ class ImaginationPlanner:
         body_vel = body_vel_from_obs(obs)
         d_fwd = forward_clearance_m(obs)
         closed = self.rollout_mode == "closed_loop"
+        hold_altitude = False
         if closed and self.tail_policy is None:
             raise RuntimeError("closed_loop planner requires tail_policy")
         if closed:
@@ -466,6 +610,7 @@ class ImaginationPlanner:
             # wall-fwd — actor-local atoms alone never invent climb.
             candidates = list(self.candidate_fn(np.asarray(base_action, dtype=np.float64)))
             offer_escape_cands = False
+            natural_escape = False
             w_face = 0.0
             w_strafe = 0.0
             yaw_err0 = 0.0
@@ -474,31 +619,118 @@ class ImaginationPlanner:
             if bool(getattr(self.reward_cfg, "use_learned_obstacle_cost", False)):
                 goal_rem_xy = float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
                 near_goal = goal_rem_xy < float(_ESCAPE_DISABLE_NEAR_GOAL_M)
-                offer_escape_cands = oa_offer_escape(d_fwd, near_goal=near_goal)
+                natural_escape = _oa_offer_escape_natural(d_fwd, near_goal=near_goal)
+                offer_escape_cands = oa_offer_escape(
+                    d_fwd,
+                    near_goal=near_goal,
+                    goal_rem_xy=goal_rem_xy,
+                    approach_mode=str(self.approach_escape_mode),
+                )
                 if offer_escape_cands:
+                    # Jam-band natural → full climb+side. Forced approach only
+                    # → climb iff mode is side_climb (ablation C = side_only).
+                    include_climb = bool(natural_escape) or (
+                        str(self.approach_escape_mode) == "side_climb"
+                    )
                     candidates.extend(
                         escape_clearer_cone_candidates(
-                            obs, self.action_limits, goal_rel=goal_rel
+                            obs,
+                            self.action_limits,
+                            goal_rel=goal_rel,
+                            include_climb=include_climb,
                         )
                     )
                 candidates.extend(face_goal_candidates(goal_rel, self.action_limits))
+            else:
+                goal_rem_xy = float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
             candidates = drop_backward_if_subgoal_ahead(candidates, goal_rel)
             candidates = drop_backward_motion(candidates)
             # Stash for eval / distill diagnostics.
+            _rem = float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
             self.last_plan_meta = {
                 "n_candidates": int(len(candidates)),
                 "offer_escape": bool(offer_escape_cands),
                 "d_fwd": float(d_fwd) if d_fwd is not None and np.isfinite(float(d_fwd)) else None,
-                "near_goal": bool(
-                    float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
-                    < float(_ESCAPE_DISABLE_NEAR_GOAL_M)
+                "near_goal": bool(_rem < float(_ESCAPE_DISABLE_NEAR_GOAL_M)),
+                "approach_escape_mode": str(self.approach_escape_mode),
+                "approach_force_escape": bool(
+                    (not natural_escape)
+                    and _rem < float(_ESCAPE_FORCE_APPROACH_M)
+                    and str(self.approach_escape_mode) != "off"
+                    and bool(offer_escape_cands)
                 ),
                 "rollout_mode": "closed_loop",
             }
         else:
             goal_rem_xy = float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
             near_goal = goal_rem_xy < float(_ESCAPE_DISABLE_NEAR_GOAL_M)
-            # Three zones + tight-mid escape when cones/goal allow a side peel.
+            # Three zones. A yaw detour exists only when one side is clearly
+            # longer than the nose. A 5–8 m street with no such side flies
+            # forward; it does not keep offering strafe and climb.
+            left_c, right_c = _cone_lr(obs)
+            hard = d_fwd is not None and float(d_fwd) < float(_FACE_BLOCK_FWD_M)
+            road_open = (
+                d_fwd is not None and float(d_fwd) >= float(_YAW_DETOUR_MAX_FWD_M)
+            )
+            raw = None if road_open else yaw_detour_sign(d_fwd, left_c, right_c)
+            # Yaw one small step while the road centre is short. Stop as soon
+            # as it opens. A lost side cue keeps the latched direction so the
+            # turn is not dropped in the same frame the brake holds forward speed.
+            hold_forward = False
+            if road_open:
+                self._forward_commit_left = 0
+                self._yaw_latch = 0.0
+                self._yaw_burst_left = 0
+                self._yaw_turned = 0.0
+                detour = None
+            elif int(self._forward_commit_left) > 0:
+                self._forward_commit_left -= 1
+                detour = None
+                self._yaw_latch = 0.0
+                self._yaw_burst_left = 0
+                self._yaw_turned = 0.0
+                hold_forward = True
+            else:
+                sign = raw
+                if (
+                    sign is None
+                    and abs(float(self._yaw_latch)) > 1e-6
+                    and float(self._yaw_turned) < float(_YAW_BUDGET_RAD)
+                ):
+                    sign = float(self._yaw_latch)
+                if sign is None and hard:
+                    side = escape_side(obs, goal_rel=goal_rel)
+                    g = np.asarray(goal_rel, dtype=np.float64).reshape(-1)
+                    if side is None or abs(float(side)) < 1e-6:
+                        sign = (
+                            float(np.sign(g[1]))
+                            if g.size >= 2 and abs(float(g[1])) > 0.1
+                            else 1.0
+                        )
+                    else:
+                        sign = float(np.sign(side))
+                if sign is None:
+                    detour = None
+                    self._yaw_latch = 0.0
+                    self._yaw_burst_left = 0
+                    self._yaw_turned = 0.0
+                elif float(self._yaw_turned) + float(_YAW_STEP_RAD) >= float(_YAW_BUDGET_RAD) - 1e-6:
+                    self._forward_commit_left = int(_FORWARD_AFTER_YAW_STEPS)
+                    self._yaw_latch = 0.0
+                    self._yaw_burst_left = 0
+                    self._yaw_turned = 0.0
+                    detour = None
+                    hold_forward = True
+                else:
+                    if (
+                        abs(float(self._yaw_latch)) < 1e-6
+                        or float(np.sign(self._yaw_latch)) != float(np.sign(sign))
+                    ):
+                        self._yaw_latch = float(np.sign(sign))
+                        self._yaw_turned = 0.0
+                    detour = float(self._yaw_latch)
+                    self._yaw_turned = float(self._yaw_turned) + float(_YAW_STEP_RAD)
+            yaw_only = detour is not None and not hold_forward
             drop_open_strafe = False
             drop_block_pure_strafe = False
             offer_escape_cands = False
@@ -513,26 +745,58 @@ class ImaginationPlanner:
                 w_face = float(self.face_yaw_score_w)
                 offer_face_cands = True
                 drop_open_strafe = True
+                if yaw_only:
+                    offer_escape_cands = True
+                    drop_open_strafe = False
             elif float(d_fwd) >= float(_FACE_BLOCK_FWD_M):
                 w_face = float(self.face_yaw_score_w_mid)
                 w_strafe = float(self.strafe_score_w_mid)
                 offer_face_cands = True
-                # Tight mid: always offer escape (incl. near goal). Mid-open
-                # (5–8 m): peel only when not in last metres.
-                if float(d_fwd) < float(_ESCAPE_TIGHT_MID_M):
+                # Yaw only when one side is clearly open. Unknown sides in the
+                # tight band keep the old escape fallback. A measured street
+                # does not.
+                if yaw_only:
                     offer_escape_cands = True
-                elif float(d_fwd) < float(_FACE_OPEN_FWD_M) and not near_goal:
+                elif (
+                    float(d_fwd) < float(_ESCAPE_TIGHT_MID_M)
+                    and (left_c is None or right_c is None)
+                ):
                     offer_escape_cands = True
             else:
-                # Hard proximity: no face-into-wall; ban pure crab; escape via cone.
+                # Hard proximity: a short yaw, then stop spinning.
                 w_face = 0.0
                 offer_face_cands = False
-                drop_block_pure_strafe = True
+                if hold_forward:
+                    offer_escape_cands = False
+                    yaw_only = False
+                    drop_block_pure_strafe = False
+                else:
+                    drop_block_pure_strafe = True
+                    offer_escape_cands = True
+                    yaw_only = True
+
+            natural_escape = bool(offer_escape_cands)
+            # Approach-band force (same modes as closed_loop).
+            if (
+                str(self.approach_escape_mode) != "off"
+                and goal_rem_xy < float(_ESCAPE_FORCE_APPROACH_M)
+            ):
                 offer_escape_cands = True
 
             yaw_err0 = 0.0
             if float(np.hypot(goal_rel[0], goal_rel[1])) > 1e-6:
                 yaw_err0 = float(np.arctan2(float(goal_rel[1]), float(goal_rel[0])))
+            # Road centre, carrot still down the street: a longer side is the
+            # flanking building. Stay on the centreline.
+            if (
+                bool(obs.info.get("hold_street"))
+                and abs(float(yaw_err0)) <= 0.35
+                and d_fwd is not None
+                and float(d_fwd) >= float(_FACE_BLOCK_FWD_M)
+            ):
+                yaw_only = False
+                offer_escape_cands = False
+                detour = None
             # Extreme off-axis + measured tight nose: don't face into the obstacle.
             # Skip when d_fwd is unknown (soft face still wanted there).
             if (
@@ -548,10 +812,18 @@ class ImaginationPlanner:
             candidates = list(self.candidate_fn(np.asarray(base_action, dtype=np.float64)))
             if offer_face_cands:
                 candidates.extend(face_goal_candidates(goal_rel, self.action_limits))
-            if offer_escape_cands:
+            if offer_escape_cands and yaw_only:
+                candidates = yaw_only_candidates(float(detour), self.action_limits)
+            elif offer_escape_cands:
+                include_climb = bool(natural_escape) or (
+                    str(self.approach_escape_mode) == "side_climb"
+                )
                 candidates.extend(
                     escape_clearer_cone_candidates(
-                        obs, self.action_limits, goal_rel=goal_rel
+                        obs,
+                        self.action_limits,
+                        goal_rel=goal_rel,
+                        include_climb=include_climb,
                     )
                 )
             candidates = drop_backward_if_subgoal_ahead(candidates, goal_rel)
@@ -570,11 +842,84 @@ class ImaginationPlanner:
                         for c in candidates
                     )
                     if not has_peel:
-                        candidates.extend(
-                            escape_clearer_cone_candidates(
-                                obs, self.action_limits, goal_rel=goal_rel
-                            )
+                        include_climb = bool(natural_escape) or (
+                            str(self.approach_escape_mode) == "side_climb"
                         )
+                        if yaw_only:
+                            candidates = yaw_only_candidates(
+                                float(detour), self.action_limits
+                            )
+                        else:
+                            candidates.extend(
+                                escape_clearer_cone_candidates(
+                                    obs,
+                                    self.action_limits,
+                                    goal_rel=goal_rel,
+                                    include_climb=include_climb,
+                                )
+                            )
+            elif (
+                not yaw_only
+                and d_fwd is not None
+                and float(d_fwd) >= float(_FACE_BLOCK_FWD_M)
+                and left_c is not None
+                and right_c is not None
+            ):
+                # Nose is not a one-sided wall: go forward. Drop climb and strafe.
+                # A side-street subgoal still gets one small yaw, so the corner
+                # is taken while the road centre stays open.
+                turn_to_goal = 0.0
+                err_abs = abs(float(yaw_err0))
+                # A wide bearing with a still-long nose is an early carrot, not the
+                # intersection. Stay on the street. A moderate bearing gets one step.
+                if road_open and float(_CORNER_YAW_ERR_RAD) < err_abs <= 0.60:
+                    turn_to_goal = float(
+                        np.clip(
+                            float(yaw_err0),
+                            -float(_YAW_STEP_RAD),
+                            float(_YAW_STEP_RAD),
+                        )
+                    )
+                ahead = [
+                    c
+                    for c in candidates
+                    if float(np.asarray(c, dtype=np.float64).reshape(4)[0]) > 0.2
+                    and abs(float(np.asarray(c, dtype=np.float64).reshape(4)[1])) < 0.15
+                    and abs(float(np.asarray(c, dtype=np.float64).reshape(4)[3]) - turn_to_goal)
+                    < 0.05
+                    and float(np.asarray(c, dtype=np.float64).reshape(4)[2]) >= -1e-6
+                    and float(np.asarray(c, dtype=np.float64).reshape(4)[2]) < 0.05
+                ]
+                hold_altitude = True
+                if ahead:
+                    candidates = ahead
+                else:
+                    candidates = [
+                        np.array([0.7, 0.0, 0.0, turn_to_goal], dtype=np.float64)
+                    ]
+            elif hold_forward and hard:
+                # Yaw burst is over. Do not climb out of the street.
+                candidates = [np.array([0.35, 0.0, 0.0, 0.0], dtype=np.float64)]
+            # Keep the nose on the carrot. A wide bearing slows down in the
+            # intersection. A moderate bearing still yaws toward the carrot, so a
+            # side detour cannot reverse the turn once the exit is in front.
+            if (
+                d_fwd is not None
+                and float(d_fwd) >= float(_FACE_BLOCK_FWD_M)
+                and abs(float(yaw_err0)) > 0.35
+            ):
+                err_abs = abs(float(yaw_err0))
+                if err_abs > 0.60:
+                    step = min(0.22, err_abs)
+                    fwd_cmd = 0.15
+                else:
+                    step = float(_YAW_STEP_RAD)
+                    fwd_cmd = 0.45
+                turn_to_goal = float(np.clip(float(yaw_err0), -step, step))
+                candidates = [
+                    np.array([fwd_cmd, 0.0, 0.0, turn_to_goal], dtype=np.float64)
+                ]
+                hold_altitude = True
         if not candidates:
             return np.asarray(base_action, dtype=np.float64).reshape(4)
         if self.action_limits is not None:
@@ -588,25 +933,61 @@ class ImaginationPlanner:
         bv0 = np.asarray(body_vel, dtype=np.float32).reshape(1, -1)
         yaw_off = abs(yaw_err0) > float(_YAW_OFF_AXIS_THR_RAD)
         esc = escape_side(obs, goal_rel=goal_rel) if offer_escape_cands else None
-        hard_block = d_fwd is not None and float(d_fwd) < float(_FACE_BLOCK_FWD_M)
+        # Mid-band stick (forensics 2026-09-23): offer_escape+oc↑ on but still pick
+        # pure-forward → d_fwd→0.7. Soft bias used to be hard_block-only; extend to
+        # tight mid and hard-prefer leave-wall atoms after scoring.
+        tight_escape = d_fwd is not None and float(d_fwd) < float(_ESCAPE_TIGHT_MID_M)
         use_wm = self.mock_mode != "rules"
-        apply_hand = (not closed) and self.mock_mode != "wm_bare"
+        # Full hand pack (face+strafe+escape) vs escape-only vs bare WM.
+        apply_hand = (not closed) and self.mock_mode not in ("wm_bare", "wm_escape")
+        apply_escape_bias = (not closed) and (
+            apply_hand or self.mock_mode == "wm_escape"
+        )
+        # wm_escape overnight 0555: tight-mid bias over-peeled R0 into the
+        # open-side wall at rem≈14. Escape-only mock: hard-block ALWAYS; also
+        # tight-mid when a side is already crushing (<2.5 m) with L/R asymmetry
+        # (R1 pocket). Mid-open peel without a near wall stays off.
+        escape_zone = tight_escape
+        if self.mock_mode == "wm_escape":
+            hard_block = d_fwd is not None and float(d_fwd) < float(_FACE_BLOCK_FWD_M)
+            left_c, right_c = _cone_lr(obs)
+            side_crush = False
+            if left_c is not None and right_c is not None:
+                side_crush = min(float(left_c), float(right_c)) < 2.5 and abs(
+                    float(left_c) - float(right_c)
+                ) >= float(_ESCAPE_CONE_MARGIN_M)
+            escape_zone = bool(hard_block or (tight_escape and side_crush))
+        esc_w = float(self.escape_score_w)
+        cand_scores: List[float] = []
         for ci, cand in enumerate(candidates):
             if use_wm:
                 if closed:
                     policy = FirstActionThenActor(cand, self.tail_policy)
                 else:
                     policy = ConstantLatentPolicy(cand)
-                roll = imagine(
-                    self.dynamics,
-                    policy,
-                    z0[None, :],
-                    self.horizon,
+                imagine_kw = dict(
                     reward_cfg=self.reward_cfg,
                     goal_rel0=gr0,
                     body_vel0=bv0,
                     propagate_goal_rel=True,
                     action_limits=self.action_limits,
+                )
+                from experiments.aerial.rl.imagination import imagine as _imagine_impl
+
+                if "profile0" in inspect.signature(_imagine_impl).parameters:
+                    info = getattr(obs, "info", None)
+                    profile0 = None
+                    if isinstance(info, dict) and info.get("depth_profile_pred") is not None:
+                        profile0 = np.asarray(
+                            info["depth_profile_pred"], dtype=np.float64
+                        ).reshape(1, -1)
+                    imagine_kw["profile0"] = profile0
+                roll = imagine(
+                    self.dynamics,
+                    policy,
+                    z0[None, :],
+                    self.horizon,
+                    **imagine_kw,
                 )
                 score = float(roll.returns[0])
             else:
@@ -623,34 +1004,147 @@ class ImaginationPlanner:
                     score -= w_face * resid
                 if w_strafe > 0.0 and yaw_off:
                     score -= w_strafe * abs(float(cand[1]))
-                # Soft escape bias only when hard-blocked (not tight-mid), avoid
-                # v10 mid-band over-peel that stalled R4 / spun R1 into collision.
+            if apply_escape_bias:
+                # Escape bias in hard-block AND tight-mid (was hard-only → mid stick).
+                # wm_escape: hard-block only (see escape_zone).
                 if (
-                    hard_block
+                    escape_zone
                     and offer_escape_cands
                     and esc is not None
                     and float(esc) != 0.0
                 ):
                     s = float(esc)
-                    score += float(self.escape_score_w) * (
+                    score += float(esc_w) * (
                         s * float(cand[1]) + s * float(cand[3])
                     )
-                if hard_block:
+                if escape_zone:
                     # Don't freeze or dive straight into the wall when jammed.
                     if abs(float(cand[1])) < 0.05 and abs(float(cand[3])) < 0.05:
                         score -= float(self.escape_stuck_tax)
                     elif float(cand[0]) > 0.4 and abs(float(cand[3])) < 0.05:
                         score -= 0.75 * float(self.escape_stuck_tax)
+                # v2 R1 plateau ~26 m: climb%≈0.54 with mid-open nose. Tax climb
+                # only for wm_escape in the final approach band when not jammed.
+                if (
+                    self.mock_mode == "wm_escape"
+                    and float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
+                    < 30.0
+                    and d_fwd is not None
+                    and float(d_fwd) >= float(_FACE_BLOCK_FWD_M)
+                    and float(cand[2]) > 0.15
+                ):
+                    score -= 0.5
+            cand_scores.append(float(score))
             if score > best_score:
                 best_score = score
                 best_a = cand
                 best_idx = int(ci)
+        # Escape-side commitment: while holding, re-pick among candidates that
+        # peel toward the committed side (dy or dyaw sign matches esc).
+        commit_n = int(self.escape_commit_steps)
+        if (
+            commit_n > 0
+            and offer_escape_cands
+            and cand_scores
+            and self._esc_commit_left > 0
+            and abs(float(self._esc_commit_side)) > 0.0
+        ):
+            side = float(self._esc_commit_side)
+
+            def _peels(c: np.ndarray) -> bool:
+                a = np.asarray(c, dtype=np.float64).reshape(4)
+                return (side * float(a[1]) > 0.02) or (side * float(a[3]) > 0.02)
+
+            matching = [i for i, c in enumerate(candidates) if _peels(c)]
+            if matching:
+                new_idx = max(matching, key=lambda i: cand_scores[i])
+                best_idx = int(new_idx)
+                best_a = candidates[best_idx]
+                best_score = float(cand_scores[best_idx])
+            self._esc_commit_left = max(0, int(self._esc_commit_left) - 1)
+        elif (
+            commit_n > 0
+            and offer_escape_cands
+            and esc is not None
+            and abs(float(esc)) > 0.0
+        ):
+            a = np.asarray(best_a, dtype=np.float64).reshape(4)
+            if (float(esc) * float(a[1]) > 0.02) or (float(esc) * float(a[3]) > 0.02):
+                self._esc_commit_side = float(esc)
+                self._esc_commit_left = int(commit_n)
+        force_peel_exec = False
+        # Overnight force-restrict/inject hurt more than they helped vs wm_bare
+        # (2026-09-23: wm_bare P0=1/2 with R0 arrive; forcepeel stayed 2/2).
+        # Gate the whole block behind OA_FORCE_PEEL_RESTRICT (default off).
+        _force_restrict = str(
+            os.environ.get("OA_FORCE_PEEL_RESTRICT", "0")
+        ).lower() in ("1", "true", "yes", "on")
+        if (
+            _force_restrict
+            and offer_escape_cands
+            and tight_escape
+            and cand_scores
+            and self.mock_mode not in ("wm_bare", "wm_escape")
+        ):
+
+            def _leave_wall(c: np.ndarray) -> bool:
+                a = np.asarray(c, dtype=np.float64).reshape(4)
+                return (
+                    abs(float(a[1])) > 0.05
+                    or abs(float(a[3])) > 0.05
+                    or float(a[2]) > 0.15
+                )
+
+            peel_idxs = [i for i, c in enumerate(candidates) if _leave_wall(c)]
+            if peel_idxs:
+                # Restrict to leave-wall set whenever nose is tight (not only when
+                # the WM winner is pure-forward). Soft force_peel left R0/R1 at
+                # d_fwd≈0.7 with climb% still low (2026-09-23 overnight).
+                new_idx = max(peel_idxs, key=lambda i: cand_scores[i])
+                if int(new_idx) != int(best_idx) or not _leave_wall(best_a):
+                    force_peel_exec = True
+                best_idx = int(new_idx)
+                best_a = candidates[best_idx]
+                best_score = float(cand_scores[best_idx])
+
+            def _esc_strength(c: np.ndarray) -> float:
+                a = np.asarray(c, dtype=np.float64).reshape(4)
+                return abs(float(a[1])) + abs(float(a[3])) + 1.5 * max(0.0, float(a[2]))
+
+            # v3 inject is opt-in: overnight showed higher climb/force_peel but
+            # still final d_fwd≈0.8 (P0 fail). Default off to avoid regressing
+            # open corridors; set OA_FORCE_PEEL_INJECT=1 to re-enable.
+            if (
+                _esc_strength(best_a) < 0.35
+                and str(os.environ.get("OA_FORCE_PEEL_INJECT", "0")).lower()
+                in ("1", "true", "yes", "on")
+            ):
+                inj_pool = escape_clearer_cone_candidates(
+                    obs,
+                    self.action_limits,
+                    goal_rel=goal_rel,
+                    include_climb=True,
+                )
+                if inj_pool:
+                    best_a = max(inj_pool, key=_esc_strength)
+                    best_idx = -1
+                    force_peel_exec = True
         out = np.asarray(best_a, dtype=np.float64).reshape(4)
+        # Yaw low-pass vs previous plan — cuts high-frequency heading flips.
+        max_dd = float(self.max_ddyaw)
+        if max_dd > 0.0 and self._prev_planned is not None:
+            prev = np.asarray(self._prev_planned, dtype=np.float64).reshape(4)
+            dd = float(np.clip(float(out[3]) - float(prev[3]), -max_dd, max_dd))
+            out[3] = float(prev[3] + dd)
+        if hold_altitude:
+            out[2] = max(0.0, float(out[2]))
         if bool(getattr(self.reward_cfg, "forbid_backward_motion", False)):
             from experiments.aerial.rl.env.action import forbid_backward_dx
 
             out = forbid_backward_dx(out)
+        self._prev_planned = np.asarray(out, dtype=np.float64).reshape(4).copy()
         meta = dict(getattr(self, "last_plan_meta", {}) or {})
+        _rem_xy = float(np.hypot(float(goal_rel[0]), float(goal_rel[1])))
         meta.update(
             {
                 "chosen_idx": int(best_idx),
@@ -662,6 +1156,17 @@ class ImaginationPlanner:
                     float(d_fwd)
                     if d_fwd is not None and np.isfinite(float(d_fwd))
                     else None
+                ),
+                "near_goal": bool(_rem_xy < float(_ESCAPE_DISABLE_NEAR_GOAL_M)),
+                "approach_escape_mode": str(self.approach_escape_mode),
+                "force_peel_exec": bool(force_peel_exec),
+                "escape_commit_left": int(self._esc_commit_left),
+                "escape_commit_side": float(self._esc_commit_side),
+                "approach_force_escape": bool(
+                    (not natural_escape)
+                    and _rem_xy < float(_ESCAPE_FORCE_APPROACH_M)
+                    and str(self.approach_escape_mode) != "off"
+                    and bool(offer_escape_cands)
                 ),
             }
         )

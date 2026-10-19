@@ -6,6 +6,9 @@ The real ``_DepthHead`` is loaded lazily inside ``from_checkpoint``.
 """
 from __future__ import annotations
 
+import json
+import math
+import os
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, Optional
@@ -14,6 +17,38 @@ import numpy as np
 
 from experiments.aerial.rl.depth_geometry import CONE_KEYS, azimuth_clearances, cone_clearances
 from experiments.aerial.rl.env.obs import Observation
+
+
+def read_forward_scale(path: Path | str, payload: Optional[Dict[str, Any]] = None) -> float:
+    """Positive multiplier for a loaded depth map. Missing sidecar means 1."""
+    return read_forward_calibration(path, payload)["scale"]
+
+
+def read_forward_calibration(
+    path: Path | str, payload: Optional[Dict[str, Any]] = None
+) -> Dict[str, float]:
+    """``depth -> scale * depth ** exponent``. Missing sidecar is the identity."""
+    spec = {"scale": 1.0, "exponent": 1.0}
+    raw: Optional[Dict[str, Any]] = None
+    if isinstance(payload, dict) and (
+        payload.get("forward_scale") is not None or payload.get("forward_exponent") is not None
+    ):
+        raw = payload
+    else:
+        sidecar = Path(str(path) + ".forward_scale.json")
+        if sidecar.is_file():
+            raw = json.loads(sidecar.read_text())
+    if raw is None:
+        return spec
+    if raw.get("scale") is not None or raw.get("forward_scale") is not None:
+        spec["scale"] = float(raw.get("scale", raw.get("forward_scale")))
+    if raw.get("exponent") is not None or raw.get("forward_exponent") is not None:
+        spec["exponent"] = float(raw.get("exponent", raw.get("forward_exponent")))
+    if not math.isfinite(spec["scale"]) or spec["scale"] <= 0.0:
+        raise ValueError(f"forward scale must be finite and positive, got {spec['scale']}")
+    if not math.isfinite(spec["exponent"]) or spec["exponent"] <= 0.0:
+        raise ValueError(f"forward exponent must be finite and positive, got {spec['exponent']}")
+    return spec
 
 
 class DepthMinPredictor:
@@ -32,6 +67,9 @@ class DepthMinPredictor:
         self.device = device
         self._hist: Deque[np.ndarray] = deque(maxlen=self.n_frames)
         self._model: Any = None
+        self.last_depth: Optional[np.ndarray] = None
+        self.forward_scale = 1.0
+        self.forward_exponent = 1.0
 
     @classmethod
     def from_checkpoint(
@@ -54,14 +92,19 @@ class DepthMinPredictor:
         model.eval()
         pred = cls(n_frames=n_frames, device=device)
         pred._model = model
+        calib = read_forward_calibration(path, payload)
+        pred.forward_scale = calib["scale"]
+        pred.forward_exponent = calib["exponent"]
         return pred
 
     def reset(self) -> None:
         self._hist.clear()
+        self.last_depth = None
 
     def _run_depth_head(self, obs: Observation) -> Optional[np.ndarray]:
         """Push ``obs.rgb`` into history; return 2-D D̂ or None if unloaded/empty."""
         if self._model is None:
+            self.last_depth = None
             return None
         import torch
 
@@ -78,9 +121,17 @@ class DepthMinPredictor:
             frames.insert(0, frames[0])
         stack = np.stack(frames[-self.n_frames :], axis=0)  # [L,H,W,3]
         tensor = torch.from_numpy(stack).unsqueeze(0)  # [1,L,H,W,3]
-        with torch.no_grad():
+        # Opt-in so sim evals keep fp32 numerics; Orin sets AERIAL_DA3_FP16=1.
+        fp16 = str(self.device).startswith("cuda") and os.environ.get("AERIAL_DA3_FP16") == "1"
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=fp16):
             depth, _ = self._model.predict_from_window(tensor.to(self.device))
-        return depth.squeeze(0).detach().float().cpu().numpy()
+        out = depth.squeeze(0).detach().float().cpu().numpy()
+        scale = float(self.forward_scale)
+        exponent = float(self.forward_exponent)
+        if scale != 1.0 or exponent != 1.0:
+            out = scale * np.power(np.clip(out, 0.0, None), exponent)
+        self.last_depth = out
+        return out
 
     def _min_from_depth(self, d: np.ndarray) -> Optional[float]:
         finite = d[np.isfinite(d) & (d > 0)]

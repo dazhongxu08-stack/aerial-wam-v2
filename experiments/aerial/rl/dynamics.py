@@ -47,6 +47,15 @@ class DynamicsOutput:
     #: (depth-aux WM). Legacy imagination path; main OA reward prefers
     #: ``obstacle_cost`` when the directional head is trained.
     d_fwd_hat: Optional[float] = None
+    #: Lateral clearances from the same decoded depth map (metres). ``None``
+    #: when the depth decoder did not run. Imagination uses these so a blocked
+    #: nose with an open side is visible inside the learned return.
+    d_left_hat: Optional[float] = None
+    d_right_hat: Optional[float] = None
+    #: Forward cone minimum from the same depth map. ``d_fwd_hat`` stays the
+    #: centre-patch median. The turn reward must use this minimum so imagination
+    #: and the real cones agree on "building ahead".
+    d_fwd_cone_hat: Optional[float] = None
     #: Action-conditioned obstacle cost from ``feature=[h‖z]`` + action.
     #: ``None`` when the head is absent / not yet trained (do not invent risk).
     obstacle_cost: Optional[float] = None
