@@ -1,0 +1,13 @@
+# 84 — progress soft + collision hard (orthogonal to 125 p2/c6)
+reward:
+  w_progress: 1.0
+  w_away: 1.0
+  success_bonus: 20.0
+  w_collision: 10.0
+  w_backward: 5.0
+  w_descent: 1.5
+  w_press_wall: 0.0
+  w_clearance_center: 0.0
+  w_curiosity: 0.0
+  forbid_backward_motion: true
+  gate_progress_by_heading: true

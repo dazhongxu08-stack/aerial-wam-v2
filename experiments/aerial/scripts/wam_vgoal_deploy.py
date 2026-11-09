@@ -469,6 +469,7 @@ def main() -> int:
             TelloEnvConfig(
                 tello_ip=str(args.tello_ip),
                 local_ip=str(args.tello_local_ip or ""),
+                local_cmd_port=9000,
                 step_hz=float(args.step_hz),
                 camera_device=str(args.camera),
                 capture_w=int(args.capture_w),
@@ -479,6 +480,9 @@ def main() -> int:
                 control_on_reset=bool(args.offboard),
                 mock_camera=bool(args.mock_camera),
                 max_v_mps=float(min(1.0, max(0.2, float(args.cruise_speed)))),
+                max_frame_age_s=1.5,
+                max_state_age_s=1.5,
+                forbid_backward_rc=True,
             )
         )
     else:
@@ -765,6 +769,11 @@ def main() -> int:
             obs, step_info = env.step(action)
             p_curr = np.asarray(obs.position, dtype=np.float64)
             curr_yaw = float(obs.yaw)
+
+            fs = getattr(env, "failsafe_reason", None) or step_info.get("failsafe")
+            if fs:
+                logger.error("Aborting control loop after failsafe: %s", fs)
+                break
 
             if recorder is not None and record_gate is not None and record_gate.active:
                 obs.info["corpus"] = _corpus_meta(args, annot_goal)

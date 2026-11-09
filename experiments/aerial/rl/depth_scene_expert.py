@@ -29,6 +29,7 @@ class DepthSceneExpertPolicy:
         cruise_speed: float = 10.0,
         step_m: float = 1.0,
         max_dyaw: float = 0.314,
+        max_ddyaw: float = 0.12,
         d_clear: float = 40.0,
         d_danger: float = 3.0,
         descent_radius_m: float = 0.0,
@@ -36,10 +37,15 @@ class DepthSceneExpertPolicy:
         w_jump: float = 0.05,
         stuck_escape_after_s: float = 12.0,
         stuck_escape_hold_s: float = 5.0,
+        yaw_first_bearing_rad: float = 0.5,
+        yaw_first_trans_scale: float = 0.35,
     ) -> None:
         self._goal_getter = goal_getter
         self.step_m = float(step_m)
         self.max_dyaw = float(max_dyaw)
+        self.max_ddyaw = float(max_ddyaw)
+        self.yaw_first_bearing_rad = float(yaw_first_bearing_rad)
+        self.yaw_first_trans_scale = float(yaw_first_trans_scale)
         self.intent = SceneIntentPlanner(
             r_m=float(r_m),
             cruise_speed=float(cruise_speed),
@@ -52,10 +58,12 @@ class DepthSceneExpertPolicy:
             stuck_escape_hold_s=float(stuck_escape_hold_s),
         )
         self.last_info: Dict[str, Any] = {}
+        self._prev_dyaw: Optional[float] = None
 
     def reset(self) -> None:
         self.intent.reset()
         self.last_info = {}
+        self._prev_dyaw = None
 
     def act(self, obs: Any) -> np.ndarray:
         goal = self._goal_getter()
@@ -91,6 +99,8 @@ class DepthSceneExpertPolicy:
             info["goal_rel"] = np.asarray(g_rel, dtype=np.float32).reshape(4).tolist()
             info["expert_chosen_idx"] = int(s_info.get("chosen_idx", 0))
             info["expert_offaxis"] = bool(int(s_info.get("chosen_idx", 0)) != 0)
+            info["expert_in_peel"] = bool(s_info.get("in_peel"))
+            info["expert_in_escape"] = bool(s_info.get("in_escape"))
 
         d_world = target - pos
         c, s = np.cos(yaw), np.sin(yaw)
@@ -104,5 +114,22 @@ class DepthSceneExpertPolicy:
 
         # Face the subgoal (human-like); PathExpert / Heuristic often left dyaw=0.
         bearing = float(np.arctan2(dy, dx)) if n > 1e-4 else 0.0
-        dyaw = float(np.clip(bearing, -self.max_dyaw, self.max_dyaw))
+        # Yaw-first when far off heading: cut translation so we don't crab-strafe.
+        # During peel/escape allow faster yaw (max_ddyaw was starving 90° turns
+        # and the vehicle crashed into the facade ~50 steps in on R1).
+        in_evade = bool(s_info.get("in_peel") or s_info.get("in_escape"))
+        dyaw_lim = float(self.max_dyaw) * (1.35 if in_evade else 1.0)
+        ddyaw_lim = float(self.max_ddyaw)
+        if in_evade and ddyaw_lim > 0.0:
+            ddyaw_lim = max(ddyaw_lim, 0.25)
+        if abs(bearing) > float(self.yaw_first_bearing_rad):
+            scale = float(self.yaw_first_trans_scale)
+            if in_evade:
+                scale = max(scale, 0.55)  # keep some lateral while turning
+            vec = vec * scale
+        dyaw = float(np.clip(bearing, -dyaw_lim, dyaw_lim))
+        if self._prev_dyaw is not None and float(ddyaw_lim) > 0.0:
+            dd = float(np.clip(dyaw - self._prev_dyaw, -ddyaw_lim, ddyaw_lim))
+            dyaw = float(self._prev_dyaw + dd)
+        self._prev_dyaw = float(dyaw)
         return np.array([vec[0], vec[1], vec[2], dyaw], dtype=np.float64)

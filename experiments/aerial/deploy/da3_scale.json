@@ -1,0 +1,7 @@
+{
+  "scale": null,
+  "guard_rows": [18, 27],
+  "guard_top": 0.22,
+  "guard_bot": 0.47,
+  "ratio_real_over_model": {"front": 0.259, "left": 0.429, "right": 0.206}
+}

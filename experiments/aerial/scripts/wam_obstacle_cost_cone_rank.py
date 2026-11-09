@@ -143,14 +143,14 @@ def main() -> int:
             left_c = float(cones["left"])
             right_c = float(cones["right"])
             fwd_c = float(cones["forward"])
-            # Classify slice by GT cones
-            slice_name = "fwd_empty"
-            if fwd_c <= 4.0 and min(left_c, right_c) >= fwd_c + margin:
-                slice_name = "fwd_near"
-            elif left_c + margin < fwd_c and left_c < right_c:
+            # Lateral stick first; then wall-ahead (do not require both laterals open).
+            slice_name = "other"
+            if left_c + margin < fwd_c and left_c < right_c:
                 slice_name = "left_near"
             elif right_c + margin < fwd_c and right_c < left_c:
                 slice_name = "right_near"
+            elif fwd_c <= 4.0:
+                slice_name = "fwd_near"
             elif fwd_c > 8.0:
                 slice_name = "fwd_empty"
 

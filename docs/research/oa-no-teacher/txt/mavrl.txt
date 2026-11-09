@@ -1,0 +1,844 @@
+MA VRL: Learn to Fly in Cluttered Environments with Varying Speed
+Hang Yu1, Christophe De Wagter 1 and Guido C. H. E de Croon 1
+Abstract— Many existing obstacle avoidance algorithms over-
+look the crucial balance between safety and agility, especially
+in environments of varying complexity. In our study, we intro-
+duce an obstacle avoidance pipeline based on reinforcement
+learning. This pipeline enables drones to adapt their flying
+speed according to the environmental complexity. Moreover,
+to improve the obstacle avoidance performance in cluttered
+environments, we propose a novel latent space. The latent
+space in this representation is explicitly trained to retain
+memory of previous depth map observations. Our findings
+confirm that varying speed leads to a superior balance of
+success rate and agility in cluttered environments. Additionally,
+our memory-augmented latent representation outperforms the
+latent representation commonly used in reinforcement learning.
+Finally, after minimal fine-tuning, we successfully deployed our
+network on a real drone for enhanced obstacle avoidance.
+Index Terms — Obstacle avoidance, Reinforcement learning,
+Varying speed, Latent space
+I. INTRODUCTION
+Obstacle avoidance is a fundamental challenge in au-
+tonomous drone technology. While the past decades have
+seen a proliferation of obstacle avoidance algorithms [1], [2],
+[3], [4], [5], particularly those based on learning methods,
+their application within reinforcement learning (RL) frame-
+works [6], [7] presents unique challenges. These methods,
+favored for their lower computational costs, continue to
+grapple with issues of performance and generalization.
+In the realm of autonomous drone RL, the decision to
+use end-to-end learning from raw data [2], [8] or opt for
+a more efficient fixed latent space learning approach sig-
+nificantly impacts training efficacy and policy performance
+[9], [10]. End-to-end RL provides a comprehensive learning
+method, yet it requires substantial computational resources
+and extensive datasets. On the other hand, compressing high-
+dimensional image data into low-dimensional latent helps
+improve learning efficiency. Furthermore, most studies allow
+robots to have relatively fixed speeds which simplifies the
+training process but may not perform optimally in complex
+environments. In contrast, variable speed offers greater adapt-
+ability but increases the complexity of training. Additionally,
+a critical challenge in drone technology is bridging the
+’reality gap’—the translation of simulated success into real-
+world effectiveness. This underscores the necessity of real-
+world testing, as demonstrated in our study, to validate
+simulated findings.
+In our study, we introduce a novel obstacle avoidance
+pipeline named Memory-Augmented Varying-speed Rein-
+All authors are with Faculty of Aerospace Engineering, Delft
+University of Technology, 2629 HS Delft, The Netherlands. (email:
+h.y.yu@tudelft.nl; g.c.h.e.deCroon@tudelft.nl;
+c.dewagter@tudelft.nl).
+Model Predictive 
+Control 
+Depth
+State & Target
+AvoidBench
+Neural 
+Network
+(a)
+Fixed Speed 
+Crashed!
+Varying Speed w/o Memory
+Stuck!
+Varying Speed + Augmented Memory
+Finished!
+Velocity (m/s)
+(b)
+Fig. 1: (a) is the basic framework of MA VRL. (b) illustrates
+drone’s trajectories in a Cluttered Environment. Fixed-speed
+flight often results in collisions with large obstacles. Absence
+of augmented memory leads to frequent entrapment in such
+obstacles. In contrast, MA VRL-equipped flights demonstrate
+safe and efficient navigation through complex terrains.
+forcement Learning (MA VRL). As shown in Figure 1(a),
+MA VRL utilizes depth maps, along with the drone’s cur-
+rent and target states as inputs, and generates acceleration
+commands as outputs. Following the acceleration generation,
+model predictive control (MPC) from Agilicious [11] is
+employed to derive body rate and thrust commands for the
+drone. We train the pipeline in a simulated environment, fea-
+turing randomly generated obstacles of various complexities.
+Additionally, our approach introduces a novel latent space
+design that explicitly integrates memory. This latent space
+induces the drone to remember obstacles it has seen within
+a certain period of time, even if they are already outside of
+arXiv:2402.08381v1  [cs.RO]  13 Feb 2024
+the field of view. As shown in Figure 1(b), our memory-
+augmented latent representation and varying speed policy
+enable the drone to fly in a safe and efficient way instead
+of getting stuck in front of large obstacles or colliding with
+them.
+Our main contributions are as follows:
+• MA VRL is developed to enable adaptive-speed flight
+in cluttered environments, showing superior obstacle
+avoidance performance compared to existing state-of-
+the-art methods that employ constant speeds.
+• A new latent space which retains past depth map ob-
+servations is designed to improves the drone’s ability to
+navigate around obstacles that are not currently visible
+but have been encountered previously.
+• The network is effectively deployed on a real drone with
+minimal fine-tuning post-simulation training, demon-
+strating the practicality of our solution.
+II. RELATED WORK
+A. Learning-based Obstacle Avoidance
+In recent years, learning-based methods for obstacle avoid-
+ance have gained significant traction, as evidenced by various
+studies [1], [2], [3]. These methods generally fall into three
+categories: supervised learning, reinforcement learning (RL)
+and self-supervised learning. In the realm of supervised
+learning, Antonio et al. [1] introduced Agile-Autonomy,
+employing the Metropolis-Hastings (M-H) sampling method
+to calculate a distribution of collision-free trajectories, with
+a neural network subsequently learning the policy. Another
+approach [3] also relies on learning policies from motion
+primitives, using a network to predict collision probabilities
+of the sampled trajectories.
+Reinforcement learning studies [12], [6] have demon-
+strated that training in high-fidelity simulators can exceed
+optimal control performance, with [6] developing ’Swift,’ a
+system surpassing champion-level human pilots. However,
+such methods often rely on prior knowledge or additional de-
+tection modules, restricting their effectiveness in unfamiliar
+environments. [5] employed reinforcement learning to create
+a vision-based policy from a teacher policy with compre-
+hensive state information. [13] proposed a 2D navigation
+planner using LiDAR-based costmaps and the Soft Actor
+Critic (SAC) algorithm, but the additional weight of LiDAR
+sensors limits practical deployment. Other methods [7], [8],
+[14] utilize RGB images as input, transforming them into
+a latent format conducive to RL training. Beyond super-
+vised and reinforcement learning, self-supervised approaches
+have been used for obstacle avoidance [4], [15], [16], [17].
+Notably, [17] introduced a robotic system that adapts its
+flying speed to obstacle density, drawing inspiration from
+flies and bees. This system employs Optic Flow (OF) to
+gauge environmental clutter. However, we believe we are the
+first to merge adaptive speed with reinforcement learning for
+an autonomously learned, varying-speed obstacle avoidance
+system.
+B. Latent Representations
+Given the high dimensionality of visual inputs, the role
+of latent representation is pivotal in effectively processing
+this intricate data. Studies like [1], [2], [8] demonstrate the
+use of depth or RGB images to orchestrate aerial vehicle
+motions in an end-to-end fashion. However, such methods
+are not full-proof, particularly in cluttered environments,
+as evidenced by a sub-optimal success rate [9]. Latent
+representation is integral to numerous applications, including
+image classification [18] and vision-based navigation [19],
+[2], [10]. Study [19] introduced a latent representation for
+sampling-based motion planning. This representation incor-
+porates AutoEncoders to encapsulate high-dimensional states
+like images, a dynamics network for predicting the next
+state, and a collision checker network. Mihir et al. [9]
+developed a unique collision encoding method for depth
+images, adept at preserving information about thin objects.
+When compared with a standard Variational Autoencoder
+(V AE) [20], their method demonstrated an ability to retain
+more details with the same latent dimensions. Further, [10]
+unveiled a learning-based pipeline for local navigation with
+quadrupedal robots in cluttered settings, featuring a pre-
+trained state representation. This representation combines
+a V AE to process depth images and a Long Short-Term
+Memory (LSTM) network [21] to predict the next latent state.
+Our work draws inspiration from [10], but we specifically
+focus on enhancing the latent representation to embody
+more explicit past memories, rather than only predicting
+future states. We have validated that our approach yields
+superior performance, particularly in cluttered environments
+with large obstacles.
+III. L EARNING A MEMORY-AUGMENTED
+REPRESENTATION
+In this section, we outline our approach to learning a latent
+space using a 256-dimensional vector to represent depth. Our
+method focuses on encoding a sequence of depth images into
+this latent space, enabling the drone to retain memory of
+obstacles encountered over a specific time frame.
+As illustrated in Figure 2(a), our process begins with using
+a V AE to convert the current depth image into an initial
+latent representation zvae
+t . Subsequently, a LSTM network
+processes this sequence, generating a final latent state ca-
+pable of representing past, present, or future depth images.
+The LSTM output, zt, is then merged with a vector xt that
+encapsulates the drone’s current state and target information.
+This combined vector is input into the Proximal Policy
+Optimization (PPO) [22] reinforcement learning algorithm,
+which computes the acceleration command in our case. Our
+pipeline comprises three main components: the V AE, LSTM,
+and PPO. The training process is as following:
+• We begin by training a basic PPO policy, while the V AE
+and LSTM components are initially set to random. This
+foundational policy allows the drone to navigate to the
+target in environments without obstacles.
+• This initial policy is utilized to gather a dataset, focused
+primarily on capturing a multitude of depth image
+(a)
+MAE: 30.89 MAE: 19.85 MAE: 39.87 (b)
+Fig. 2: (a) depicts MA VRL’s network architecture. The depth image, encoded into a latent space by V AE, is processed by
+LSTM to create a memory-augmented representation. This, combined with the drone’s state and target data, informs the
+acceleration command via PPO. The part of the network within the red dotted box, used for LSTM training, is not for drone
+deployment. (b) compares original and reconstructed depth images from latent space zt, showing better quality for past and
+current images than for future ones, due to the difficulty in predicting future states (highest MAE loss).
+sequences without the concern of collisions. Subse-
+quently, we use this dataset for the training of the V AE,
+bypassing the LSTM phase in this step.
+• Once the V AE is trained, we maintain the encoder in
+a fixed state and proceed to train the LSTM using the
+dataset generated by the initial policy.
+• After training both the V AE and LSTM, we freeze them
+and retrain the PPO, adapting it to environments of
+varying complexity.
+In the subsequent subsections, we will delve into the
+specifics of training both the V AE and LSTM.
+A. Encoding Depth Images
+Our pipeline is built upon AvoidBench [23], a high-
+fidelity simulator offering photo-realistic scenes. Although
+direct acquisition of depth images in simulations is possible,
+AvoidBench opts for a more realistic approach by computing
+these images using a semi-global matching algorithm (SGM)
+[24] from a virtual stereo camera setup. This method is
+chosen specifically because it replicates depth errors similar
+to those encountered in real-world scenarios, thereby reduc-
+ing the domain gap between simulation and reality. We use
+AvoidBench to generate a dataset of depth images, which we
+subsequently employ to train the V AE.
+Consider a depth image at time t from the dataset, denoted
+as It ∈ D, where D represents the set of all depth images.
+We employ a V AE to encode each depth image into a latent
+space zvae
+t ∈ ZNe (Ne = 64), with ZNe being the set of all
+possible latent spaces and Ne the dimension of the V AE
+latent space. During V AE training, we focus on an encoder-
+decoder structure, excluding any recurrent architecture. Both
+the encoder and decoder consist of convolutional neural
+networks.
+The encoder includes six convolutional layers, each fol-
+lowed by a ReLU activation function. The output from the
+final convolutional layer is flattened and then split into two
+components by two fully connected layers, representing the
+mean µ and variance σ 2. The latent space zvae
+t is sampled
+from a Gaussian distribution characterized by this mean
+µ and variance σ 2. The decoder, mirroring the encoder,
+comprises six deconvolutional layers, each also followed
+by a ReLU activation function. The output of the last
+deconvolutional layer passes through a sigmoid activation
+function to yield the reconstructed depth image Irecon
+t . The
+loss function for the V AE is detailed in Equation 1.
+LVAE = Lrecon + βnormLKL
+Lrecon = MSE(It , Irecon
+t )
+LKL = 1
+2
+Ne
+∑
+i=1
+(1 − µ2
+i − σ 2
+i + log(σ 2
+i ))
+(1)
+where βnorm is the weight of Kullback-Leibler (KL) loss,
+Irecon
+t is the reconstructed depth image from latent space zvae
+t .
+The MSE loss is used to calculate the reconstruction loss
+Lrecon, while KL loss is used to calculate the KL divergence
+between the latent space and the Gaussian distribution.
+B. Memory-augmented Latent Representation
+As depicted in Figure 2(a), the output of the V AE, denoted
+as zvae
+t , serves as the input to a single-layer LSTM network.
+During the LSTM training phase, its output zt ∈ ZNl (Nl =
+256) first goes through a fully connected layer, resulting in a
+vector of dimension 3 × Ne. This vector is then divided into
+three segments, each corresponding to the reconstruction of
+past, current, and future depth images, represented as ˆIt−T ,
+ˆIt, and ˆIt+T , respectively. Notably, in our experiments, these
+three reconstructed images utilize the same decoder. The
+specific loss function employed for LSTM training is detailed
+in Equation 2.
+LLSTM = ∑
+i=−1,0,1
+λi · MSE(It+iT , ˆIt+iT ) ( λi ∈ {0,1}) (2)
+where ˆIt+iT denotes the reconstructed depth image from
+the latent space zt. The coefficient λi determines whether
+the past, current, or future depth image will be reconstructed
+during training. In the section V , we will show the impact
+of different λi configurations.
+Figure 2(b) shows depth images reconstructed from the
+latent space zt. The past and current images are more
+detailed than future ones, indicating the LSTM module’s
+better encoding of past and present over future depth images.
+This is likely due to the unpredictability of future events and
+unseen environmental aspects.
+IV. R EINFORCEMENT LEARNING FOR OBSTACLE
+AVOIDANCE
+In this section, we introduce the reinforcement learning
+algorithm utilized for training our obstacle avoidance policy.
+Our approach employs PPO, a policy gradient method,
+optimizes the policy network by maximizing the expected
+reward. We frame the task of obstacle avoidance as a Markov
+Decision Process (MDP), offering a structured approach for
+decision-making in stochastic environments. Our method,
+distinct from other RL-based obstacle avoidance strategies
+[5], [13], is designed to train the policy across environments
+of varying complexity, enabling it to generate adaptive ac-
+tions in response to environmental intricacies.
+A. Problem F ormulation
+We employ the AvoidBench simulator [23] for RL en-
+vironment setup, which offers photo-realistic scenes and a
+dynamics model from RotorS [25]. Our drone, equipped with
+a stereo camera for depth image generation, utilizes PPO
+for training. To enhance training efficiency, we substitute
+RotorS with a simpler kinematics model, allowing parallel
+data generation with multiple drones in the same scene. The
+control command comprises 3D acceleration in the body
+frame and a 1D yaw rate. The kinematics model is:
+˙p = Rw
+b v, ˙v = a, (3)
+where p is the drone’s position in the world frame, v is
+its velocity in the body frame, Rw
+b is the rotation matrix
+from the body to the world frame, and a is the body-frame
+acceleration. This simplified kinematics model is used solely
+for policy training. For benchmarking against other methods,
+the RotorS dynamics model is employed.
+The Markov Decision Process (MDP) for our model is
+defined as a tuple (S , A , P, R, γ), where S represents
+the state space, A denotes the action space, P defines
+the transition probability, R is the reward function, and γ
+signifies the discount factor. The state space S comprises
+the current latent representation zt, along with the drone’s
+state and target information xt. The action space A includes
+the acceleration in the body frame and the yaw rate. The tran-
+sition probability P is modeled by the kinematics equation
+as described in Equation 3.
+As illustrated in Figure 2(a), the drone’s state and target
+information, denoted as xt, is represented by a vector of
+length Ns. In our specific case, Ns is equal to 7. The
+coordinate system is shown in Figure 3(a): the drone’s
+current position and velocity are denoted as p(xt , yt , zt ) and
+v(vx, vy, vz), respectively, with the target position represented
+as pg(xg, yg, zg). The vector from the drone to the target is
+d = pg − p, and the drone’s heading angle is ψ. The bearing
+angle β is defined as the angle between the body frame’s xb
+axis and the target vector, while the track angle χ represents
+the direction of horizontal velocity in the world frame. The
+drone’s state and target information xt is defined as:
+xt = [dhor, vhor, β ′, dz, vz, χ ′, ψ],
+dhor = ln(
+q
+d2x + d2y + 1), vhor =
+q
+v2x + v2y,
+β ′ = β + ψ = arctan
+ dy
+dx
+
+,
+χ ′ = χ − ψ = arctan
+ vy
+vx
+
+,
+(4)
+where dhor is the logarithm of the horizontal distance
+from the drone to the target, vhor is the drone’s horizontal
+velocity, vz is the vertical velocity, β ′ represents drone-to-
+target direction in world frame, χ ′ indicates the velocity
+direction in body frame, and dz is the vertical distance to
+the target.
+In our experiments, the horizontal distance to the target
+is usually much longer than the vertical distance. Therefore,
+we use different state information and reward functions for
+horizontal and vertical movements.
+B. Reward Functions
+The reward function is designed to ensure that the drone
+flies safely and efficiently. As reaching the target and avoid-
+ing collisions are sparse rewards, we introduce a progressive
+reward to efficiently guide the drone. The progressive reward
+is defined as follows:
+rprogress =λd · dhor + λb ·
+χ ′ + ψ − β ′ +
+sign(vhor − vmax) · λv · vhor + λz · dz+
+λ f · |χ ′| + λa · ∥at−1 − at ∥,
+(5)
+where λd, λb, λv, λz, λ f , and λa are weights for each term.
+at is the acceleration output of policy at time t. The first
+two terms guide the drone towards the target, penalizing
+horizontal distance and encouraging correct directionality.
+The third term penalizes horizontal velocity, activated only
+when vhor > vmax (with λv = 0 for vhor < vmax). The fourth
+term penalizes vertical distance, while the fifth term encour-
+ages forward flight. The final term, penalizing jerk, ensures
+smoother flight.
+Then the whole reward function is defined as:
+r =
+
+
+
+rexceed if (pt < pmin or pt > pmax)
+(p ∈ {x, y, z})
+rarrive
+T RA V if ∥d∥ < dmin
+rcollision if collision
+rprogress otherwise
+(6)
+We define rexceed as the boundary-exceed penalty, rarrive as
+the target arrival reward, and rcollision as the collision penalty.
+Target
+Bearing
+Heading
+Track
+(a)
+ (b)
+40 60 80 100 120 140 160 180
+Gray Value
+0
+1
+2
+3
+4Speed (m/s)
+0
+50
+100
+150
+200
+250
+Uniform grayscale
+Actual depth (c)
+Fig. 3: (a) illustrates the drone’s coordinate system, with the bearing angle β between body axis xb and the target vector,
+and the track angle χ as the horizontal velocity’s direction in the world frame. (b) presents an adaptive drone trajectory
+in a cluttered environment. The drone decelerates when navigating complex obstacles and accelerates in simpler scenarios,
+demonstrating dynamic speed adjustment based on obstacle density. (c) displays the drone’s average speed in response to
+uniformly bright gray images (green diamond), and the mean and standard deviation of the speed when the input are actual
+depth images from (b) (red round).
+T RA V, introduced by Nous et al. [26], measures environ-
+mental clutter, accounting for drone’s size and complex
+obstacle shapes. Higher values indicate easier navigation.
+PPO, trained within a fixed time window, incentivizes faster
+flight for higher arrival rewards. To balance safety and agility,
+the arrival reward inversely correlates with T RA V, while the
+horizontal velocity penalty in Equation 5, moderates speed.
+The episode terminates once any of the previously men-
+tioned conditions are met, following which the drone is
+reset to a new random starting point. In our setup, the
+values are configured as follows: rexceed = −2.0 for ex-
+ceeding boundaries, rarrive = 10.0 for reaching the target,
+and rcollision = −2.0 for collisions. The traversability range,
+T RA V, is set between 3 and 13. The progressive reward,
+rprogress, ranges from -0.2 to 0 as defined in Equation 5.
+Notably, this progressive reward is considerably smaller than
+the other rewards.
+C. Training in V arying Complexity Environments
+We utilize AvoidBench [23] to construct the RL en-
+vironment. AvoidBench is tailored for evaluating vision-
+based obstacle avoidance algorithms, offering customizable
+environmental complexity through the radius of the Poisson
+distribution. AvoidBench is based on Flightmare [27], but
+additionally allows for the inclusion of large bushes as
+obstacles, which present more variability than thin red trees
+typically found in Flightmare’s scenes.
+To increase training efficiency, we begin with a warm-
+up period for the policy network in a simpler environment
+(12-meter Poisson distribution radius), facilitating easy target
+navigation learning and high arrival rewards. We then raise
+the complexity (Poisson radius [3.0, 5.4] meters), effectively
+teaching the drone to adjust its speed based on environmental
+complexity—accelerating in simpler areas and slowing down
+in denser ones.
+As illustrated in Figure 3(b), the task involves the drone
+flying from the green arrow (start point) to the red arrow
+(target). The trajectory is color-coded to represent the drone’s
+velocity. Additionally, we display some predicted depth
+images generated by our memory-augmented latent repre-
+sentation. These images are presented as pairs of ( ˆIt−10, ˆIt ).
+For instance, in the pairs ( ˆI0, ˆI10) and ( ˆI10, ˆI20), it is evident
+that the drone retains memory of the depth image ˆI10 seen
+10 timestamps earlier. Observations from pairs ( ˆI10, ˆI20),
+( ˆI70, ˆI80), and ( ˆI205, ˆI215) demonstrate the drone’s tendency
+to decelerate when encountering complex obstacles and to
+accelerate when observed distances in the flight direction are
+larger, as seen in ( ˆI140, ˆI150) and ( ˆI250, ˆI260).
+For the trajectory shown in Figure 3(b), depth maps
+captured every 0.1 seconds are categorized into six groups
+based on their average gray values. The mean and standard
+deviation of speed for each depth map group are depicted in
+Figure 3(c) (red circles). Additionally, the response speed to
+uniformly bright gray images is displayed as green diamonds,
+calculated during periods of stable acceleration at zero. This
+closely matches the speed when navigating actual depth. The
+plots illustrate an inverse relationship between drone speed
+and obstacle density, indicating faster speeds in less cluttered
+environments and slower speeds amidst denser obstacles.
+V. E XPERIMENTS
+To verify the effectiveness of MA VRL, we conducted
+a series of experiments. We trained the different results
+of predicting past, current and future depth respectively
+for the memory-augmented latent representation, and then
+compared the performance of different latent representations
+by training the policy network with the same parameters.
+To verify whether the varying speed ability of MA VRL can
+improve the success rate and get a good balance between
+safety and agility, we also trained the policy network with
+a fixed speed, comparing both of them with a state-of-the-
+art method: Agile-Autonomy [1]. Finally, we deployed our
+network on a real drone with minimal fine-tuning.
+All simulation experiments are run on a server with an
+Intel Core i7-13700K CPU and an NVIDIA GeForce RTX
+4090 GPU. To get enough training results for statistical
+analysis, we create 5 docker containers in the server and run
+per configuration 5 parallel, independent training processes.
+A. Latent Representation
+To assess the efficacy of the memory-augmented latent
+representation, we conducted an experiment where the LSTM
+was trained with various reconstruction configurations. These
+different configurations were then utilized to train the policy
+network. We examined seven distinct types of latent repre-
+sentations for this purpose:
+• Current depth image prediction, It,
+• Future depth prediction, It+10,
+• Current depth, It, with short-term future, It+10,
+• Current depth, It, with long-term future, It+20,
+• Current depth, It, and past depth, It−10,
+• Current depth, It, with more distant past, It−20,
+• Current depth, It, combined with past, It−10, and future,
+It+10,
+where predicting current depth [2] and predicting future
+depth [10] separately are the most common in the literature.
+To thoroughly evaluate how various latent representations
+affect policy network performance and the benefits of aug-
+mented memory, we conducted an extensive testing regimen.
+The policy network, using consistent latent representations,
+was trained ten times, each with a unique random seed,
+saving checkpoints every 20 iterations for a total of 600
+iterations. We then utilized these checkpoints to test the
+policy network on 4 different maps, conducting 25 trials per
+map, amounting to 30 × 4 × 25 trials per latent space. The
+results of these trials are detailed in Figure 4 and Table I.
+Figure 4 displays the success rates of It, It+10, and the
+superior combinations It&It−20 (the better one compared
+with It&It−10) and It&It+10 (the better one compared with
+It&It+20). We compared the highest success rate checkpoints
+for each latent representation, detailing average success rates
+and standard deviations in Table I. The Permutation Test [28]
+with 10,000 permutations was used to validate our memory-
+augmented latent representation against commonly used It
+and It+10 methods. A P-value below 0.05 indicates significant
+differences between latent representations. Thus, we deduce
+that augmenting current depth with past or future information
+consistently outperforms predictions based solely on current
+depth. The combination of It and It−20 emerged as the most
+effective, closely followed by the combination of current and
+future depth It&It+10 which are both much better than only
+predicting future depth. Predicting past It−10, current It, and
+future It+10 also performed well but didn’t notably surpass
+the It and It−20 combination.
+Given that the LSTM training dataset was gathered using
+an initial policy, we compiled Table II to illustrate the
+variations in predicting past, current, and future depth across
+Fig. 4: Success rates of It, It+10, and the superior combina-
+tions It&It−20 and It&It+10. The shadow area represents the
+standard deviation.
+TABLE I: Comparison of different types of latent space.
+Latent space Mean ± std P-Value
+(for It) (for It+10)
+It 0.500 ± 0.037 - -
+It+10 0.601 ± 0.083 0.0015 -
+It&It−10 0.636 ± 0.089 0.0001 0.1913
+It&It−20 0.707 ± 0.051 0.0 0.0016
+It&It+10 0.692 ± 0.080 0.0 0.0110
+It&It+20 0.664 ± 0.100 0.0001 0.0680
+It−10&It&It+10 0.649 ± 0.102 0.0005 0.1239
+different latent spaces before or after retraining with PPO.
+The mean and standard deviation are derived from the gray
+scale values of the depth images. It can be seen from the
+results that the error in predicting the future is the most
+obvious. And all reconstruction effects decrease to a small
+extent after retraining PPO.
+TABLE II: Errors of different prediction items.
+Predicted Item Mean ± std
+(Before PPO retraining) (After PPO retraining)
+It−20 30.70 ± 13.11 32 .93 ± 17.28
+It−10 24.51 ± 10.82 26 .49 ± 14.78
+It 18.73 ± 8.39 18 .97 ± 10.15
+It+10 51.03 ± 27.27 53 .79 ± 30.18
+It+20 58.51 ± 28.58 58 .70 ± 32.89
+For memory-augmented latent spaces, we found they excel
+in environments with large obstacles. Figure 1(b) illustrates a
+clear performance disparity between latents with and without
+memory. Latents lacking memory often led to drones becom-
+ing entrapped in large obstacles. Conversely, drones with
+memory-augmented latents adeptly circumnavigated these
+obstacles, choosing longer yet safer paths to their targets.
+This underscores memory’s vital role in improving drones’
+obstacle avoidance, especially amidst larger obstructions.
+B. Benchmarking for V arying Speed Policy
+To assess the impact of a varying speed policy, we
+conducted an experiment where a policy network trained
+Fig. 5: (a) is the success rate of 2 different MA VRL versions and Agile-Autonomy. (b) is the average goal velocity (AGV)
+of 2 different MA VRL versions and Agile-Autonomy. (c) is the Pareto frontier of success rate versus average flight speed.
+with variable speeds was compared against one operating
+at a fixed speed. For the fixed speed setup, we adjusted
+the velocity penalty in the reward formula (Equation 5)
+to λv · |vhor − vdesire|, with vdesire representing the desired
+velocity. Although λv was set high, it remained lower than
+the collision penalty, allowing consistent speed learning.
+This fixed speed model was then benchmarked against the
+advanced Agile-Autonomy method [1], utilizing the Avoid-
+Bench framework [23].
+For our experiment, MA VRL utilized the MPC controller
+from Agilicious [11] when outputting acceleration com-
+mands, which then generated body rate and thrust commands
+for the drone. Conversely, Agile-Autonomy generated a set
+of waypoints, with a polynomial curve fitting these points,
+and the high level controller is the same MPC.
+The benchmarking outcomes in Figure 5 compare MA VRL
+with varying and fixed speeds, and Agile-Autonomy, all
+using a memory-augmented latent representation. Figure
+5(a) shows the success rates over six groups, each with
+seven maps and 30 trials per map, indicating MA VRL with
+varying speed often performs best. Figure 5(b) explores the
+link between average goal velocity (AGV) [23] and map
+complexity, revealing MA VRL with varying speed tends to
+have higher AGV in less complex environments, while all
+algorithms maintain a similar AGV (around 2.0 m/s).
+To validate MA VRL’s superior performance across various
+agility levels when employing varying speeds, we fine-tuned
+the reward function parameters of both MA VRL variants to
+achieve different average flight speeds. This led to the con-
+struction of a Pareto frontier of success rate versus average
+flight speed, as shown in Figure 5(c). The results confirm
+that MA VRL with varying speed forms the Pareto frontier,
+dominating the results of the other methods. However, its
+average speed could not exceed 3.0 m/s due to flight distance
+limitations, although the maximum speed reached 5.5 m/s.
+While MA VRL with varying speed showed a higher av-
+erage success rate than the fixed speed variant in Figure
+5(a), the difference was not substantial across all scenar-
+ios, particularly in specific complexity environments (e.g.,
+traversability between 8 and 9.15 or 9.15 and 10.2). To
+further validate these findings, we also conducted a Permu-
+[3, 7) [7, 8) [8, 9.15)[9.15, 10.2)[10.2, 11) [11, 13]
+MAVRL/Agile-autonomy
+MAVRL/MAVRL-Fixed
+P-Value Heatmap at 1.5 m/s
+0.0002
+0.0145
+0.0001
+0.0033
+0.0001
+0.1643
+0.0002
+0.1369
+0.0003 0.005
+0.4609 0.3642
+ 0.1
+0.2
+0.3
+0.4
+[3, 7) [7, 8) [8, 9.15)[9.15, 10.2)[10.2, 11) [11, 13]
+MAVRL/Agile-autonomy
+MAVRL/MAVRL-Fixed
+P-Value Heatmap at 2.0 m/s
+0.0005
+0.1059
+0.0003
+0.0489
+0.0024
+0.4578
+0.0008
+0.488
+0.0033 0.0192
+0.7165 0.5485
+ 0.2
+0.4
+0.6
+[3, 7) [7, 8) [8, 9.15)[9.15, 10.2)[10.2, 11) [11, 13]
+MAVRL/Agile-autonomy
+MAVRL/MAVRL-Fixed
+P-Value Heatmap at 2.5 m/s
+0.0041
+0.0741
+0.1212
+0.062
+0.003
+0.0118
+0.0328
+0.0612
+0.4194
+0.1662 0.5166
+0.9728
+0.2
+0.4
+0.6
+0.8
+Fig. 6: Permutation Test Results. The p-values indicate the
+statistical significance of the success rate distributions of the
+different MA VRL versions and Agile-Autonomy.
+tation Test to compare the success rate distributions of the
+different MA VRL versions and Agile-Autonomy. The results
+are presented in Figure 6 with values below 0.05 indicating
+statistical significance. Our analysis revealed that MA VRL
+with varying speed significantly outperforms the fixed speed
+version in cluttered environments (traversability between 3.0
+and 8.0) and also shows a notable difference compared to
+Agile-Autonomy in most environments.
+C. Real World Tests
+To validate MA VRL’s real-world efficacy, we implemented
+our network on an actual drone, maintaining the same
+architecture and hyperparameters as in our simulation exper-
+iments. Due to the real scene’s environmental background
+shown in Figure 7 being too close to the obstacles, the V AE
+and LSTM trained in simulation struggled to differentiate
+between obstacles and background effectively. Consequently,
+the V AE and LSTM components were fine-tuned with real-
+world data while maintaining the original policy parameters.
+Our test setup included a quadrotor equipped with 5-inch pro-
+Fig. 7: Real world test of MA VRL. Then latent representation
+is shown as a pair of ( ˆIt−10, ˆIt ).
+pellers and a Realsense D435i camera, powered by a Jetson
+Xavier NX featuring a 384-core GPU, 48 Tensor Cores, and
+a 6-core ARM CPU. Depth images were generated using the
+Realsense D435i stereo camera, while an Optitrack motion
+capture system provided accurate ground truth data for the
+drone’s state. As shown in Figure 7, the drone successfully
+navigated a cluttered environment, utilizing a latent represen-
+tation augmented with past memory. Additional test results
+are available in our supplementary video. This real-world
+performance mirrors our simulation results, demonstrating
+the drone’s capability to navigate safely and efficiently.
+VI. CONCLUSION
+Our approach leverages memory-augmented latent repre-
+sentations to endow the drone with a recollection of past
+scenarios. Experimental results demonstrated that recon-
+structing a more extensive history of past and current depth
+information significantly enhances the drone’s performance
+in reinforcement learning-based obstacle avoidance tasks.
+Additionally, we established that adopting a varying speed
+strategy not only improves success rates but also strikes an
+optimal balance between safety and agility. The successful
+deployment of our network on a real drone, requiring min-
+imal fine-tuning, marks a significant achievement. Looking
+forward, our aim is to delve into the development of a fully
+end-to-end methodology that enables the policy network to
+directly generate low-level control commands.
+REFERENCES
+[1] A. Loquercio, E. Kaufmann, R. Ranftl, M. M ¨uller, V . Koltun, and
+D. Scaramuzza, “Learning high-speed flight in the wild,” in Science
+Robotics, October 2021.
+[2] M. Kulkarni, H. Nguyen, and K. Alexis, “Semantically-enhanced deep
+collision prediction for autonomous navigation using aerial robots,”
+arXiv:2307.11522, 2023.
+[3] H. Nguyen, S. H. Fyhn, P. De Petris, and K. Alexis, “Motion
+primitives-based navigation planning using deep collision prediction,”
+in 2022 International Conference on Robotics and Automation (ICRA) ,
+2022, pp. 9660–9667.
+[4] G. Kahn, P. Abbeel, and S. Levine, “Badgr: An autonomous self-
+supervised learning-based navigation system,” IEEE Robot. Autom.
+Lett., vol. 6, no. 2, pp. 1312–1319, 2021.
+[5] Y . Song, K. Shi, R. Penicka, and D. Scaramuzza, “Learning
+perception-aware agile flight in cluttered environments,” in 2023 IEEE
+International Conference on Robotics and Automation (ICRA) , 2023,
+pp. 1989–1995.
+[6] E. Kaufmann, L. Bauersfeld, A. Loquercio, M. M ¨uller, V . Koltun, and
+D. Scaramuzza, “Champion-level drone racing using deep reinforce-
+ment learning,” Nature, vol. 620, no. 7976, pp. 982–987, 2023.
+[7] A. Singla, S. Padakandla, and S. Bhatnagar, “Memory-based deep
+reinforcement learning for obstacle avoidance in uav with limited envi-
+ronment knowledge,” IEEE transactions on intelligent transportation
+systems, vol. 22, no. 1, pp. 107–118, 2019.
+[8] F. Sadeghi and S. Levine, “Cad2rl: Real single-image flight without a
+single real image,” arXiv:1611.04201, 2016.
+[9] M. Kulkarni and K. Alexis, “Task-driven compression for collision
+encoding based on depth images,” in Advances in Visual Computing ,
+G. Bebis, G. Ghiasi, Y . Fang, A. Sharf, Y . Dong, C. Weaver, Z. Leo,
+J. J. LaViola Jr., and L. Kohli, Eds. Cham: Springer Nature
+Switzerland, 2023, pp. 259–273.
+[10] D. Hoeller, L. Wellhausen, F. Farshidian, and M. Hutter, “Learning
+a state representation and navigation in cluttered and dynamic envi-
+ronments,” IEEE Robot. Autom. Lett. , vol. 6, no. 3, pp. 5081–5088,
+2021.
+[11] P. Foehn, E. Kaufmann, A. Romero, R. Penicka, S. Sun, L. Bauersfeld,
+T. Laengle, G. Cioffi, Y . Song, A. Loquercio,et al., “Agilicious: Open-
+source and open-hardware agile quadrotor for vision-based flight,”
+Science robotics, vol. 7, no. 67, p. eabl6259, 2022.
+[12] Y . Song, A. Romero, M. M ¨uller, V . Koltun, and D. Scaramuzza,
+“Reaching the limit in autonomous racing: Optimal control versus
+reinforcement learning,” Science Robotics , vol. 8, no. 82, 2023.
+[13] K. Nakhleh, M. Raza, M. Tang, M. Andrews, R. Boney, I. Had ˇzi´c,
+J. Lee, A. Mohajeri, and K. Palyutina, “Sacplanner: Real-world
+collision avoidance with a soft actor critic local planner and polar state
+representations,” in 2023 IEEE International Conference on Robotics
+and Automation (ICRA) . IEEE, 2023, pp. 9464–9470.
+[14] M. Kim, J. Kim, M. Jung, and H. Oh, “Towards monocular vision-
+based autonomous flight through deep reinforcement learning,” Expert
+Systems with Applications , vol. 198, p. 116742, 2022.
+[15] K. Lamers, S. Tijmons, C. De Wagter, and G. de Croon, “Self-
+supervised monocular distance learning on a lightweight micro air
+vehicle,” in 2016 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS) . IEEE, 2016, pp. 1779–1784.
+[16] D. Gandhi, L. Pinto, and A. Gupta, “Learning to fly by crashing,” in
+2017 IEEE/RSJ International Conference on Intelligent Robots and
+Systems (IROS). IEEE, 2017, pp. 3948–3955.
+[17] T. Schoepe, E. Janotte, M. B. Milde, O. J. Bertrand, M. Egelhaaf, and
+E. Chicca, “Finding the gap: neuromorphic motion-vision in dense
+environments,” Nature Communications, vol. 15, no. 1, p. 817, 2024.
+[18] A. Sellami and S. Tabbone, “Deep neural networks-based relevant
+latent representation learning for hyperspectral image classification,”
+Pattern Recognition, vol. 121, p. 108224, 2022.
+[19] B. Ichter and M. Pavone, “Robot motion planning in learned latent
+spaces,” IEEE Robot. Autom. Lett. , vol. 4, no. 3, pp. 2407–2414, 2019.
+[20] C. Doersch, “Tutorial on variational autoencoders,” arXiv:1606.05908,
+2016.
+[21] S. Hochreiter and J. Schmidhuber, “Long short-term memory,” Neural
+computation, vol. 9, no. 8, pp. 1735–1780, 1997.
+[22] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov,
+“Proximal policy optimization algorithms,” arXiv:1707.06347, 2017.
+[23] H. Yu, G. C. H. E. de Croon, and C. De Wagter, “Avoidbench: A
+high-fidelity vision-based obstacle avoidance benchmarking suite for
+multi-rotors,” in 2023 IEEE International Conference on Robotics and
+Automation (ICRA) , 2023, pp. 9183–9189.
+[24] H. Hirschmuller, “Stereo processing by semiglobal matching and
+mutual information,” IEEE Transactions on pattern analysis and
+machine intelligence, vol. 30, no. 2, pp. 328–341, 2007.
+[25] F. Furrer, M. Burri, M. Achtelik, and R. Siegwart, “Rotors—a modular
+gazebo mav simulator framework,” in Robot operating system (ROS) .
+Springer, 2016, pp. 595–625.
+[26] C. Nous, R. Meertens, C. De Wagter, and G. De Croon, “Performance
+evaluation in obstacle avoidance,” in 2016 IEEE/RSJ International
+Conference on Intelligent Robots and Systems (IROS) . IEEE, 2016,
+pp. 3614–3619.
+[27] Y . Song, S. Naji, E. Kaufmann, A. Loquercio, and D. Scaramuzza,
+“Flightmare: A flexible quadrotor simulator,” arXiv:2009.00563, 2020.
+[28] R. J. Boik, “The fisher-pitman permutation test: A non-robust alter-
+native to the normal theory f test when variances are heterogeneous,”
+British Journal of Mathematical and Statistical Psychology , vol. 40,
+no. 1, pp. 26–42, 1987.

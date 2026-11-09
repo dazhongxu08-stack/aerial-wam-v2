@@ -351,6 +351,24 @@ def test_level_goal_climb_is_not_progress_even_when_street_is_open():
     assert above["progress"] == pytest.approx(0.4)
 
 
+def test_open_side_yaw_action_only_when_the_building_is_ahead():
+    from experiments.aerial.rl.reward import open_side_yaw_action
+
+    cfg = RewardConfig(
+        feasible_side_progress=True,
+        feasible_fwd_block_m=8.0,
+        feasible_early_turn_m=18.0,
+        feasible_side_margin_m=2.0,
+    )
+    assert open_side_yaw_action(15.0, 8.0, 6.0, cfg=cfg) is None
+    turn = open_side_yaw_action(14.0, 16.0, 6.0, cfg=cfg)
+    assert turn is not None
+    assert turn[1] == pytest.approx(0.0)
+    assert turn[2] == pytest.approx(0.0)
+    assert turn[3] > 0.2
+    assert open_side_yaw_action(14.0, 16.0, 6.0, cfg=RewardConfig()) is None
+
+
 def test_early_yaw_is_paid_and_sideslip_is_not():
     from experiments.aerial.rl.reward import feasible_side_progress
 
@@ -391,4 +409,110 @@ def test_early_yaw_is_paid_and_sideslip_is_not():
     )
     assert into["progress"] <= 0.0
     assert into["slide_cost"] >= 0.8
+
+
+def test_street_cruise_keeps_chord_and_slide_toward_long_side_is_charged():
+    from experiments.aerial.rl.reward import feasible_side_progress, path_shaping_terms
+
+    cfg = RewardConfig(
+        feasible_side_progress=True,
+        feasible_fwd_block_m=8.0,
+        feasible_early_turn_m=18.0,
+        feasible_side_margin_m=2.0,
+        feasible_side_credit_m=0.8,
+        gate_progress_by_heading=True,
+    )
+    # Flanks differ, but forward is still the open street.
+    street = feasible_side_progress(
+        0.7,
+        np.array([0.7, 0.0, 0.0, 0.0]),
+        d_fwd=15.0,
+        d_left=8.0,
+        d_right=6.0,
+        cfg=cfg,
+    )
+    assert street["progress"] == pytest.approx(0.7)
+    assert street["feasible_side"] == pytest.approx(0.0)
+    # The flown failure: strafe toward the longer image side.
+    slide = feasible_side_progress(
+        0.5,
+        np.array([0.0, 0.4, 0.0, 0.0]),
+        d_fwd=14.0,
+        d_left=16.0,
+        d_right=6.0,
+        cfg=cfg,
+    )
+    assert slide["progress"] <= 0.0
+    assert slide["slide_cost"] >= 0.8
+    # Slow climb mixed with strafe still drops positive progress.
+    climb = feasible_side_progress(
+        0.4,
+        np.array([0.5, 0.05, 0.13, 0.0]),
+        d_fwd=20.0,
+        d_left=9.0,
+        d_right=7.0,
+        goal_rel=np.array([40.0, 0.0, 0.0, 40.0]),
+        cfg=cfg,
+    )
+    assert climb["progress"] <= 0.0
+    assert climb["climb_cost"] > 0.0
+    # Heading gate would zero chord once the goal is abeam. The turn credit stays.
+    shaping = path_shaping_terms(
+        np.array([0.1, 0.0, 0.0, 0.2]),
+        np.array([-5.0, 20.0, 0.0, 20.6]),
+        0.8,
+        turn_credit=0.8,
+        cfg=cfg,
+    )
+    assert shaping["progress_eff"] == pytest.approx(0.8)
+
+
+def test_positive_progress_stops_when_the_surface_is_before_the_goal():
+    from experiments.aerial.rl.reward import path_shaping_terms
+
+    cfg = RewardConfig(w_straight=0.5, gate_progress_by_heading=True)
+    goal = np.array([40.0, 0.0, 0.0, 40.0])
+    into = path_shaping_terms(
+        np.array([1.0, 0.0, 0.0, 0.0]),
+        goal,
+        0.98,
+        clearance_m=4.5,
+        cfg=cfg,
+    )
+    assert into["progress_eff"] == pytest.approx(0.0)
+    assert into["straight_bonus"] == pytest.approx(0.0)
+    near = path_shaping_terms(
+        np.array([1.0, 0.0, 0.0, 0.0]),
+        goal,
+        0.98,
+        clearance_m=12.0,
+        cfg=cfg,
+    )
+    assert near["progress_eff"] == pytest.approx(0.0)
+    street = path_shaping_terms(
+        np.array([1.0, 0.0, 0.0, 0.0]),
+        goal,
+        0.98,
+        clearance_m=20.0,
+        cfg=cfg,
+    )
+    assert street["progress_eff"] == pytest.approx(0.98)
+    assert street["straight_bonus"] > 0.0
+    open_street = path_shaping_terms(
+        np.array([1.0, 0.0, 0.0, 0.0]),
+        goal,
+        0.98,
+        clearance_m=80.0,
+        cfg=cfg,
+    )
+    assert open_street["progress_eff"] == pytest.approx(0.98)
+    assert open_street["straight_bonus"] > 0.0
+    away = path_shaping_terms(
+        np.array([-1.0, 0.0, 0.0, 0.0]),
+        goal,
+        -0.5,
+        clearance_m=4.5,
+        cfg=cfg,
+    )
+    assert away["progress_eff"] <= 0.0
 

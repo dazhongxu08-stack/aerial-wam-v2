@@ -142,7 +142,7 @@ def ok_imagine(p):
   useful=v.get("useful") if isinstance(v,dict) else False
   return bool(useful) or (gap is not None and float(gap)>=0.05)
 g1=ok_gate(out/"R1_gate_v2.json") or ok_gate(out/"R1_gate.json")
-c1=ok_cone(out/"R1_cone_rank_v2.json") or ok_cone(out/"R1_cone_rank.json") or ok_cone(out/"R4_cone_rank_on_R1.json")
+c1=ok_cone(out/"R1_cone_rank_v2.json") or ok_cone(out/"R1_cone_rank.json") or ok_cone(out/"cone_pass_rank.json") or ok_cone(out/"R4_cone_rank_on_R1.json")
 p3=ok_probe(out/"R3_latent_probe_three_zone_v2.json") or ok_probe(out/"R3_latent_probe_three_zone.json")
 p4=ok_probe(out/"R4_latent_probe_three_zone.json")
 im=ok_imagine(out/"R4_imagine_coll_rank.json")

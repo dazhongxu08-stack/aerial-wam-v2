@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 from experiments.aerial.rl.subgoal_generator import (
+    hold_carrot_before_bend,
     project_to_polyline,
     sample_point_along_polyline,
     AdaptiveSubgoalGenerator,
@@ -117,6 +118,29 @@ def test_heading_peel_shrinks_lookahead_before_cte_grows():
     assert info_peel["r_lookahead"] < info_ok["r_lookahead"]
     # Peeled: carrot should have large body-lateral vs forward-aligned case
     assert abs(float(g_peel[1])) > abs(float(g_aligned[1])) + 5.0
+
+
+def test_carrot_stays_on_the_inbound_leg_until_the_bend_is_close():
+    path = np.array(
+        [[0.0, 0.0, 10.0], [40.0, 0.0, 10.0], [40.0, 80.0, 10.0]],
+        dtype=np.float64,
+    )
+    generator = AdaptiveSubgoalGenerator(r_base=25.0, r_min=15.0, cruise_speed=8.0)
+    _, early = generator.compute_subgoal(
+        np.array([20.0, 0.0, 10.0]), 0.0, path, d_fwd_hat=30.0
+    )
+    # 20 m before the corner: carrot stays on the inbound leg.
+    early_tw = np.asarray(early["target_world"], dtype=np.float64)
+    assert early_tw[0] <= 40.0 + 1e-6
+    assert abs(early_tw[1]) < 1.0
+    _, late = generator.compute_subgoal(
+        np.array([36.0, 0.0, 10.0]), 0.0, path, d_fwd_hat=30.0
+    )
+    # 4 m before the corner: carrot is released onto the exit leg.
+    late_tw = np.asarray(late["target_world"], dtype=np.float64)
+    assert late_tw[1] > 8.0
+    assert hold_carrot_before_bend(path, 20.0, 25.0) == pytest.approx(20.0)
+    assert hold_carrot_before_bend(path, 36.0, 25.0) == pytest.approx(16.0)
 
 
 def test_adaptive_subgoal_generator_tight_turn_and_obstacle():

@@ -1,0 +1,33 @@
+# V1/V2 · B curiosity-only（2026-09-25）：对准侧向稠密；press/center=0。
+# 相对已证伪 B1（仅 center）与 A 系：只开 curiosity。
+reward:
+  w_progress: 2.0
+  w_collision: 2.0
+  success_bonus: 15.0
+  success_dist_m: 3.0
+  w_maneuver: 0.01
+  w_intervention: 0.0
+  w_press_wall: 0.0
+  w_clearance_center: 0.0
+  w_curiosity: 0.4
+  curiosity_fwd_thresh_m: 5.0
+  curiosity_max_bonus: 1.5
+  w_straight: 0.0
+  w_idle_body: 0.0
+  w_away: 1.0
+  w_level_flight: 0.0
+  w_backward: 5.0
+  w_descent: 1.5
+  w_eff_strafe: 0.0
+  w_eff_heading: 0.0
+  w_eff_idle: 0.0
+  forbid_backward_motion: true
+  gate_progress_by_heading: true
+  use_learned_obstacle_cost: true
+  blend_clearance_risk: true
+
+planner:
+  enable: false
+
+safety:
+  kind: null

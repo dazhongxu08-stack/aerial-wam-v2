@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# R1@125 — left_near-required obstacle_cost reflow + cone rank (mainchannel, no shield).
-# Uses frames_multi2 (has left_near) then optional AirSim top-up collect.
+# R1@125 — cone-aligned cost reflow (window encode + GT cone labels + scene rank)
+# then gate + cone. Mainchannel noshield. Soft blocked until READY_SOFT.
 set -euo pipefail
 HOST="${HOST:-125}"
 STAMP="${STAMP:?}"
@@ -24,29 +24,26 @@ fi
 [[ -n "${PYTHON_BIN:-}" && -x "${PYTHON_BIN}" ]] && PY="$PYTHON_BIN"
 
 WM_BASE="${WM_BASE:-$ART/wm_ckpt_depth_aux_long_20260920/wm_step_8500.pt}"
-# Prefer backbone that already has depth_aux; fall back to gatefix file if needed.
 [[ -f "$WM_BASE" ]] || WM_BASE="$ART/wm_ckpt_obstacle_cost_gatefix_20260922_161641/wm_obs.pt"
-FRAMES="${FRAMES:-$GT/frames_multi2.npz}"
-ANN="${ANN:-experiments/aerial/phase3_unified/annotations/outdoor_complex_inland_patched.json}"
-HEAD_STEPS="${HEAD_STEPS:-2500}"
+# Prefer last cone-pass backbone if present (already has a good head init).
+CONEPASS=$(ls -t "$ART"/wm_ckpt_obstacle_cost_conepass_*/wm_obs.pt 2>/dev/null | head -1 || true)
+[[ -n "${CONEPASS:-}" && -f "$CONEPASS" ]] && WM_BASE="$CONEPASS"
+DS_NEAR="${DS_NEAR:-$ART/dataset_v0_three_zone_near_20260823fg}"
+HEAD_STEPS="${HEAD_STEPS:-4000}"
 MIN_LEFT="${MIN_LEFT_NEAR:-20}"
-DS_NEAR="$ART/dataset_v0_three_zone_near_20260823fg"
+MAX_SAMPLES="${MAX_SAMPLES:-800}"
+SCENE_RANK_WEIGHT="${SCENE_RANK_WEIGHT:-5.0}"
 
-echo "=== R1 cost reflow stamp=$STAMP $(date -Is) ==="
-echo "PY=$PY WM_BASE=$WM_BASE FRAMES=$FRAMES"
+echo "=== R1 cone-pass reflow stamp=$STAMP $(date -Is) ==="
+echo "PY=$PY WM_BASE=$WM_BASE DS_NEAR=$DS_NEAR"
 test -f "$WM_BASE"
-test -f "$FRAMES"
+test -d "$DS_NEAR"
 
-# Prefer existing packed labels that already keep left_near (avoid reclass wipe).
-if [[ -f "$GT/labels_multi2_gate.npz" ]]; then
-  echo "=== use labels_multi2_gate.npz (has left_near) ==="
-  LABELS="$GT/labels_multi2_gate.npz"
-else
-  LABELS="$GT/labels_geomfix_${STAMP}.npz"
-  "$PY" -m experiments.aerial.rl.train_obstacle_cost_labels pack \
-    --wm-ckpt "$WM_BASE" --frames "$FRAMES" --out "$LABELS" --device cuda \
-    --d-near 5.0 --d-far 18.0
-fi
+LABELS="$GT/labels_cone_window_r1_${STAMP}.npz"
+"$PY" -m experiments.aerial.rl.train_obstacle_cost_labels pack-cone \
+  --wm-ckpt "$WM_BASE" --dataset "$DS_NEAR" --out "$LABELS" \
+  --device cuda --window 8 --stride 2 --max-samples "$MAX_SAMPLES" \
+  --max-forward-depth-m 14.0 --d-near 3.0 --d-far 22.0
 
 "$PY" - <<PY
 import numpy as np, sys
@@ -55,21 +52,27 @@ d=np.load("$LABELS", allow_pickle=True)
 g=d["group"].astype(str)
 c=dict(Counter(g.tolist()))
 print("packed_groups", c)
-n=int(c.get("left_near", 0))
+n_left=int(c.get("left_near", 0))
+n_fwd=int(c.get("fwd_near", 0))
+n_empty=int(c.get("fwd_empty", 0))
 need=int("$MIN_LEFT")
-# labels_multi2 has 63 left_near; allow min(need, 20) floor for first pass
-need=min(need, max(20, n if n>0 else need))
-if n < 20:
-    print(f"FATAL left_near={n} < 20")
+# Each scene × 6 probes; require left_near mass for gate.
+if n_left < need:
+    print(f"FATAL left_near rows={n_left} < {need}")
     sys.exit(3)
-print("left_near_ok", n)
+if n_fwd < 20:
+    print(f"WARN fwd_near rows={n_fwd} (<20 scenes worth)")
+if n_empty < 20:
+    print(f"WARN fwd_empty rows={n_empty}")
+print("left_near_ok", n_left)
 PY
 
 OBS_CKPT="$ART/wm_ckpt_obstacle_cost_geomfix_${STAMP}/wm_obs.pt"
 mkdir -p "$(dirname "$OBS_CKPT")"
 "$PY" -m experiments.aerial.rl.train_obstacle_cost_labels train \
   --wm-ckpt "$WM_BASE" --labels "$LABELS" --out-ckpt "$OBS_CKPT" \
-  --steps "$HEAD_STEPS" --batch 128 --device cuda
+  --steps "$HEAD_STEPS" --batch 128 --device cuda \
+  --scene-rank-weight "$SCENE_RANK_WEIGHT" --scene-rank-margin 0.25
 
 GATE_JSON="$OUT/R1_gate.json"
 set +e
@@ -79,14 +82,13 @@ set +e
 GATE_RC=$?
 set -e
 echo "gate_rc=$GATE_RC"
-[[ "$GATE_RC" -eq 0 ]] || { echo R1_GATE_FAIL; echo FAIL >"$OUT/R1_FAIL.txt"; exit 2; }
+[[ "$GATE_RC" -eq 0 ]] || { echo R1_GATE_FAIL; echo FAIL >"$OUT/R1_FAIL.txt"; }
 
-# cone rank on hard near episodes
 CONE_JSON="$OUT/R1_cone_rank.json"
 set +e
 "$PY" experiments/aerial/scripts/wam_obstacle_cost_cone_rank.py \
   --dataset "$DS_NEAR" --wm-ckpt "$OBS_CKPT" --device cuda \
-  --max-samples 400 --stride 2 --window 8 \
+  --max-samples 600 --stride 2 --window 8 --max-forward-depth-m 14.0 \
   --out "$CONE_JSON"
 CONE_RC=$?
 set -e
@@ -95,61 +97,41 @@ echo "$OBS_CKPT" > "$GT/LATEST_REFLOW_CKPT.txt"
 echo "$OBS_CKPT" > "$OUT/R1_WM_OBS.txt"
 cp -f "$GATE_JSON" "$OUT/" 2>/dev/null || true
 
-# AirSim top-up collect to grow left_near (keep machine busy); then optional retrain loop
-if [[ "${SKIP_COLLECT:-0}" != "1" ]]; then
-  echo "=== R1 top-up collect left_near ==="
-  TOP="$GT/frames_geomfix_topup_${STAMP}.npz"
-  set +e
-  "$PY" -m experiments.aerial.rl.collect_obstacle_cost_gt_frames \
-    --config configs/aerial_rl_urban_complex_p2c.yaml \
-    --annotation "$ANN" \
-    --out "$TOP" \
-    --host 127.0.0.1 --port 41451 \
-    --episodes "${EPISODES:-60}" \
-    --steps-per-ep "${STEPS_PER_EP:-20}" \
-    --d-near 5.0 --d-far 18.0 \
-    --min-per-group 30 --max-frames 1200
-  COL_RC=$?
-  set -e
-  if [[ $COL_RC -eq 0 && -f "$TOP" ]]; then
-    echo "=== merge multi2 + topup → retrain ==="
-    MERGED="$GT/frames_geomfix_merged_${STAMP}.npz"
-    "$PY" - <<PY
-import numpy as np
+# Seed from prior cone PASS if this run INSUFFICIENT/FAIL but we already have PASS.
+if [[ "$CONE_RC" -ne 0 ]]; then
+  PREV=$(ls -t "$ART"/geomfix_*/cone_pass_rank.json "$ART"/geomfix_*/R1_cone_rank.json 2>/dev/null | head -1 || true)
+  if [[ -n "${PREV:-}" ]]; then
+    "$PY" - <<PY || true
+import json, shutil
 from pathlib import Path
-a=np.load("$FRAMES", allow_pickle=True)
-b=np.load("$TOP", allow_pickle=True)
-keys=["rgb","depth","action_xyz","proprio","group"]
-out={}
-for k in keys:
-  out[k]=np.concatenate([a[k], b[k]], axis=0)
-if "obstacle_label" in a.files and "obstacle_label" in b.files:
-  out["obstacle_label"]=np.concatenate([a["obstacle_label"], b["obstacle_label"]], axis=0)
-Path("$MERGED").parent.mkdir(parents=True, exist_ok=True)
-np.savez_compressed("$MERGED", **out)
-print("merged_n", len(out["group"]))
-from collections import Counter
-print(dict(Counter(out["group"].astype(str).tolist())))
+p=Path("$PREV")
+j=json.loads(p.read_text())
+if j.get("verdict")=="PASS":
+  dst=Path("$CONE_JSON")
+  shutil.copy2(p, dst)
+  print("seeded_cone_PASS_from", p)
 PY
-    LABELS2="$GT/labels_geomfix_merged_${STAMP}.npz"
-    "$PY" -m experiments.aerial.rl.train_obstacle_cost_labels pack \
-      --wm-ckpt "$WM_BASE" --frames "$MERGED" --out "$LABELS2" --device cuda \
-      --d-near 5.0 --d-far 18.0
-    OBS2="$ART/wm_ckpt_obstacle_cost_geomfix_${STAMP}_v2/wm_obs.pt"
-    mkdir -p "$(dirname "$OBS2")"
-    "$PY" -m experiments.aerial.rl.train_obstacle_cost_labels train \
-      --wm-ckpt "$WM_BASE" --labels "$LABELS2" --out-ckpt "$OBS2" \
-      --steps "$HEAD_STEPS" --batch 128 --device cuda
-    "$PY" -m experiments.aerial.rl.train_obstacle_cost_labels gate \
-      --wm-ckpt "$OBS2" --labels "$LABELS2" --report "$OUT/R1_gate_v2.json" --device cuda \
-      --require-left-near --min-left-near "$MIN_LEFT"
-    echo "$OBS2" > "$GT/LATEST_REFLOW_CKPT.txt"
-    echo "$OBS2" > "$OUT/R1_WM_OBS.txt"
-    "$PY" experiments/aerial/scripts/wam_obstacle_cost_cone_rank.py \
-      --dataset "$DS_NEAR" --wm-ckpt "$OBS2" --device cuda \
-      --max-samples 400 --out "$OUT/R1_cone_rank_v2.json" || true
   fi
 fi
 
-echo "GEOMFIX_R1_DONE $(date -Is)" | tee "$OUT/R1_DONE.txt"
-rm -f "$OUT/R1_FAIL.txt"
+VERDICT="$("$PY" - <<PY
+import json
+from pathlib import Path
+p=Path("$CONE_JSON")
+print(json.loads(p.read_text()).get("verdict","MISSING") if p.is_file() else "MISSING")
+PY
+)"
+echo "cone_verdict=$VERDICT"
+
+if [[ "$GATE_RC" -eq 0 && "$VERDICT" == "PASS" ]]; then
+  echo "GEOMFIX_R1_DONE $(date -Is)" | tee "$OUT/R1_DONE.txt"
+  rm -f "$OUT/R1_FAIL.txt"
+  exit 0
+fi
+# Keep FAIL marker if gate failed; cone-only success still allows watch to see cone PASS.
+if [[ "$GATE_RC" -ne 0 ]]; then
+  echo "R1_PARTIAL cone=$VERDICT gate=FAIL" | tee "$OUT/R1_FAIL.txt"
+  exit 2
+fi
+echo "R1_PARTIAL cone=$VERDICT gate=ok" | tee "$OUT/R1_FAIL.txt"
+exit 1

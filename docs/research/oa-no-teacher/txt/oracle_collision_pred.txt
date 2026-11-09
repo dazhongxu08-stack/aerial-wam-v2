@@ -1,0 +1,786 @@
+Motion Primitives-based Navigation Planning
+using Deep Collision Prediction
+Huan Nguyen, Sondre Holm Fyhn, Paolo De Petris, and Kostas Alexis
+Abstract— This paper contributes a method to design a
+novel navigation planner exploiting a learning-based collision
+prediction network. The neural network is tasked to predict the
+collision cost of each action sequence in a predeﬁned motion
+primitives library in the robot’s velocity-steering angle space,
+given only the current depth image and the estimated linear
+and angular velocities of the robot. Furthermore, we account
+for the uncertainty of the robot’s partial state by utilizing the
+Unscented Transform and the uncertainty of the neural network
+model by using Monte Carlo dropout. The uncertainty-aware
+collision cost is then combined with the goal direction given by
+a global planner in order to determine the best action sequence
+to execute in a receding horizon manner. To demonstrate the
+method, we develop a resilient small ﬂying robot integrating
+lightweight sensing and computing resources. A set of simu-
+lation and experimental studies, including a ﬁeld deployment,
+in both cluttered and perceptually-challenging environments is
+conducted to evaluate the quality of the prediction network and
+the performance of the proposed planner.
+I. INTRODUCTION
+Recent advances in the ﬁeld of aerial robotics have enabled
+their utilization in various applications including industrial
+inspection [1, 2], search and rescue [3], surveillance [4],
+subterranean exploration [5], and more. Despite the progress,
+the task of autonomous navigation in complex, perceptually-
+degraded environments, such as obstacle-ﬁlled industrial
+settings, and underground mines remains particularly chal-
+lenging. In such settings, the underlying robot localization
+and mapping may be subject to signiﬁcant uncertainty and
+drift [6–8], and requires high computational cost [9], while
+consistent high-resolution mapping can be particularly de-
+manding. In this context, ensuring collision-free navigation
+can be a gruelling task and remains an open problem.
+In this work, we aim to take a different approach to
+allow safe navigation of aerial robots by departing from the
+classical techniques that require a continuously maintained
+and updated map of the environment within which the robot
+localizes [10]. Employing a data-driven approach to allow
+collision-free navigation without explicit map building and
+an accurate estimate of the robot’s position, we propose a
+local mOtion pRimitives-bAsed navigation planner using a
+deep CoLlision prEdictor (ORACLE) that further accounts
+for the goal direction provided by a global planner. The
+collision predictor is a deep neural network taking as inputs
+the current depth image, estimated linear and angular veloc-
+ities and associated covariance, as well as action sequences
+This material was supported by Research Council of Norway under
+project SENTIENT (grant number 321435).
+The authors are with the Autonomous Robots Lab, Norwegian University
+of Science and Technology (NTNU), O. S. Bragstads Plass 2D, 7034,
+Trondheim, Norway dinh.h.nguyen@ntnu.no
+Fig. 1. Instances of experimental evaluation of the proposed motion
+primitives-based planner using a deep collision predictor.
+from a ﬁxed motion primitives library based on forward
+velocity and steering angle commands. It evaluates - in
+parallel - the collision probability for each action sequence,
+based on which the safest motion primitives are chosen
+and the corresponding goal-reaching costs are calculated to
+determine the best action in a receding horizon fashion.
+The proposed approach was experimentally evaluated
+in two unseen real-life environments, while the complete
+method was designed and trained purely in simulation. As a
+testbed for our learning-based navigation policy, we devel-
+oped a new collision-tolerant aerial robot, called Learning-
+based Micro Flyer (LMF). LMF integrates a lightweight,
+and low-cost sensor suite including an Intel Realsense D455
+RGB-D sensor, an Intel Realsense T265 visual-inertial mod-
+ule, and a 1D range sensor, as well as an autopilot, and an
+NVIDIA Xavier NX CPU/GPU board. The ﬁrst experiment
+was conducted within obstacle-ﬁlled building corridors and
+aimed to verify the ability of the method to avoid novel
+obstacles, while navigating using goal directions commanded
+by a global planner. The second experiment was carried
+out in an underground mine environment near Trondheim,
+Norway, demonstrating the ability of the robot to safely
+navigate in a narrow, relatively dark environment that can
+lead to high uncertainty in visual-inertial estimation.
+The remainder of this paper is organized as follows:
+Section II presents related work, followed by the problem
+statement in Section III. The proposed learning-based naviga-
+tion policy is presented in Section IV. Evaluation studies are
+detailed in Section V, followed by conclusions in Section VI.
+arXiv:2201.03254v3  [cs.RO]  8 May 2022
+II. RELATED WORK
+A set of contributions in a) planning with neural networks,
+b) planning under uncertainty and modeling uncertainty in
+deep neural networks, and c) planning with motion primitives
+relate to this work.
+A. Planning with Neural Networks
+A set of works have applied deep learning to the problem
+of autonomous robot navigation. Speciﬁcally, the problem
+of navigation with RGB and depth cameras has attracted
+increased attention as these sensors are low-cost, low-power
+and lightweight. The authors in [11, 12] use supervised learn-
+ing, while the work in [13] utilizes reinforcement learning
+and domain randomization with RGB image inputs to learn
+reactive navigation policies. While the robot’s state is often
+available for the low-level control, these works do not utilize
+the current estimated state of the robot to make predictions
+although this can lead to better performance. On the other
+hand, the authors in [14] use the current robot’s linear and
+angular velocities in addition to the latest camera frame to
+generate position setpoints. However, position feedback is
+not always available or reliable, especially in perceptually
+degraded environments [6]. Neural networks are used in [15]
+and [16] to predict probabilities of events such as collisions,
+going over bumpy terrain, or human disengagement. Never-
+theless, their action library does not explicitly account for
+the limited Field Of View (FOV) of RGB sensors, and com-
+bining goal-reaching and collision-avoidance rewards into
+one reward function may not lead to safe behaviour when
+the goal-reaching reward outweighs the collision-avoidance
+reward. Other works utilize the depth image as an input,
+which is also employed in our work, either by using the
+latest data [17], or a sliding window of depth images [18].
+However, these works do not account for the uncertainty in
+the estimated state of the robot and the neural network model.
+B. Planning under Uncertainty and Modeling Uncertainty in
+Deep Learning
+Modeling uncertainty is essential to achieve safe planning
+in environments where the state of the robot is highly un-
+certain [19]. Moreover, when using deep neural networks for
+making predictions, there are two kinds of uncertainty that
+need to be considered: aleatoric uncertainty which captures
+noise inherent in the observations, and epistemic uncertainty
+which accounts for model uncertainty [20]. Most existing
+works applying deep neural networks for autonomous nav-
+igation account for epistemic uncertainty only, for instance
+by using autoencoders [21], dropout and bootstrap [22, 23].
+One of the exceptions is [24] which accounts for both
+uncertainty in the sensor observations and model uncertainty.
+However, the method for propagating aleatoric uncertainty
+through sigmoid and tanh activation layers, which are usually
+used in recurrent neural networks, is not presented. In this
+work, we approximately propagate the robot’s state uncer-
+tainty through the prediction network using the Unscented
+Transform (UT) [25] as in [26], and use Monte Carlo (MC)
+dropout [27, 28] to account for the model uncertainty.
+C. Planning with Motion Primitives
+A motion primitives library [29] can be generated by either
+sampling the vehicle’s conﬁguration space or its control
+space [30]. Depending on what type of low-level controller
+is implemented, control space primitives for multirotors can
+be generated by sampling jerk [31], acceleration [32, 33], or
+other input signals. The authors in [34] use conﬁguration
+space primitives proposed in [35] to generate minimum-jerk
+primitives online, however, position feedback is required and
+not all generated trajectories are guaranteed to lie within
+the sensor’s FOV . Our work follows approaches like those
+proposed in [36, 37] to sample the desired speed and steering
+angle, where possible steering angles are uniformly sampled
+from within the FOV .
+III. PROBLEM FORMULATION
+The broader problem considered in this work is that of
+autonomous collision-free aerial robot navigation assuming
+no access to the maps of the environment (from ofﬂine data
+or online reconstruction) and no information for the robot
+position but only a partial state estimate of the robot’s orien-
+tation and linear/angular velocities combined with real-time
+depth data within an angle- and range-constrained sensor
+frustum. We assume that there is a global planner providing
+goal directions to the robot (e.g., for exploration), possibly
+by having access to a topological map of the environment,
+and focus on designing a local safe navigation planner to
+avoid obstacles while following the goal directions. LetB be
+the body frame of the robot, ot be the current depth image,
+st (st = [vt,ωt]T ) the estimated partial state of the robot
+including the forward velocity in B (vt) and the angular
+velocity around z-axis of B (ωt), Σt = diag([σ2
+v,t, Σ2
+ω,t])
+the covariance of the estimated robot’s partial state, ψg
+t
+the goal heading direction given by the global planner,
+and at:t+H = [ at,at+1,...,a t+H−1] an action sequence
+having length H where the action at time step t +i (i =
+0,...,H −1) includes the reference forward speed vr
+t+i and
+the steering angle from the current yaw angle of the robot
+ψr
+t+i (at+i = [vr
+t+i,ψr
+t+i]T ). The exact problem considered
+is then formulated as that of ﬁnding an optimized collision-
+free sequence of actions at:t+H enabling the robot to safely
+move towards the goal direction ψg
+t given (ot,st, Σt).
+IV. PROPOSED APPROACH
+The proposed mOtion pRimitives-bAsed navigation plan-
+ner using a deep CoLlision prEdictor (ORACLE) is detailed
+in this section. Assuming only access to estimates of the
+robot’s linear and angular velocities, alongside the depth
+image, ORACLE identiﬁes the next best sequence of actions
+(velocity-steering commands) that ensure that the system is
+navigating towards a goal heading direction, while avoiding
+the obstacles in its environment. The ﬁrst action of this se-
+quence is executed by the robot, while the process continues
+iteratively. Importantly, the “global” goal direction may be
+provided by any global planner thus allowing ORACLE to be
+combined with any high level planning framework. Figure 2
+provides an overview of the method’s architecture.
+Fig. 2. Overview of the algorithmic architecture of ORACLE.
+A. Velocity-Steering Angle Motion Primitives Library
+In this work, each candidate action sequence is a time
+sequence of velocity and steering commands derived from
+a predeﬁned Motion Primitives Library (MPL) and has
+ﬁxed forward speed and ﬁxed steering angle sampled within
+the FOV of the depth sensor for every time step vr
+t+i =
+vr,ψr
+t+i = ψr (i = 0,...,H − 1). Speciﬁcally, we denote
+ak
+t:t+H as the kth action sequence in the MPL. Each planned
+sequence is such that it guarantees that the trajectories always
+lie in the FOV of the sensor. As a notable distinction to other
+MPL-based methods, the planned sequences do not include
+the robot’s position space but remain in velocity/steering
+angle space as the underlying assumption is that ORACLE
+does not have access to a position estimate.
+B. Learning-based Collision Prediction Network (CPN)
+At the core of ORACLE is a neural network that processes
+a) the input depth imageot, b) the robot’s partial statest, and
+c) motion primitives-based sequences of future velocity and
+steering angle references at:t+H, and is trained to predict the
+collision probabilities of the anticipated robot motion at each
+time step from t + 1 to t +H in the future ˆccol
+t+1:t+H+1 =
+[ˆccol
+t+1, ˆccol
+t+2,..., ˆccol
+t+H] by entirely using collision data in sim-
+ulation. Thus, ORACLE avoids the need for hand-engineered
+collision checking algorithms such as [34, 38] or access to a
+reconstructed map of the environment [39, 40].
+Since real-life depth images are often subject to several
+shortcomings compared to simulated data, including a) miss-
+ing information, b) loss of detail, and c) depth noise [18],
+we perform an additional ﬁltering step using the IP-Basic
+algorithm [41] to reﬁne the depth frame and thus reduce
+the mismatch between the real and simulated depth images.
+The collision costs for every action sequence in the motion
+primitives library of velocity-steering commands can then
+be evaluated in parallel as per [42] exploiting modern GPU
+architectures and thus enabling high update rate compute.
+Notably, when evaluating the collision costs, ORACLE does
+not only consider the mean estimate of the robot’s partial
+state but also the estimated uncertainty, as well as the
+uncertainty in the neural network model.
+In further detail, the ﬁltered depth image o′
+t of size
+270× 480 is processed by a Convolutional Neural Network
+(CNN) branch, while the estimated partial state of the robot
+is processed by a Fully-Connected (FC) network before
+concatenating it with the output feature vector from the CNN
+branch. The concatenated vector is then fed to another FC
+network before being used as the initial hidden state of a
+Long Short-Term Memory (LSTM) network. The input to the
+LSTM cells is generated by the velocity-steering angle action
+sequence provided by the motion primitives library, while the
+outputs of the LSTM cells are passed through a FC network
+to predict the collision label at each time step. The prediction
+network architecture, shown in Figure 3, is inspired by the
+network in [16]. However, we replace the MobileNetV2 part
+with the ResNet8 network with dropout layers as in [12]
+for faster inference speed and model uncertainty estimation
+using MC dropout as in [28]. For the type of training
+considered, typically there are more negative (non-collision)
+labels than positive (collision) labels in the dataset. Hence,
+we use a higher weight for positive labels to ensure high
+recall which leads to a safer behaviour. The network is
+trained end-to-end with weighted binary cross-entropy loss
+using the Adam optimizer.
+Fig. 3. Architecture of the Collision Prediction Network (CPN).
+C. Uncertainty-aware Prediction
+As mentioned, ORACLE further considers the uncertainty
+of the robot’s partial state and the model uncertainty of the
+collision prediction network. First, we calculate the ﬁnal col-
+lision cost for each action sequence in the motion primitives
+library as the weighted sum of the collision probabilities at
+each time step. Speciﬁcally, the sooner the collision event is
+predicted to happen, the more it will contribute to the ﬁnal
+collision cost:
+ˆccol =
+H∑
+i=1
+ˆccol
+t+ie−λ(i−1), λ> 0 (1)
+To account for the uncertainty of st, which cannot be
+negligible - especially in fast ﬂight or within perceptually
+degraded environments - we utilize the Unscented Transform
+(UT) [25] to approximately propagate the uncertainty inst to
+the predicted collision cost ˆccol of an action sequenceat:t+H.
+In the UT, for a k-dimensional robot state, NΣ = 2k + 1
+sigma points, and their associated weights, are computed
+based on the mean value st and covariance Σt. These sigma
+points are then propagated though the CPN, and the mean
+and variance of the output distribution of ˆccol are calculated
+based on the output predictions of the sigma points.
+Additionally, the model uncertainty - which can be signif-
+icant in novel environments - can be captured by performing
+MC dropout for the network as in [28]. For efﬁcient neural
+network forward pass and uncertainty estimation, we only
+perform MC dropout in the CNN branch and split the neural
+network shown in Figure 3 into 3 parts, namely the CNN,
+Combiner, and Prediction networks. Let a) NMC,NMP be
+the number of dropout masks and action sequences in the
+MPL, respectively, and b) σcol
+n ,µcol
+n (n = 1,...,N MC ) the
+variance and mean of the predicted collision cost of at:t+H,
+estimated by the UT with different dropout masks of the
+CNN part. The total variance can then be expressed as:
+σcol
+tot = 1
+NMC
+NM C∑
+n=1
+[
+σcol
+n + (µcol
+n − ¯µcol)2]
+(2)
+where ¯µcol = 1
+NM C
+∑NM C
+n=1 µcol
+n . The ﬁnal uncertainty-aware
+collision cost for an action sequence is given as:
+ˆcuac = ¯µcol +α
+√
+σcol
+tot, α> 0 (3)
+Speciﬁcally, we denote ˆcuac
+k as the uncertainty-aware col-
+lision cost of the kth action sequence ak
+t:t+H in the MPL
+(k = 1,...,N MP ). By splitting the prediction network into
+3 parts, we can perform inference on the ensemble of CNNs,
+the Combiner and Prediction networks with different batch
+sizes of 1, NMC×NΣ, andNMC×NΣ×NMP , respectively,
+avoiding the need to run the forward passes through the
+whole CPN NMC×NΣ×NMP times.
+D. Learning-based Navigation Policy
+After calculating the uncertainty-aware predicted collision
+cost for each action sequence in the motion primitives library,
+as described in section IV-C, the minimum collision cost
+ˆcuac
+min of all action sequences is calculated, and all the action
+sequences having collision cost greater than ˆcuac
+min + cth,
+where cth is a set positive threshold, are discarded. The
+remaining action sequences are checked for deviation from
+the global planner’s goal direction ψg
+t :
+cgoal =|wrap(ψr +ψt−ψg
+t )| (4)
+where ψt is the current yaw angle of the robot and wrap (.)
+is the function that wraps an angle in radians to [−π,π ]. The
+best action sequence is chosen and its ﬁrst step is executed,
+while the whole procedure is repeated in a receding horizon
+fashion. Algorithm 1 outlines ORACLE’s key steps.
+Algorithm 1 ORACLE Navigation Planner
+1: st, Σt← Get robot’s partial state and covariance
+2: mi (i = 1,...,N Σ)← sigma points given by UT
+3: o′
+t← Get ﬁltered depth image
+4: forn = 1 to NMC do
+5: CPNn← Apply dropout mask n to CPN
+6: forat:t+H in MPL do
+7: fori = 1 to NΣ do
+8: // Parallel evaluation in GPU
+9: ˆccol
+t+1:t+H+1←CPNn(o′
+t,mi,at:t+H)
+10: Calculate ˆccol by Eq. (1)
+11: end for
+12: Calculate σcol
+n ,µcol
+n by UT on {ˆccol}NΣ×1
+13: end for
+14: end for
+15: forat:t+H in MPL do
+16: Calculate ˆcuac by Eq. (2), (3)
+17: end for
+18: ˆcuac
+min← mink=1,...,NM P{ˆcuac
+k }
+19: forat:t+H in MPL having ˆcuac < ˆcuac
+min +cth do
+20: Calculate cgoal by Eq. (4)
+21: end for
+22: Choose a∗
+t:t+H in MPL having the smallest cgoal
+23: Execute the ﬁrst action a∗
+t then go to step 1
+E. Implementation Details and Data Collection
+The RotorS simulator [43] is used to collect data for
+training the collision predictor network. To ensure successful
+sim-to-real transfer, the dynamics of the low-level attitude
+and velocity controllers of the quadrotor model used in the
+simulator are tuned to match the real system. Relevant meth-
+ods for dynamic system identiﬁcation of MA Vs are presented
+in [44]. To collect data for predicting collision probabilities at
+the future time steps, an action sequence with random vr and
+ψr within the sensor’s FOV is drawn and is fully executed.
+This process is repeated until the robot collides with the
+obstacles or a timeout event occurs. One training data point
+d is recorded every time the robot moves more than ∆th
+meters, having the format d = (ot,st,at:t+H,ccol
+t+1:t+H+1)
+where ccol
+t+1:t+H+1 = [ccol
+t+1,ccol
+t+2,...,c col
+t+H], ccol
+t+i denotes
+the collision label at time step t +i, i = 1,...,H (equal
+to 1 for collision and 0 for non-collision status). When the
+collision happens midway an action sequence, for instance
+after the execution ofat+k (k≤H), then the collision labels
+of the remaining time steps ccol
+t+k+1:t+H are set to 1, and
+augmented data points are also added to the dataset by replac-
+ing the actions after at+k with randomly sampled actions as
+in [16]. The number of data points created by augmenting the
+remaining actions is such that the number of data points with
+no collision label and the number of data points with at least
+one collision label are almost equal. Moreover, given that
+the robot dynamics are holonomic and effectively invariant
+to its heading orientation, we also perform horizontal ﬂip
+data augmentation, speciﬁcally by adding the augmented data
+point dflip = (oflip
+t ,sflip
+t ,aflip
+t:t+H,ccol
+t+1:t+H+1), where oflip
+t
+is the horizontally ﬂipped image of ot, sflip
+t and aflip
+t:t+H
+are created by changing the sign of ωt and ψr
+t+i (i =
+0,...,H − 1) in st and at:t+H, respectively.
+In order to collect a comprehensive dataset for training the
+collision predictor, we randomized the initial position and
+orientation of the robot, as well as the obstacles’ locations,
+categories, dimensions, and densities in order to collect
+around 1.5 million data points in total, Figure 4.i illustrates
+one indicative training environment. The derived dataset was
+then split into a training and validation subset. Notably, a
+particular limitation of the depth sensor used in real-life was
+taken into account. Speciﬁcally, to tackle the problem that
+depth cameras often present gaps in depth data when facing a
+reﬂective surface [45], we designed artiﬁcial obstacles having
+holes with sizes that could “just” ﬁt our ﬂying robot, or
+smaller, to enhance the trained network’s tendency to avoid
+such extremely narrow or erroneously detected “passages”.
+After training, the CPN achieves a prediction accuracy of
+98.15%, precision of 98.3% and recall of 97.4% on the
+validation dataset. A page with further details is maintained
+at https://s.ntnu.no/oracle.
+V. EVALUATION STUDIES
+A set of evaluation studies were then conducted to verify
+the proposed learning-based navigation planner.
+Fig. 4. i) Indicative simulation environments for collecting training data,
+ii,iii) environments for simulation studies evaluating ORACLE.
+A. Simulation Studies
+To evaluate ORACLE’s ability to negotiate novel environ-
+ments in combination with highly degraded state estimates,
+we conducted simulation studies and compare it with a more
+“naive” version which utilizes the CPN directly to calculate
+the collision cost without considering the uncertainty of st or
+that of the neural network model as in [15]. Accordingly, the
+naive planner is not using the UT samples and the ensemble
+of NNs (cf. Figure 2). Two environments are created to
+verify the method’s performance, namely a) environment A
+(Figure 4.ii) that contains obstacles seen during the training
+phase and the robot is given perfect state estimation, while
+b) environment B (Figure 4.iii) contains unseen obstacles
+and the robot is given largely deteriorated state estimation
+sdet
+t = [vdet
+t , ωdet
+t ]T (speciﬁcallyvdet
+t =vt−1.0m/s, ωdet
+t =
+ωt + 0.1rad/s). Both ORACLE and the naive planner are
+deployed in each environment 20 times with different initial
+conditions of the robot, a timeout period of 100 seconds,
+and reference forward velocity 1.25m/s. The total number of
+collisions, and the average ﬂight time before a collision are
+reported in Table I. Both planners perform well in environ-
+ment A with the average ﬂight times almost equal to the
+timeout period. However, the uncertainty-aware ORACLE
+signiﬁcantly outperforms the naive planner in environment
+B where uncertainty-aware collision prediction is essential.
+TABLE I
+SIMULATION RESULTS .
+Environment Planner Collisions Average
+ﬂight time
+A: Seen obstacles Naive 0/20 100s
++ perfect state Uncertainty-aware 0/20 100s
+B: Novel obstacles Naive 20/20 25.9s
++ deteriorated state Uncertainty-aware 10/20 62.9s
+B. Experimental Studies
+Two real-life experiments were conducted using the LMF
+platform to evaluate the performance of ORACLE.
+Fig. 5. Main hardware components onboard LMF.
+1) System Overview: LMF inherited the collision-tolerant
+design of the Resilient Micro Flyer [46], yet with an in-
+creased diameter at 0.43m and a mass of 1.2kg. It integrates
+a Realsense D455 to obtain depth data, a nadir-facing TFmini
+1D range sensor, a PixRacer PX4-based autopilot delivering
+attitude and thrust control, and a Realsense T265 fused with
+the IMU of the autopilot allowing it to estimate the speed,
+orientation and angular rate of the robot. The decision not
+to assume access to a position estimate reﬂects our under-
+standing of the challenges aerial robots encounter during fast
+ﬂight or within perceptually-degraded environments [6, 47].
+The provided velocity estimates are then used in a ﬁxed-
+gain velocity controller. Similarly, two Proportional-Integral-
+Derivative controllers for yaw control and height regulation
+from the ground using the TFmini sensor are also developed.
+The ORACLE planner and the low-level controllers are
+implemented on a Jetson Xavier NX onboard LMF.
+2) Experimental Results: In the ﬁrst experiment, illus-
+trated in Figure 6, LMF is tasked to follow the goal directions
+given by a global planner, while navigating safely in a
+corridor ﬁlled with various types of obstacles that were not
+seen during training. Figure 6.1-4 presents predictions of the
+CPN at some speciﬁc scenarios, where the trajectories are
+generated only for visualization purposes based onst and the
+MPL using the estimated dynamics models of the velocity
+Fig. 6. Experiment in corridors ﬁlled with obstacles. The 4 plots on the left depict speciﬁc planning instances where the visualized trajectories are
+generated based on st and the MPL, the green trajectories correspond to the action sequences that pass the collision cost threshold check, while the blue
+trajectory corresponds to the best action sequence. The right ﬁgure presents the reconstructed map of the environment, which is not given to the robot, as
+well as the goal direction on each segment given by the global planner.
+Fig. 7. Field experiment in an underground mine. The top ﬁgure illustrates
+the reconstructed map of the environment, which is not given to the robot.
+The two bottom rows depict the raw depth image ot (a), the ﬁltered image
+o′
+t (b), and the visualized trajectories based on st and the MPL (c).
+and yaw controllers mentioned in subsection IV-E. The green
+trajectories correspond to the action sequences that pass the
+collision cost threshold check, while the blue trajectories
+correspond to the best action sequence. As shown, the
+visualized trajectories correlate well with the collision cost
+predicted by the CPN, showing reliable performance of the
+CPN in various situations.
+In the second experiment, LMF traveled a distance of
+110m in a narrow underground environment, which is partic-
+ularly challenging since the depth image data is not perfect,
+and the uncertainty in the estimated partial state of the robot
+is not negligible due to the fairly dark conditions which
+lead to relatively weak features. Figure 7.1 demonstrates
+the effect of the ﬁltering process presented in [41], which
+reduces the sim-to-real gap and also removes false obstacles.
+Furthermore, Figure 7.2 demonstrates the beneﬁt of including
+in the training environment obstacles with narrow holes that
+cannot ﬁt the robot, which prevents LMF from erroneously
+steering to the fence on the right in this situation. At any
+time, the goal direction is commanded to be the current
+heading of the robot which in turn allows the system to pick
+the safe direction that deviates the least from the current
+heading direction of the robot in this unknown environment.
+C. Computational Analysis
+As outlined in Algorithm 1, most of the complexity terms
+of the ORACLE planner come from two operations, namely
+a) the image ﬁltering process (Line 3) and b) multiple
+forward passes through the CPN (Lines 9). The inference
+time of the CPN includes the inference times of the ensemble
+of CNNs, the Combiner and Prediction networks. Assuming
+NMC forward passes through the ensemble of CNNs, and
+NMC×NΣ forward passes through the Combiner network
+can be run in parallel on the GPU, their complexities are
+O(1). On the other hand, the inference time of the Prediction
+network is dominated by the inference time of the LSTM
+network and has the complexity ofO(H) [48], assuming that
+NMC×NΣ×NMP forward passes through it can be run
+in parallel on the GPU. With NMC = 5,N Σ = 5,NMP =
+64,H = 18 , on average, the ORACLE loop takes 47.4ms
+in which the inference time through the ensemble of CNNs,
+the Combiner and Predictor networks, and the ﬁltering time
+is 6.2ms, 2.5ms, 8.4ms, and 20.1ms, respectively.
+VI. CONCLUSIONS
+In this work, a navigation planner based on a learning-
+based collision prediction network was proposed and exper-
+imentally veriﬁed using a custom-designed resilient micro
+ﬂyer. The algorithm uses a neural network to predict the
+collision cost for each action sequence in a motion primitives
+library, and accounts for the uncertainty of the robot’s partial
+state and the neural network model. After thresholding the
+collision cost, a goal direction given by a global planner is
+used to choose the best action sequence to execute. A set of
+simulation and experimental studies is presented and serves
+to verify the performance of the proposed approach in fairly
+cluttered, narrow and visually challenging environments.
+REFERENCES
+[1] A. Bircher, K. Alexis, M. Burri, P. Oettershagen, S. Omari,
+T. Mantel and R. Siegwart, “Structural inspection path planning
+via iterative viewpoint resampling with application to aerial
+robotics,” in IEEE International Conference on Robotics and
+Automation (ICRA) , May 2015, pp. 6423–6430. [Online]. Available:
+https://github.com/ethz-asl/StructuralInspectionPlanner
+[2] A. Bircher, M. Kamel, K. Alexis, M. Burri, P. Oettershagen, S. Omari,
+T. Mantel and R. Siegwart, “Three-dimensional coverage path planning
+via viewpoint resampling and tour optimization for aerial robots,”
+Autonomous Robots, pp. 1–25, 2015.
+[3] T. Tomic, K. Schmid, P. Lutz, A. Domel, M. Kassecker, E. Mair,
+I. L. Grixa, F. Ruess, M. Suppa, and D. Burschka, “Toward a fully
+autonomous uav: Research platform for indoor and outdoor urban
+search and rescue,” IEEE robotics & automation magazine , vol. 19,
+no. 3, pp. 46–56, 2012.
+[4] B. Grocholsky, J. Keller, V . Kumar, and G. Pappas, “Cooperative air
+and ground surveillance,” IEEE Robotics & Automation Magazine ,
+vol. 13, no. 3, pp. 16–25, 2006.
+[5] T. Dang, M. Tranzatto, S. Khattak, F. Mascarich, K. Alexis, and
+M. Hutter, “Graph-based subterranean exploration path planning using
+aerial and legged robots,” Journal of Field Robotics , vol. 37, no. 8,
+pp. 1363–1388, 2020.
+[6] S. Khattak, H. Nguyen, F. Mascarich, T. Dang, and K. Alexis,
+“Complementary multi–modal sensor fusion for resilient robot pose
+estimation in subterranean environments,” in 2020 International Con-
+ference on Unmanned Aircraft Systems (ICUAS), 2020, pp. 1024–1029.
+[7] S. Zhao, P. Wang, H. Zhang, Z. Fang, and S. Scherer, “Tp-tio: A robust
+thermal-inertial odometry with deep thermalpoint,” in 2020 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS) ,
+2020, pp. 4505–4512.
+[8] M. Palieri, B. Morrell, A. Thakur, K. Ebadi, J. Nash, A. Chat-
+terjee, C. Kanellakis, L. Carlone, C. Guaragnella, and A.-a. Agha-
+mohammadi, “Locus: A multi-sensor lidar-centric solution for high-
+precision odometry and 3d mapping in real-time,” IEEE Robotics and
+Automation Letters, vol. 6, no. 2, pp. 421–428, 2021.
+[9] L. Han, F. Gao, B. Zhou, and S. Shen, “Fiesta: Fast incremental
+euclidean distance ﬁelds for online motion planning of aerial robots,”
+in 2019 IEEE/RSJ International Conference on Intelligent Robots and
+Systems (IROS), 2019, pp. 4423–4430.
+[10] M. Burri, H. Oleynikova, M. W. Achtelik, and R. Siegwart, “Real-time
+visual-inertial mapping, re-localization and planning onboard mavs in
+unknown environments,” in 2015 IEEE/RSJ International Conference
+on Intelligent Robots and Systems (IROS) . IEEE, 2015, pp. 1872–
+1878.
+[11] D. Gandhi, L. Pinto, and A. Gupta, “Learning to ﬂy by crashing,” in
+2017 IEEE/RSJ International Conference on Intelligent Robots and
+Systems (IROS), 2017, pp. 3948–3955.
+[12] A. Loquercio, A. I. Maqueda, C. R. del Blanco, and D. Scaramuzza,
+“Dronet: Learning to ﬂy by driving,” IEEE Robotics and Automation
+Letters, vol. 3, no. 2, pp. 1088–1095, 2018.
+[13] F. Sadeghi and S. Levine, “CAD2RL: real single-image ﬂight without
+a single real image,” in Robotics: Science and Systems XIII , N. M.
+Amato, S. S. Srinivasa, N. Ayanian, and S. Kuindersma, Eds.,
+2017. [Online]. Available: http://www.roboticsproceedings.org/rss13/
+p34.html
+[14] V . Tolani, S. Bansal, A. Faust, and C. Tomlin, “Visual navigation
+among humans with optimal control as a supervisor,” IEEE Robotics
+and Automation Letters , vol. 6, no. 2, pp. 2288–2295, 2021.
+[15] G. Kahn, P. Abbeel, and S. Levine, “Badgr: An autonomous self-
+supervised learning-based navigation system,” IEEE Robotics and
+Automation Letters, vol. 6, no. 2, pp. 1312–1319, 2021.
+[16] G. Kahn, P. Abbeel, and S. Levine, “Land: Learning to navigate from
+disengagements,” IEEE Robotics and Automation Letters, vol. 6, no. 2,
+pp. 1872–1879, 2021.
+[17] L. Tai, J. Zhang, M. Liu, and W. Burgard, “Socially compliant navi-
+gation through raw depth inputs with generative adversarial imitation
+learning,” in 2018 IEEE International Conference on Robotics and
+Automation (ICRA), 2018, pp. 1111–1117.
+[18] D. Hoeller, L. Wellhausen, F. Farshidian, and M. Hutter, “Learning
+a state representation and navigation in cluttered and dynamic envi-
+ronments,” IEEE Robotics and Automation Letters , vol. 6, no. 3, pp.
+5081–5088, 2021.
+[19] A. Bry and N. Roy, “Rapidly-exploring random belief trees for motion
+planning under uncertainty,” inRobotics and Automation (ICRA), 2011
+IEEE International Conference on . IEEE, 2011, pp. 723–730.
+[20] A. Kendall and Y . Gal, “What uncertainties do we need in bayesian
+deep learning for computer vision?” in Proceedings of the 31st
+International Conference on Neural Information Processing Systems ,
+ser. NIPS’17. Red Hook, NY , USA: Curran Associates Inc., 2017,
+p. 5580–5590.
+[21] C. Richter and N. Roy, “Safe visual navigation via deep learning and
+novelty detection,” in Robotics: Science and Systems XIII , 2017.
+[22] G. Kahn, A. Villaﬂor, V . Pong, P. Abbeel, and S. Levine,
+“Uncertainty-aware reinforcement learning for collision avoidance,”
+CoRR, vol. abs/1702.01182, 2017. [Online]. Available: http://arxiv.
+org/abs/1702.01182
+[23] B. L ¨utjens, M. Everett, and J. P. How, “Safe reinforcement learning
+with model uncertainty estimates,” in 2019 International Conference
+on Robotics and Automation (ICRA) , 2019, pp. 8662–8668.
+[24] A. Loquercio, M. Segu, and D. Scaramuzza, “A general framework
+for uncertainty estimation in deep learning,” IEEE Robotics and
+Automation Letters, vol. 5, no. 2, pp. 3153–3160, 2020.
+[25] S. J. Julier and J. K. Uhlmann, “New extension of the Kalman
+ﬁlter to nonlinear systems,” in Signal Processing, Sensor Fusion, and
+Target Recognition VI, I. Kadar, Ed., vol. 3068, International Society
+for Optics and Photonics. SPIE, 1997, pp. 182 – 193. [Online].
+Available: https://doi.org/10.1117/12.280797
+[26] A. Abdelaziz, S. Watanabe, J. Hershey, E. Vincent, and D. Kolossa,
+“Uncertainty propagation through deep neural networks,” Nuclear
+Physics A, vol. 2015-January, pp. 3561–3565, 2015.
+[27] Y . Gal and Z. Ghahramani, “Dropout as a bayesian approximation:
+Representing model uncertainty in deep learning,” in Proceedings
+of The 33rd International Conference on Machine Learning , ser.
+Proceedings of Machine Learning Research, M. F. Balcan and
+K. Q. Weinberger, Eds., vol. 48. New York, New York, USA:
+PMLR, 20–22 Jun 2016, pp. 1050–1059. [Online]. Available:
+https://proceedings.mlr.press/v48/gal16.html
+[28] Y . Gal and Z. Ghahramani, “Bayesian convolutional neural networks
+with bernoulli approximate variational inference,” 2016.
+[29] C. L. Bottasso, D. Leonello, and B. Savini, “Path planning for au-
+tonomous vehicles by trajectory smoothing using motion primitives,”
+IEEE Transactions on Control Systems Technology, vol. 16, no. 6, pp.
+1152–1168, 2008.
+[30] T. Howard, C. Green, A. Kelly, and D. Ferguson, “State space sampling
+of feasible motions for high performance mobile robot navigation in
+complex environments,” J. Field Robotics , vol. 25, pp. 325–345, 06
+2008.
+[31] S. Liu, K. Mohta, N. Atanasov, and V . Kumar, “Search-based motion
+planning for aggressive ﬂight in se(3),” IEEE Robotics and Automation
+Letters, vol. PP, 10 2017.
+[32] M. R. Dharmadhikari, T. Dang, L. Solanka, J. B. Loje, D. H.
+Nguyen, N. Khedekar, and K. Alexis, “Motion primitives-based path
+planning for fast and agile exploration using aerial robots,” in IEEE
+International Conference on Robotics and Automation (ICRA) , May
+2019.
+[33] P. Florence, J. Carter, and R. Tedrake, Integrated Perception
+and Control at High Speed: Evaluating Collision Avoidance
+Maneuvers Without Maps. Cham: Springer International Publishing,
+2020, pp. 304–319. [Online]. Available: https://doi.org/10.1007/
+978-3-030-43089-4 20
+[34] N. Bucki, J. Lee, and M. W. Mueller, “Rectangular pyramid parti-
+tioning using integrated depth sensors (rappids): A fast planner for
+multicopter navigation,”IEEE Robotics and Automation Letters, vol. 5,
+no. 3, pp. 4626–4633, 2020.
+[35] M. W. Mueller, M. Hehn, and R. D’Andrea, “A computationally
+efﬁcient motion primitive for quadrocopter trajectory generation,”
+IEEE Transactions on Robotics , vol. 31, no. 6, pp. 1294–1310, 2015.
+[36] B. T. Lopez and J. P. How, “Aggressive 3-d collision avoidance for
+high-speed navigation,” in 2017 IEEE International Conference on
+Robotics and Automation (ICRA) , 2017, pp. 5759–5765.
+[37] K. Goel, M. Corah, C. Boirum, and N. Michael, “Fast exploration
+using multirotors: Analysis, planning, and experimentation,” in Field
+and Service Robotics , G. Ishigami and K. Yoshida, Eds. Singapore:
+Springer Singapore, 2021, pp. 291–305.
+[38] F. Gao, W. Wu, W. Gao, and S. Shen, “Flying on point
+clouds: Online trajectory generation and autonomous navigation for
+quadrotors in cluttered environments,” Journal of Field Robotics ,
+vol. 36, no. 4, pp. 710–733, 2019. [Online]. Available: https:
+//onlinelibrary.wiley.com/doi/abs/10.1002/rob.21842
+[39] A. Hornung, K. M. Wurm, M. Bennewitz, C. Stachniss, and W. Bur-
+gard, “OctoMap: An efﬁcient probabilistic 3D mapping framework
+based on octrees,” Autonomous Robots, 2013.
+[40] H. Oleynikova, Z. Taylor, M. Fehr, R. Siegwart, and J. Nieto,
+“V oxblox: Incremental 3d euclidean signed distance ﬁelds for on-board
+mav planning,” in IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS) , 2017.
+[41] J. Ku, A. Harakeh, and S. L. Waslander, “In defense of classical image
+processing: Fast depth completion on the cpu,” 2018 15th Conference
+on Computer and Robot Vision (CRV) , pp. 16–22, 2018.
+[42] J. C. Kew, B. Ichter, M. Bandari, T.-W. E. Lee, and A. Faust, “Neural
+collision clearance estimator for fast robot motion planning.” CoRR,
+vol. abs/1910.05917, 2019. [Online]. Available: http://arxiv.org/abs/
+1910.05917
+[43] F. Furrer, M. Burri, M. Achtelik, and R. Siegwart, “Rotors-a modular
+gazebo mav simulator framework,” in Robot Operating System (ROS).
+Springer, 2016, pp. 595–625.
+[44] I. Sa, M. Kamel, R. Khanna, M. Popovic, J. Nieto, and R. Siegwart,
+“Dynamic system identiﬁcation, and control for a cost effective open-
+source vtol mav,” in 11th Conference on Field and Service Robotics
+(FSR 2017), 2017.
+[45] M. Popovi ´c, F. Thomas, S. Papatheodorou, N. Funk, T. Vidal-Calleja,
+and S. Leutenegger, “V olumetric occupancy mapping with proba-
+bilistic depth completion for robotic navigation,” IEEE Robotics and
+Automation Letters, vol. 6, no. 3, pp. 5072–5079, 2021.
+[46] P. De Petris, H. Nguyen, T. Dang, F. Mascarich, and K. Alexis,
+“Collision-tolerant autonomous navigation through manhole-sized
+conﬁned environments,” in 2020 IEEE International Symposium on
+Safety, Security, and Rescue Robotics (SSRR) , 2020, pp. 84–89.
+[47] S. Khattak, C. Papachristos, and K. Alexis, “Keyframe-based direct
+thermal–inertial odometry,” in IEEE International Conference on
+Robotics and Automation (ICRA) , May 2019.
+[48] S. Zhang, Y . Wu, T. Che, Z. Lin, R. Memisevic, R. Salakhutdinov, and
+Y . Bengio, “Architectural complexity measures of recurrent neural net-
+works,” inProceedings of the 30th International Conference on Neural
+Information Processing Systems , ser. NIPS’16, 2016, p. 1830–1838.

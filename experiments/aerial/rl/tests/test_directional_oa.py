@@ -259,6 +259,247 @@ def test_escape_candidates_include_climb():
     assert any(float(np.asarray(c).reshape(4)[2]) > 0.2 for c in cands)
 
 
+def test_street_flies_forward_and_open_side_is_yaw_only():
+    """A 6 m street is not an escape. One clearly longer side is pure yaw."""
+    from experiments.aerial.rl.planner import ImaginationPlanner, yaw_detour_sign
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    assert yaw_detour_sign(6.0, 7.0, 6.5) is None
+    assert yaw_detour_sign(6.0, 12.0, 4.0) == 1.0
+    # A side only slightly longer than the nose is the building face, not an exit.
+    assert yaw_detour_sign(6.0, 8.6, 3.2) is None
+    assert yaw_detour_sign(14.0, 10.0, 8.0) is None
+    # Open street: the left cone can read a few metres longer than the road.
+    assert yaw_detour_sign(18.0, 22.0, 20.0) is None
+    dyn = StubLatentDynamics(goal=np.array([40.0, 0.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    street = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 6.0, "left": 7.0, "right": 6.5},
+        },
+    )
+    fwd = planner.plan(street, np.array([0.2, 0.4, 0.3, 0.2]))
+    assert float(fwd[0]) > 0.2, fwd
+    assert abs(float(fwd[1])) < 0.15, fwd
+    assert abs(float(fwd[2])) < 0.05, fwd
+    assert planner.last_plan_meta.get("offer_escape") is False
+
+    open_street = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 18.0, "left": 22.0, "right": 20.0},
+        },
+    )
+    open_planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    along = open_planner.plan(open_street, np.array([0.2, 0.4, 0.3, 0.2]))
+    assert float(along[0]) > 0.2, along
+    assert abs(float(along[3])) < 0.05, along
+    assert open_planner.last_plan_meta.get("offer_escape") is False
+
+    wall = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 6.0, "left": 14.0, "right": 4.0},
+        },
+    )
+    turned = planner.plan(wall, np.array([1.0, 0.0, 0.3, 0.0]))
+    assert float(turned[3]) > 0.05, turned
+    assert abs(float(turned[1])) < 0.05, turned
+    assert abs(float(turned[2])) < 0.05, turned
+    assert planner.last_plan_meta.get("offer_escape") is True
+    for _ in range(4):
+        turned = planner.plan(wall, np.array([1.0, 0.0, 0.3, 0.0]))
+        assert float(turned[3]) > 0.05, turned
+        assert abs(float(turned[1])) < 0.05, turned
+        assert abs(float(turned[2])) < 0.05, turned
+    road_back = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 18.0, "left": 16.0, "right": 15.0},
+        },
+    )
+    resumed_yaw = planner.plan(road_back, np.array([0.2, 0.4, -0.2, 0.2]))
+    assert float(resumed_yaw[0]) > 0.2, resumed_yaw
+    assert abs(float(resumed_yaw[3])) < 0.05, resumed_yaw
+    assert float(resumed_yaw[2]) >= -1e-6, resumed_yaw
+    assert planner.last_plan_meta.get("offer_escape") is False
+
+    fresh = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    sunk = fresh.plan(street, np.array([0.2, 0.4, -0.2, 0.2]))
+    assert float(sunk[0]) > 0.2, sunk
+    assert float(sunk[2]) >= -1e-6, sunk
+
+    hard = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 2.0, "left": 6.0, "right": 5.5},
+        },
+    )
+    hard_planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    blocked = hard_planner.plan(hard, np.array([1.0, 0.4, 0.3, 0.0]))
+    assert abs(float(blocked[3])) > 0.05, blocked
+    assert abs(float(blocked[1])) < 0.05, blocked
+    assert abs(float(blocked[2])) < 0.05, blocked
+    climbed = None
+    for _ in range(20):
+        stepped = hard_planner.plan(hard, np.array([1.0, 0.4, -0.3, 0.0]))
+        assert abs(float(stepped[2])) < 0.05, stepped
+        if abs(float(stepped[3])) < 0.05 and float(stepped[0]) > 0.2:
+            climbed = stepped
+            break
+        assert abs(float(stepped[3])) > 0.05, stepped
+    assert climbed is not None
+    assert hard_planner.last_plan_meta.get("offer_escape") is False
+
+    opened = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 14.0, "left": 10.0, "right": 8.0},
+        },
+    )
+    resumed = planner.plan(opened, np.array([0.2, 0.3, 0.2, 0.2]))
+    assert float(resumed[0]) > 0.2, resumed
+    assert abs(float(resumed[2])) < 0.05, resumed
+
+
+def test_open_road_takes_one_yaw_into_a_side_street():
+    """Road centre stays long, but the subgoal has left the street axis."""
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    dyn = StubLatentDynamics(goal=np.array([8.0, 40.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    corner = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([8.0, 40.0, 0.0]),
+            "depth_cones_pred": {"forward": 18.0, "left": 16.0, "right": 15.0},
+        },
+    )
+    act = planner.plan(corner, np.array([0.2, 0.4, 0.3, 0.0]))
+    # Bearing is about 79°: slow down and yaw, even though the nose is still long.
+    assert float(act[0]) < 0.25, act
+    assert float(act[3]) > 0.15, act
+    assert abs(float(act[1])) < 0.15, act
+    assert abs(float(act[2])) < 0.05, act
+    assert planner.last_plan_meta.get("offer_escape") is False
+
+
+def test_road_center_carrot_ahead_does_not_peel_into_a_longer_side():
+    """[-1096, 20]: left is 29 m, the carrot is still straight down the street."""
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    dyn = StubLatentDynamics(goal=np.array([40.0, 0.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    street = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "hold_street": True,
+            "depth_cones_pred": {"forward": 11.5, "left": 29.0, "right": 10.8},
+        },
+    )
+    act = planner.plan(street, np.array([0.2, 0.4, 0.3, 0.0]))
+    assert float(act[0]) > 0.2, act
+    assert abs(float(act[3])) < 0.05, act
+    assert abs(float(act[1])) < 0.15, act
+    assert planner.last_plan_meta.get("offer_escape") is False
+
+    corner_planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    corner = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([8.0, 40.0, 0.0]),
+            "hold_street": True,
+            "depth_cones_pred": {"forward": 18.0, "left": 16.0, "right": 15.0},
+        },
+    )
+    turn = corner_planner.plan(corner, np.array([0.2, 0.4, 0.3, 0.0]))
+    assert float(turn[0]) < 0.25, turn
+    assert float(turn[3]) > 0.15, turn
+
+
+def test_slightly_longer_side_does_not_pull_off_a_straight_street():
+    """The reading that stuck the approach: nose 6 m, left only a little longer."""
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    dyn = StubLatentDynamics(goal=np.array([40.0, 0.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    street = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 6.0, "left": 8.6, "right": 3.2},
+        },
+    )
+    act = planner.plan(street, np.array([0.2, 0.4, 0.3, 0.0]))
+    assert float(act[0]) > 0.2, act
+    assert abs(float(act[3])) < 0.05, act
+    assert abs(float(act[1])) < 0.15, act
+
+
+def test_moderate_bearing_keeps_yawing_toward_the_carrot():
+    """Once the exit is 30° off, a longer opposite side must not reverse the turn."""
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    dyn = StubLatentDynamics(goal=np.array([40.0, 22.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    corner = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 22.0, 0.0]),
+            "depth_cones_pred": {"forward": 8.0, "left": 6.0, "right": 20.0},
+        },
+    )
+    act = planner.plan(corner, np.array([0.2, 0.4, 0.3, 0.0]))
+    assert float(act[3]) > 0.05, act
+    assert float(act[0]) > 0.2, act
+    assert abs(float(act[1])) < 0.15, act
+
+
+def test_short_nose_yaws_slowly_into_a_side_street():
+    """The carrot has left the street and the end wall is close."""
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    dyn = StubLatentDynamics(goal=np.array([8.0, 40.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    corner = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([8.0, 40.0, 0.0]),
+            "depth_cones_pred": {"forward": 8.0, "left": 16.0, "right": 15.0},
+        },
+    )
+    act = planner.plan(corner, np.array([0.2, 0.4, 0.3, 0.0]))
+    assert float(act[0]) < 0.25, act
+    assert float(act[3]) > 0.15, act
+    assert abs(float(act[1])) < 0.15, act
+    assert abs(float(act[2])) < 0.05, act
+
+
 def test_oa_offer_escape_tight_mid_even_near_goal():
     from experiments.aerial.rl.planner import oa_offer_escape
 
@@ -269,6 +510,117 @@ def test_oa_offer_escape_tight_mid_even_near_goal():
     assert oa_offer_escape(12.0, near_goal=False) is False
     assert oa_offer_escape(None, near_goal=False) is True
     assert oa_offer_escape(None, near_goal=True) is False
+
+
+def test_oa_offer_escape_approach_modes_abc():
+    """A=off, B=side_climb, C=side_only — open nose + rem<25."""
+    from experiments.aerial.rl.planner import (
+        escape_clearer_cone_candidates,
+        oa_offer_escape,
+    )
+    from experiments.aerial.rl.env.obs import Observation
+
+    # A: no force
+    assert (
+        oa_offer_escape(12.0, near_goal=False, goal_rem_xy=20.0, approach_mode="off")
+        is False
+    )
+    # B/C: force offer
+    assert (
+        oa_offer_escape(
+            12.0, near_goal=False, goal_rem_xy=20.0, approach_mode="side_climb"
+        )
+        is True
+    )
+    assert (
+        oa_offer_escape(
+            12.0, near_goal=False, goal_rem_xy=20.0, approach_mode="side_only"
+        )
+        is True
+    )
+    # Outside band still off
+    assert (
+        oa_offer_escape(
+            12.0, near_goal=False, goal_rem_xy=40.0, approach_mode="side_climb"
+        )
+        is False
+    )
+
+    obs = Observation(
+        rgb=np.zeros((8, 8, 3), np.uint8),
+        state=np.zeros(7, np.float32),
+        depth=np.full((8, 8), 12.0),
+        collided=False,
+    )
+    obs.info = {
+        "depth_cones_pred": {
+            "forward": 12.0,
+            "left": 10.0,
+            "right": 4.0,
+            "up": 20.0,
+            "down": 5.0,
+        }
+    }
+    lim = np.array([1.0, 0.4, 0.4, 0.3])
+    with_climb = escape_clearer_cone_candidates(obs, limits=lim, include_climb=True)
+    side_only = escape_clearer_cone_candidates(obs, limits=lim, include_climb=False)
+    assert any(float(np.asarray(c).reshape(4)[2]) > 0.2 for c in with_climb)
+    assert all(float(np.asarray(c).reshape(4)[2]) < 0.05 for c in side_only)
+    assert any(abs(float(np.asarray(c).reshape(4)[1])) > 0.1 for c in side_only)
+
+
+def test_force_peel_exec_when_tight_mid_prefers_forward(monkeypatch):
+    """Tight mid: if scoring would keep pure-forward, force a leave-wall atom."""
+    import os
+
+    monkeypatch.setenv("OA_FORCE_PEEL_RESTRICT", "1")
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    dyn = StubLatentDynamics(goal=np.array([40.0, 0.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=cfg, mock_mode="rules")
+    # Goal ahead, nose tight-mid (4m), left open — must peel, not +dx only.
+    obs = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            "depth_cones_pred": {"forward": 4.0, "left": 20.0, "right": 3.0},
+        },
+    )
+    planned = planner.plan(obs, np.array([1.0, 0.0, 0.0, 0.0]))
+    assert (
+        abs(float(planned[1])) > 0.05
+        or abs(float(planned[3])) > 0.05
+        or float(planned[2]) > 0.15
+    ), planned
+    assert planner.last_plan_meta.get("offer_escape") is True
+
+
+def test_wm_escape_mock_accepted_and_peels_open_side():
+    """wm_escape = WM + hard-block open-side bias; left-open jammed nose peels."""
+    from experiments.aerial.rl.planner import ImaginationPlanner
+    from experiments.aerial.rl.reward import RewardConfig
+    from experiments.aerial.rl.tests.test_v1b_planner_shield import StubLatentDynamics, _obs
+
+    dyn = StubLatentDynamics(goal=np.array([40.0, 0.0, 0.0]), latent_dim=8)
+    cfg = RewardConfig(w_progress=1.0, w_collision=0.0, w_maneuver=0.0)
+    planner = ImaginationPlanner(
+        dyn, horizon=1, reward_cfg=cfg, mock_mode="wm_escape", escape_score_w=2.0
+    )
+    obs = _obs(
+        [0.0, 0.0, 0.0],
+        info={
+            "goal": np.array([40.0, 0.0, 0.0]),
+            # Hard-block nose (<3 m): bias applies. Tight-mid-only would be 4 m.
+            "depth_cones_pred": {"forward": 2.0, "left": 18.0, "right": 1.0},
+        },
+    )
+    planned = planner.plan(obs, np.array([1.0, 0.0, 0.0, 0.0]))
+    # Prefer left (+y / +dyaw); do not require climb.
+    assert float(planned[1]) > 0.05 or float(planned[3]) > 0.05, planned
+    assert planner.last_plan_meta.get("offer_escape") is True
 
 
 def test_should_keep_planner_bc_step_tight():
@@ -606,6 +958,19 @@ def test_collector_stamps_obstacle_cost_from_feature_t():
     )
 
 
+def test_label_cone_probe_matches_clearances():
+    from experiments.aerial.rl.train_obstacle_cost_labels import label_cone_probe
+
+    depth = np.full((32, 32), 40.0, dtype=np.float64)
+    # Wall only in pure-left band (cols 0..7); forward crop is cols 8..23.
+    depth[8:24, :8] = 2.0
+    left = label_cone_probe(depth, "left", np.array([0.0, 0.9, 0.0]))
+    fwd = label_cone_probe(depth, "fwd", np.array([1.0, 0.0, 0.0]))
+    hover = label_cone_probe(depth, "hover", np.zeros(3))
+    assert left["obstacle_label"] > fwd["obstacle_label"]
+    assert hover["obstacle_label"] == pytest.approx(0.45)
+
+
 def test_train_obstacle_head_marks_trained():
     torch = pytest.importorskip("torch")
     from experiments.aerial.rl.dynamics_torch import TorchRSSMDynamics
@@ -623,6 +988,42 @@ def test_train_obstacle_head_marks_trained():
     stats = train_obstacle_cost_head(dyn, feat, act, labels, steps=40, batch=16)
     assert dyn.obstacle_cost_trained is True
     assert np.isfinite(stats["loss"])
+
+
+def test_train_scene_rank_prefers_cheaper_probe():
+    torch = pytest.importorskip("torch")
+    from experiments.aerial.rl.dynamics_torch import TorchRSSMDynamics
+    from experiments.aerial.rl.train_obstacle_cost_labels import train_obstacle_cost_head
+
+    dyn = TorchRSSMDynamics(
+        image_size=16, action_dim=4, recurrent_dim=8, stoch_dim=4,
+        stoch_classes=4, hidden_dim=16, device="cpu",
+    )
+    rng = np.random.default_rng(1)
+    rows, acts, ys, sids = [], [], [], []
+    for s in range(40):
+        f = rng.normal(size=dyn.latent_dim).astype(np.float32)
+        # Same latent: expensive left, cheap fwd.
+        for a, y in (
+            ([1.0, 0.0, 0.0, 0.0], 0.05),
+            ([0.0, 0.9, 0.0, 0.0], 0.95),
+        ):
+            rows.append(f.copy())
+            acts.append(a)
+            ys.append(y)
+            sids.append(s)
+    feat = np.stack(rows)
+    act = np.asarray(acts, dtype=np.float32)
+    y = np.asarray(ys, dtype=np.float32)
+    sid = np.asarray(sids, dtype=np.int32)
+    train_obstacle_cost_head(
+        dyn, feat, act, y, steps=120, batch=32, seed=0,
+        scene_ids=sid, scene_rank_weight=4.0, scene_rank_margin=0.25,
+    )
+    # Spot-check one scene
+    c_fwd = float(dyn.predict_obstacle_cost(feat[0], act[0]))
+    c_left = float(dyn.predict_obstacle_cost(feat[1], act[1]))
+    assert c_fwd < c_left
 
 
 def test_pack_features_from_frames_encodes_latent_dim():
@@ -647,8 +1048,9 @@ def test_pack_features_from_frames_encodes_latent_dim():
     assert out["action"].shape == (n * 6, 4)
     assert out["obstacle_label"].shape == (n * 6,)
     assert "group" in out
+    assert "scene_id" in out
     assert set(out["group"].astype(str).tolist()) <= {
-        "fwd_empty", "fwd_near", "left_near"
+        "fwd_empty", "fwd_near", "left_near", "right_near"
     }
 
 
@@ -783,6 +1185,40 @@ def test_blend_clearance_risk_plugs_head_underreport():
     expect = clearance_risk_from_depth(2.0, d_danger=3.0, d_clear=12.0)
     assert float(terms["collision_risk"]) == pytest.approx(expect, abs=1e-5)
     assert float(terms["collision_risk"]) > 0.5
+
+
+def test_clearance_centering_prefers_open_side_peel_over_press():
+    """Jam band: open left → yaw/strafe left beats pressing +dx into wall."""
+    from experiments.aerial.rl.reward import RewardConfig, clearance_centering_bonus
+
+    cfg = RewardConfig(
+        w_clearance_center=1.5,
+        w_press_wall=2.5,
+        center_fwd_thresh_m=8.0,
+        center_progress_eps=0.15,
+        center_min_lat_adv_m=2.0,
+    )
+    press = np.array([1.0, 0.0, 0.0, 0.0])
+    peel_left = np.array([0.2, 0.5, 0.0, 0.4])  # +dy +dyaw toward left
+    kw = dict(d_fwd=3.0, d_left=15.0, d_right=4.0, progress=0.0, cfg=cfg)
+    r_press = clearance_centering_bonus(press, **kw)["clearance_centering"]
+    r_peel = clearance_centering_bonus(peel_left, **kw)["clearance_centering"]
+    assert r_peel > 0.0
+    assert r_press < 0.0
+    assert r_peel > r_press
+    # Progressing out of jam → shaping off unless Soft keeps the peel on.
+    assert clearance_centering_bonus(press, **{**kw, "progress": 0.5})["clearance_centering"] == 0.0
+    cfg_soft = RewardConfig(
+        w_clearance_center=1.5,
+        w_press_wall=2.5,
+        center_fwd_thresh_m=8.0,
+        center_progress_eps=0.15,
+        center_min_lat_adv_m=2.0,
+        peel_despite_progress=True,
+    )
+    kw_soft = dict(d_fwd=3.0, d_left=15.0, d_right=4.0, progress=0.5, cfg=cfg_soft)
+    assert clearance_centering_bonus(press, **kw_soft)["clearance_centering"] < 0.0
+    assert clearance_centering_bonus(peel_left, **kw_soft)["clearance_centering"] > 0.0
 
 
 def test_blend_clearance_does_not_tax_side_escape_with_fwd_cliff():

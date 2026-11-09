@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, Dict
 
@@ -145,6 +146,17 @@ def main() -> int:
         "--init-actor-ckpt",
         default=None,
         help="warm-start actor/critic from an existing v4_ac_*.pt (F15 short FT)",
+    )
+    p.add_argument(
+        "--yaw-log-std-min",
+        type=float,
+        default=None,
+        help=(
+            "Floor on the yaw-axis pre-tanh log_std after warm start and after "
+            "every actor update. Other axes stay at the checkpoint std. "
+            "0.4 is std≈1.49, enough that a yaw mean parked on the ±0.314 "
+            "limit still samples the opposite sign."
+        ),
     )
     p.add_argument(
         "--phase2",
@@ -601,6 +613,15 @@ def main() -> int:
             init_path,
             warmed.config.goal_feat_mode,
             warmed.config.condition_on_goal,
+        )
+    if args.yaw_log_std_min is not None and loop.actor_critic is not None:
+        loop.actor_critic.config.yaw_log_std_min = float(args.yaw_log_std_min)
+        loop.actor_critic.apply_yaw_log_std_floor()
+        yaw_std = math.exp(float(loop.actor_critic._log_std[-1].detach().cpu()))
+        logger.info(
+            "yaw sampling floor log_std>=%.3f (yaw std=%.3f, other axes unchanged)",
+            float(args.yaw_log_std_min),
+            yaw_std,
         )
     ac_cfg = loop.actor_critic.config
     if not loop.actor_critic.bounded:

@@ -1,0 +1,13 @@
+# 14 — success-pull: same p/c as baseline, arrival bonus dominates
+reward:
+  w_progress: 2.0
+  w_away: 1.0
+  success_bonus: 40.0
+  w_collision: 6.0
+  w_backward: 5.0
+  w_descent: 1.5
+  w_press_wall: 0.0
+  w_clearance_center: 0.0
+  w_curiosity: 0.0
+  forbid_backward_motion: true
+  gate_progress_by_heading: true

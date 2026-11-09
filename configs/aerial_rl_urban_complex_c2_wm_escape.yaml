@@ -1,0 +1,18 @@
+# C2 · wm_escape teacher distill (overnight 2026-09-25).
+# Train with --planner --planner-rollout open_loop --enable-bc --no-shield
+# and OA_PLANNER_MOCK=wm_escape (or planner.mock_mode below).
+
+planner:
+  enable: true
+  rollout_mode: open_loop
+  mock_mode: wm_escape
+  horizon: 15
+
+reward:
+  # Keep directional OA base; do not stack antistick here (that's C3).
+  w_press_wall: 0.0
+  w_clearance_center: 0.0
+  w_curiosity: 0.0
+
+safety:
+  kind: null

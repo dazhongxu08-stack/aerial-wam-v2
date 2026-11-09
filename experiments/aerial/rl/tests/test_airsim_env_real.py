@@ -10,7 +10,11 @@ logic (z negation, health gating, close-on-exception) directly.
 import numpy as np
 import pytest
 
-from experiments.aerial.rl.env.airsim_env import AirSimDroneEnv, AirSimEnvConfig
+from experiments.aerial.rl.env.airsim_env import AirSimDroneEnv, AirSimEnvConfig, decode_scene_bgr
+
+
+def test_empty_scene_buffer_does_not_raise():
+    assert decode_scene_bgr(np.array([], np.uint8)) is None
 
 
 # -- fakes ---------------------------------------------------------------
@@ -112,7 +116,7 @@ def test_observe_state_negates_ned_z_to_up_world():
 
 def test_reset_negates_start_z_into_ned_pose():
     e, client = _make_env(health_check=False, warmup_frames=0)
-    e._grab_scene = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
+    e._grab_scene = e._grab_scene_native = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
     e._grab_depth = lambda client: None
     e._grab_imu = lambda client: {}
     e._grab_collision = lambda client: False
@@ -127,7 +131,7 @@ def test_reset_negates_start_z_into_ned_pose():
 # -- health fail-fast (Fix #3) ------------------------------------------
 def test_health_check_raises_when_imu_missing():
     e, _ = _make_env(health_check=True, warmup_frames=0)
-    e._grab_scene = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
+    e._grab_scene = e._grab_scene_native = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
     e._grab_depth = lambda client: np.zeros((8, 8), dtype=np.float32)
     e._grab_imu = lambda client: {}          # CV-only build -> no IMU
     e._grab_collision = lambda client: False
@@ -137,7 +141,7 @@ def test_health_check_raises_when_imu_missing():
 
 def test_health_check_raises_when_depth_missing():
     e, _ = _make_env(health_check=True, warmup_frames=0)
-    e._grab_scene = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
+    e._grab_scene = e._grab_scene_native = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
     e._grab_depth = lambda client: None      # no depth from renderer
     e._grab_imu = lambda client: {"ang_vel": [0, 0, 0], "lin_acc": [0, 0, 9.807]}
     e._grab_collision = lambda client: False
@@ -148,7 +152,7 @@ def test_health_check_raises_when_depth_missing():
 # -- lifecycle: close on failed reset (Fix #4) --------------------------
 def test_failed_reset_releases_control():
     e, client = _make_env(health_check=True, warmup_frames=0)
-    e._grab_scene = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
+    e._grab_scene = e._grab_scene_native = lambda client: np.zeros((8, 8, 3), dtype=np.uint8)
     e._grab_depth = lambda client: None
     e._grab_imu = lambda client: {}          # fails health -> reset raises
     e._grab_collision = lambda client: False

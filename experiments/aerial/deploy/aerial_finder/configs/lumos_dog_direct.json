@@ -1,0 +1,111 @@
+{
+ "drone_id": "lumos_dog_1",
+ "out_dir": "/home/ubuntu/aerial_finder_runs",
+ "server": {
+  "host": "0.0.0.0",
+  "port": 8088
+ },
+ "backend": {
+  "type": "lumos_dog",
+  "camera": "http://172.20.10.4:8093/frame.jpg",
+  "width": 1280,
+  "height": 720,
+  "hfov_deg": 110.0,
+  "crop_bottom_frac": 0.1,
+  "step_hz": 5.0,
+  "bridge": "http://127.0.0.1:8092",
+  "vx_max": 0.35,
+  "vyaw_max": 0.5,
+  "vx_gain": 0.57,
+  "cam_height_m": 0.4,
+  "imu_yaw_sign": 1.0,
+  "fisheye_calib": "/home/ubuntu/aerial-wam-v2/experiments/aerial/deploy/aerial_finder/configs/sjcam_dog_fisheye.json",
+  "dry": false,
+  "save_dir": "/home/ubuntu/aerial_finder_runs/frames",
+  "save_every_s": 1.0,
+  "cmd_mode": "direct",
+  "cmd_ttl_s": 2.0
+ },
+ "depth": {
+  "type": "da3_ckpt",
+  "device": "cuda",
+  "metric_scale": 0.396,
+  "invalid_m": 30.0,
+  "path": "/home/ubuntu/aerial-wam-v2/experiments/aerial/rl/artifacts/depth_ckpt_p45mid_s8j_20260825/da3_ft_head_fp16.pt"
+ },
+ "nav": {
+  "type": "consequence",
+  "device": "cuda",
+  "surv_ckpts": [
+   "/home/ubuntu/aerial-wam-v2/experiments/aerial/rl/artifacts/shorew03_krs6_20261013/c_s218/consequence_best.pt",
+   "/home/ubuntu/aerial-wam-v2/experiments/aerial/rl/artifacts/shorew03_krs6_20261013/c_s219/consequence_best.pt",
+   "/home/ubuntu/aerial-wam-v2/experiments/aerial/rl/artifacts/shorew03_krs6_20261013/c_s220/consequence_best.pt"
+  ],
+  "surv_min": 0.75,
+  "fwd_dx": 1.0,
+  "fov_max_deg": 35.0,
+  "seed": 0,
+  "replan_every": 3,
+  "guard_turn_m": 1.8,
+  "guard_stop_m": 0.8,
+  "guard_yaw": 0.22,
+  "guard_rows": [10, 28],
+  "bypass": true,
+  "bypass_clear_m": 2.0,
+  "bypass_pass_m": 2.0,
+  "macro_set": "dog",
+  "rad_per_step": 0.05,
+  "realize_motion": true,
+  "dog_vx_max": 0.35,
+  "dog_vyaw_max": 0.5,
+  "dog_vx_gain": 0.57,
+  "dog_yaw_gain": 0.5,
+  "step_hz": 5.0
+ },
+ "detector": {
+  "type": "yolo_world_ts",
+  "device": "cuda",
+  "imgsz": 640,
+  "conf": 0.05,
+  "model": "/home/ubuntu/yw_forklift.torchscript",
+  "classes": [
+   "forklift",
+   "pallet",
+   "cardboard box",
+   "person",
+   "shelf",
+   "truck",
+   "chair",
+   "pallet jack"
+  ],
+  "min_color_frac": 0.15,
+  "color_hints": true
+ },
+ "dog": {},
+ "mission": {
+  "verify_agl_m": null,
+  "home_agl_m": 0.4,
+  "cam_offset_frd": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "cam_pitch_deg": 0.0,
+  "locate_depth": "model",
+  "detect_every": 1,
+  "search_radius_min_m": 4.0,
+  "search_radius_max_m": 4.0,
+  "reach_m": 2.5,
+  "reach_obs_m": 1.0,
+  "standoff_m": 2.5,
+  "stall_s": 45.0,
+  "scan_rate": 0.314,
+  "dwell_steps": 30,
+  "confirm_min_conf": 0.08,
+  "candidate_timeout_s": 90.0,
+  "confirm_max_range_m": 15.0,
+  "max_above_ground_m": 4.0,
+  "max_time_s": 300.0,
+  "geofence_margin_m": 15.0
+ }
+}

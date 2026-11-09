@@ -180,6 +180,29 @@ def test_escape_side_clearer_and_fallback():
     assert escape_side(no_lr, goal_rel=np.array([0.0, 40.0, 0.0])) == pytest.approx(1.0)
 
 
+def test_planner_dyaw_lowpass_limits_step_delta():
+    """Consecutive plans cannot jump dyaw by more than max_ddyaw."""
+    dyn = StubLatentDynamics(goal=np.array([50.0, 0.0, 0.0]), latent_dim=8)
+    planner = ImaginationPlanner(
+        dyn, horizon=1, reward_cfg=RewardConfig(), max_ddyaw=0.05, escape_commit_steps=0
+    )
+    obs = _obs([0.0, 0.0, 0.0], info={"goal": np.array([50.0, 0.0, 0.0])})
+    a0 = planner.plan(obs, np.array([0.5, 0.0, 0.0, 0.4]))
+    a1 = planner.plan(obs, np.array([0.5, 0.0, 0.0, -0.4]))
+    assert abs(float(a1[3]) - float(a0[3])) <= 0.05 + 1e-6
+
+
+def test_planner_reset_clears_yaw_commit_state():
+    dyn = StubLatentDynamics(goal=np.array([50.0, 0.0, 0.0]), latent_dim=8)
+    planner = ImaginationPlanner(dyn, horizon=1, reward_cfg=RewardConfig())
+    obs = _obs([0.0, 0.0, 0.0], info={"goal": np.array([50.0, 0.0, 0.0])})
+    planner.plan(obs, np.zeros(4))
+    assert planner._prev_planned is not None
+    planner.reset()
+    assert planner._prev_planned is None
+    assert planner._esc_commit_left == 0
+
+
 def test_planner_escape_beats_freeze_when_nose_blocked():
     """Blocked nose: must not pick zero/freeze; peel toward clearer cone."""
     dyn = StubLatentDynamics(goal=np.array([0.0, 40.0, 0.0]), latent_dim=8)
@@ -391,6 +414,30 @@ def test_planner_passes_goal_rel_into_imagine(monkeypatch):
     assert float(captured["goal_rel0"][0, 0]) > 0.0
     assert captured.get("body_vel0") is not None
     assert captured.get("propagate_goal_rel") is True
+
+
+def test_planner_passes_depth_profile_into_imagine(monkeypatch):
+    captured: dict = {}
+
+    def _spy_imagine(*args, **kwargs):
+        captured.update(kwargs)
+        from experiments.aerial.rl.imagination import imagine as real_imagine
+
+        return real_imagine(*args, **kwargs)
+
+    monkeypatch.setattr("experiments.aerial.rl.planner.imagine", _spy_imagine)
+    dyn = StubLatentDynamics(goal=np.array([20.0, 0.0, 0.0]), latent_dim=8)
+    planner = ImaginationPlanner(dyn, horizon=2, reward_cfg=RewardConfig())
+    prof = np.linspace(5.0, 20.0, 16)
+    obs = _obs(
+        [0.0, 0.0, 0.0],
+        info={"goal": np.array([20.0, 0.0, 0.0]), "depth_profile_pred": prof},
+    )
+    planner.plan(obs, np.zeros(4))
+    got = captured.get("profile0")
+    assert got is not None
+    assert got.shape == (1, 16)
+    assert np.allclose(got[0], prof)
 
 
 def test_depth_tau_shield_records_independent_channel():

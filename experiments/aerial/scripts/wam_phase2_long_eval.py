@@ -16,11 +16,12 @@ import argparse
 import json
 import logging
 import math
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import yaml
@@ -28,6 +29,518 @@ import yaml
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("wam_phase2_eval")
+
+
+class _FixedActionSeq:
+    """Open-loop body-delta sequence for a G0 imagination rollout."""
+
+    def __init__(self, actions: Sequence[np.ndarray]) -> None:
+        self._actions = [np.asarray(a, dtype=np.float64).reshape(4) for a in actions]
+        self._i = 0
+
+    def act_latent(self, z: np.ndarray, goal_rel: Optional[np.ndarray] = None) -> np.ndarray:
+        del z, goal_rel
+        a = self._actions[min(self._i, len(self._actions) - 1)]
+        self._i += 1
+        return a
+
+
+def select_receding_primitive(
+    dynamics: Any,
+    z: np.ndarray,
+    goal_rel: np.ndarray,
+    limits: np.ndarray,
+    *,
+    horizon: int = 5,
+    cost_margin: float = 0.25,
+    cones: Optional[Dict[str, Any]] = None,
+    yaw_err: float = 0.0,
+    allow_hits: bool = True,
+) -> tuple:
+    """One receding step: drop high-cost primitives, then max goal progress.
+
+    Rolls each constant primitive ``horizon`` steps on the frozen dynamics.
+    Returns ``(first_action, name, sum_cost, sum_progress)``. Does not train.
+    """
+    from experiments.aerial.rl.goal_features import advance_goal_rel_body
+
+    lim = np.abs(np.asarray(limits, dtype=np.float64).reshape(4))
+    yaw = float(lim[3])
+    specs = {
+        "fwd": np.array([0.7, 0.0, 0.0, 0.0]),
+        "yaw_l": np.array([0.0, 0.0, 0.0, yaw]),
+        "yaw_r": np.array([0.0, 0.0, 0.0, -yaw]),
+        "peel_l": np.array([0.2, 0.4, 0.0, 0.0]),
+        "peel_r": np.array([0.2, -0.4, 0.0, 0.0]),
+    }
+    z0 = np.asarray(z, dtype=np.float64).reshape(-1).copy()
+    g0 = np.asarray(goal_rel, dtype=np.float64).reshape(-1).copy()
+    scored = []
+    for name, raw in specs.items():
+        a = np.clip(np.asarray(raw, dtype=np.float64), -lim, lim)
+        a[0] = max(0.0, float(a[0]))
+        zz = z0.copy()
+        gg = g0.copy()
+        cost = 0.0
+        prog = 0.0
+        hit = False
+        for _ in range(int(horizon)):
+            out = dynamics.step(zz, a, goal_rel=gg)
+            oc = getattr(out, "obstacle_cost", None)
+            if oc is not None and np.isfinite(float(oc)):
+                cost += float(oc)
+                if float(oc) >= 1.0:
+                    hit = True
+            if float(getattr(out, "p_coll", 0.0) or 0.0) >= 0.5:
+                hit = True
+            g1 = np.asarray(advance_goal_rel_body(gg, a), dtype=np.float64).reshape(-1)
+            if gg.size > 3 and g1.size > 3:
+                prog += float(gg[3]) - float(g1[3])
+            gg = g1
+            zz = np.asarray(out.z_next, dtype=np.float64).reshape(-1)
+            if bool(getattr(out, "done", False)):
+                break
+        scored.append((name, a, cost, prog, hit))
+
+    def _cone_ok(name: str) -> bool:
+        if not isinstance(cones, dict):
+            return True
+
+        def _num(key: str) -> Optional[float]:
+            raw = cones.get(key)
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return value if np.isfinite(value) else None
+
+        forward, left, right = _num("forward"), _num("left"), _num("right")
+        err = float(yaw_err)
+        if abs(err) > 1.0:
+            return name == ("yaw_l" if err > 0.0 else "yaw_r")
+        if name == "fwd" and forward is not None and forward < 5.0:
+            return False
+        if name == "fwd" and forward is not None and forward < 8.0 and abs(err) > 0.4:
+            return False
+        if name == "peel_l" and left is not None and left < 8.0:
+            return False
+        if name == "peel_r" and right is not None and right < 8.0:
+            return False
+        # Yaw only toward the goal. Yawing the other way at 5 m spun the nose
+        # into the facade and held distance at 39 m.
+        if name == "yaw_l" and err <= 0.15:
+            return False
+        if name == "yaw_r" and err >= -0.15:
+            return False
+        return True
+
+    scored = [s for s in scored if _cone_ok(s[0])]
+    alive = [s for s in scored if not s[4]]
+    pool = alive if alive else (scored if allow_hits else [])
+    if not pool:
+        err = float(yaw_err)
+        forward = left = right = None
+        if isinstance(cones, dict):
+            def _num(key: str) -> Optional[float]:
+                raw = cones.get(key)
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    return None
+                return value if np.isfinite(value) else None
+
+            forward, left, right = _num("forward"), _num("left"), _num("right")
+        err = float(yaw_err)
+        goal_side = None
+        if left is not None and right is not None:
+            goal_side = left if err > 0.0 else right
+        goal_open = (
+            forward is not None
+            and goal_side is not None
+            and goal_side >= forward + 0.8
+        )
+        if goal_open:
+            dyaw = math.copysign(min(0.12, float(lim[3])), err if abs(err) > 0.05 else 1.0)
+            return np.array([0.0, 0.0, 0.0, dyaw]), "face", float("inf"), 0.0
+        if forward is not None and forward < 6.0:
+            return np.zeros(4), "hold", float("inf"), 0.0
+        if abs(err) <= 0.35 and forward is not None and forward >= 6.0:
+            creep = np.array([min(0.35, float(lim[0])), 0.0, 0.0, 0.0])
+            return creep, "creep", float("inf"), 0.0
+        dyaw = math.copysign(min(0.12, float(lim[3])), err if abs(err) > 0.2 else 1.0)
+        stopped = np.array([0.0, 0.0, 0.0, dyaw], dtype=np.float64)
+        return stopped, "face", float("inf"), 0.0
+    c_min = min(s[2] for s in pool)
+    kept = [s for s in pool if s[2] <= c_min + float(cost_margin)]
+    if not kept:
+        kept = pool
+    best = max(kept, key=lambda s: (s[3], -s[2]))
+    if isinstance(cones, dict) and str(best[0]).startswith("yaw"):
+        def _num(key: str) -> Optional[float]:
+            raw = cones.get(key)
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return value if np.isfinite(value) else None
+
+        forward, left, right = _num("forward"), _num("left"), _num("right")
+        if (
+            forward is not None
+            and left is not None
+            and right is not None
+            and forward < 6.0
+        ):
+            goal_side = left if float(yaw_err) > 0.0 else right
+            if goal_side >= forward + 0.8:
+                return best[1], best[0], float(best[2]), float(best[3])
+            return np.zeros(4), "hold", float(best[2]), float(best[3])
+    return best[1], best[0], float(best[2]), float(best[3])
+
+
+def select_street_action(
+    cones: Dict[str, Any],
+    yaw_err: float,
+    limits: np.ndarray,
+    memory: Optional[Dict[str, float]] = None,
+) -> tuple:
+    """Hold altitude and fly where the nose is clear. Does not train and is not a shield.
+
+    Go straight only while the goal is still in front and the forward cone is
+    open. If the goal swings behind, yaw toward it in place. If the nose is
+    blocked but the goal is still ahead, shift sideways without yawing or climbing.
+    """
+    lim = np.abs(np.asarray(limits, dtype=np.float64).reshape(4))
+    mem = memory if memory is not None else {}
+
+    def _cone(key: str) -> Optional[float]:
+        raw = cones.get(key) if isinstance(cones, dict) else None
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if np.isfinite(value) else None
+
+    def _finish(raw: np.ndarray, name: str) -> tuple:
+        action = np.clip(np.asarray(raw, dtype=np.float64), -lim, lim)
+        action[0] = max(0.0, float(action[0]))
+        return action, name
+
+    forward, left, right = _cone("forward"), _cone("left"), _cone("right")
+    if forward is None or left is None or right is None:
+        return _finish(np.zeros(4), "nocone")
+
+    yaw_err = float(yaw_err)
+    # A clear cone behind the aircraft is not a route. Turn back toward the
+    # goal before any forward command. Never climb.
+    if abs(yaw_err) > 0.9:
+        dyaw = math.copysign(min(0.12, float(lim[3])), yaw_err)
+        return _finish(np.array([0.0, 0.0, 0.0, dyaw]), "face")
+
+    if forward >= 8.0 and min(left, right) >= 5.0:
+        dx = min(0.55, float(lim[0]))
+        return _finish(np.array([dx, 0.0, 0.0, 0.0]), "cruise")
+
+    side = 1.0 if left >= right else -1.0
+    dx = min(0.15, float(lim[0])) if forward >= 5.0 else 0.0
+    dy = side * min(0.30, float(lim[1]))
+    return _finish(np.array([dx, dy, 0.0, 0.0]), "shift")
+
+
+def g0_leave_returns(
+    dynamics: Any,
+    z: np.ndarray,
+    goal_rel: np.ndarray,
+    *,
+    reward_cfg: Any,
+    limits: np.ndarray,
+    dy: float,
+    open_sign: float,
+    horizon: int = 15,
+    yaw_steps: int = 5,
+) -> Dict[str, float]:
+    """15-step return of strafe, peel, and yaw-then-forward under the existing reward.
+
+    Does not update weights. The open side is fixed from the real cones at this step.
+    """
+    from experiments.aerial.rl.imagination import imagine
+
+    lim = np.asarray(limits, dtype=np.float64).reshape(4)
+    strafe = np.clip(np.array([0.0, dy, 0.0, 0.0], dtype=np.float64), -lim, lim)
+    peel = np.clip(np.array([0.2, open_sign * 0.4, 0.0, 0.0], dtype=np.float64), -lim, lim)
+    yaw = np.clip(np.array([0.0, 0.0, 0.0, open_sign * lim[3]], dtype=np.float64), -lim, lim)
+    fwd = np.clip(np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64), -lim, lim)
+    climb = np.clip(np.array([0.0, 0.0, float(lim[2]), 0.0], dtype=np.float64), -lim, lim)
+    n_yaw = max(1, min(int(yaw_steps), horizon - 1))
+    seqs = {
+        "strafe": [strafe] * horizon,
+        "peel": [peel] * horizon,
+        "yawgo": [yaw] * n_yaw + [fwd] * (horizon - n_yaw),
+        "climb": [climb] * horizon,
+    }
+    g0 = np.asarray(goal_rel, dtype=np.float64).reshape(1, -1)
+    z0 = np.asarray(z, dtype=np.float64).reshape(1, -1)
+    out: Dict[str, float] = {}
+    for name, actions in seqs.items():
+        roll = imagine(
+            dynamics,
+            _FixedActionSeq(actions),
+            z0,
+            horizon,
+            reward_cfg=reward_cfg,
+            goal_rel0=g0,
+            action_limits=lim,
+        )
+        out[name] = float(roll.returns[0])
+    return out
+
+
+def early_yaw_readout(
+    dynamics: Any,
+    z: np.ndarray,
+    goal_rel: np.ndarray,
+    *,
+    limits: np.ndarray,
+    open_sign: float,
+    strafe_dy: float,
+    max_yaw: int = 10,
+    fwd_steps: int = 8,
+) -> Dict[str, float]:
+    """Model-only score of straight flight versus a latched yaw, then forward.
+
+    The turn sign is fixed from the real cones. Yaw steps stop when the
+    predicted forward cone becomes the longest, or after ``max_yaw`` steps.
+    Straight and the actor's strafe are rolled for the same number of steps.
+    Returns collision probability and predicted goal distance, not reward.
+    """
+    from experiments.aerial.rl.goal_features import advance_goal_rel_body
+
+    lim = np.asarray(limits, dtype=np.float64).reshape(4)
+    yaw_a = np.clip(
+        np.array([0.0, 0.0, 0.0, float(open_sign) * float(lim[3])], dtype=np.float64),
+        -lim,
+        lim,
+    )
+    fwd_a = np.clip(np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64), -lim, lim)
+    fwd_a[0] = max(0.0, float(fwd_a[0]))
+    strafe_a = np.clip(
+        np.array([0.0, float(strafe_dy), 0.0, 0.0], dtype=np.float64), -lim, lim
+    )
+    z0 = np.asarray(z, dtype=np.float64).reshape(-1).copy()
+    g0 = np.asarray(goal_rel, dtype=np.float64).reshape(-1).copy()
+
+    def _dist(g: np.ndarray) -> float:
+        if g.size > 3 and np.isfinite(float(g[3])):
+            return float(g[3])
+        return float(np.linalg.norm(g[:3]))
+
+    def _step(zz: np.ndarray, gg: np.ndarray, action: np.ndarray):
+        out = dynamics.step(zz, action, goal_rel=gg)
+        p = float(getattr(out, "p_coll", 0.0) or 0.0)
+        g1 = np.asarray(advance_goal_rel_body(gg, action), dtype=np.float64).reshape(-1)
+        z1 = np.asarray(out.z_next, dtype=np.float64).reshape(-1)
+        return z1, g1, p
+
+    zz = z0.copy()
+    gg = g0.copy()
+    yaw_ps: List[float] = []
+    yaw_n = 0
+    opened = False
+    for _ in range(int(max_yaw)):
+        zz, gg, p = _step(zz, gg, yaw_a)
+        yaw_ps.append(p)
+        yaw_n += 1
+        hats = None
+        cones_fn = getattr(dynamics, "cone_hats", None)
+        if callable(cones_fn):
+            hats = cones_fn(zz)
+        if hats is not None and float(hats[0]) >= max(float(hats[1]), float(hats[2])):
+            opened = True
+            break
+    for _ in range(int(fwd_steps)):
+        zz, gg, p = _step(zz, gg, fwd_a)
+        yaw_ps.append(p)
+    n = len(yaw_ps)
+    d0 = _dist(g0)
+    yaw_d1 = _dist(gg)
+
+    def _fixed(action: np.ndarray) -> tuple:
+        zf = z0.copy()
+        gf = g0.copy()
+        ps: List[float] = []
+        for _ in range(n):
+            zf, gf, p = _step(zf, gf, action)
+            ps.append(p)
+        return ps, _dist(gf)
+
+    straight_ps, straight_d1 = _fixed(fwd_a)
+    strafe_ps, strafe_d1 = _fixed(strafe_a)
+
+    def _pmax(ps: List[float]) -> float:
+        return float(max(ps)) if ps else 1.0
+
+    yaw_p = _pmax(yaw_ps)
+    straight_p = _pmax(straight_ps)
+    return {
+        "d0": d0,
+        "yaw_p": yaw_p,
+        "yaw_d1": yaw_d1,
+        "yaw_n": float(yaw_n),
+        "opened": float(opened),
+        "straight_p": straight_p,
+        "straight_d1": straight_d1,
+        "strafe_p": _pmax(strafe_ps),
+        "strafe_d1": strafe_d1,
+        "n": float(n),
+        "yaw_better": float(
+            yaw_p + 0.05 < straight_p and yaw_d1 < d0
+        ),
+    }
+
+
+def distribution_yaw_readout(
+    dynamics: Any,
+    z: np.ndarray,
+    goal_rel: np.ndarray,
+    *,
+    limits: np.ndarray,
+    open_sign: float,
+    max_yaw: int = 10,
+    max_occupied: int = 8,
+    near_center_min: float = 0.20,
+) -> Dict[str, float]:
+    """Score yaw against straight from the predicted forward-view depth.
+
+    The depth decoder's map is split into a horizontal band. Center is the
+    middle half of the columns. Collision is compared only while a straight
+    step still has at least ``near_center_min`` of that center within 18 m.
+    The full-sequence max is recorded and does not decide ``better``.
+    """
+    from experiments.aerial.rl.depth_geometry import forward_view_mass
+    from experiments.aerial.rl.goal_features import advance_goal_rel_body
+
+    depth_fn = getattr(dynamics, "predicted_depth", None)
+    empty = {
+        "ok": 0.0,
+        "near0": 0.0,
+        "near_yaw": 0.0,
+        "near_straight": 0.0,
+        "med0": 0.0,
+        "med_open": 0.0,
+        "med_yaw": 0.0,
+        "yaw_n": 0.0,
+        "shifted": 0.0,
+        "occ_n": 0.0,
+        "straight_p": 1.0,
+        "yaw_p": 1.0,
+        "seq_straight_p": 1.0,
+        "seq_yaw_p": 1.0,
+        "better": 0.0,
+    }
+    if not callable(depth_fn):
+        return empty
+    lim = np.asarray(limits, dtype=np.float64).reshape(4)
+    yaw_a = np.clip(
+        np.array([0.0, 0.0, 0.0, float(open_sign) * float(lim[3])], dtype=np.float64),
+        -lim,
+        lim,
+    )
+    fwd_a = np.clip(np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64), -lim, lim)
+    fwd_a[0] = max(0.0, float(fwd_a[0]))
+    z0 = np.asarray(z, dtype=np.float64).reshape(-1).copy()
+    g0 = np.asarray(goal_rel, dtype=np.float64).reshape(-1).copy()
+
+    def _step(zz: np.ndarray, gg: np.ndarray, action: np.ndarray):
+        out = dynamics.step(zz, action, goal_rel=gg)
+        p = float(getattr(out, "p_coll", 0.0) or 0.0)
+        g1 = np.asarray(advance_goal_rel_body(gg, action), dtype=np.float64).reshape(-1)
+        z1 = np.asarray(out.z_next, dtype=np.float64).reshape(-1)
+        return z1, g1, p
+
+    def _mass(zz: np.ndarray) -> Optional[Dict[str, float]]:
+        depth = depth_fn(zz)
+        if depth is None:
+            return None
+        return forward_view_mass(depth)
+
+    mass0 = _mass(z0)
+    if mass0 is None:
+        return empty
+    med_open = float(mass0["med_left"] if float(open_sign) >= 0.0 else mass0["med_right"])
+
+    occ_straight: List[float] = []
+    occ_yaw: List[float] = []
+    zs = z0.copy()
+    gs = g0.copy()
+    mass_straight = mass0
+    for _ in range(int(max_occupied)):
+        mass_s = _mass(zs)
+        if mass_s is None or float(mass_s["near_center"]) < float(near_center_min):
+            break
+        mass_straight = mass_s
+        _, _, p_s = _step(zs.copy(), gs.copy(), fwd_a)
+        _, _, p_y = _step(zs.copy(), gs.copy(), yaw_a)
+        occ_straight.append(p_s)
+        occ_yaw.append(p_y)
+        zs, gs, _ = _step(zs, gs, fwd_a)
+
+    zy = z0.copy()
+    gy = g0.copy()
+    yaw_n = 0
+    mass_yaw = mass0
+    yaw_ps: List[float] = []
+    for _ in range(int(max_yaw)):
+        zy, gy, p = _step(zy, gy, yaw_a)
+        yaw_ps.append(p)
+        yaw_n += 1
+        mass_y = _mass(zy)
+        if mass_y is None:
+            break
+        mass_yaw = mass_y
+        if float(mass_yaw["near_center"]) + 0.10 < float(mass0["near_center"]):
+            break
+        if float(mass_yaw["near_center"]) < float(near_center_min):
+            break
+    for _ in range(8):
+        zy, gy, p = _step(zy, gy, fwd_a)
+        yaw_ps.append(p)
+    n_seq = len(yaw_ps)
+    zs2 = z0.copy()
+    gs2 = g0.copy()
+    straight_ps: List[float] = []
+    for _ in range(n_seq):
+        zs2, gs2, p = _step(zs2, gs2, fwd_a)
+        straight_ps.append(p)
+
+    def _pmax(ps: List[float]) -> float:
+        return float(max(ps)) if ps else 1.0
+
+    straight_p = _pmax(occ_straight)
+    yaw_p = _pmax(occ_yaw)
+    shifted = float(
+        float(mass_yaw["near_center"]) + 0.10 < float(mass0["near_center"])
+    )
+    return {
+        "ok": 1.0,
+        "near0": float(mass0["near_center"]),
+        "near_yaw": float(mass_yaw["near_center"]),
+        "near_straight": float(mass_straight["near_center"]),
+        "med0": float(mass0["med_center"]),
+        "med_open": med_open,
+        "med_yaw": float(mass_yaw["med_center"]),
+        "yaw_n": float(yaw_n),
+        "shifted": shifted,
+        "occ_n": float(len(occ_straight)),
+        "straight_p": straight_p,
+        "yaw_p": yaw_p,
+        "seq_straight_p": _pmax(straight_ps),
+        "seq_yaw_p": _pmax(yaw_ps),
+        "better": float(
+            len(occ_straight) > 0 and yaw_p + 0.05 < straight_p
+        ),
+    }
 
 
 def _goal_dist(pos: np.ndarray, goal: np.ndarray) -> float:
@@ -255,6 +768,12 @@ def main() -> int:
         help="Disable safety shield (NullSafetyShield). For ablation vs three_zone.",
     )
     parser.add_argument(
+        "--encode-current",
+        action="store_true",
+        help="Each step decides from the current frame only. "
+        "Default carries the previous latent and the last action into the next step.",
+    )
+    parser.add_argument(
         "--shield-exclusion-forward-only",
         action="store_true",
         help="Exclusion zone uses forward cone only, not full-FOV depth_min_pred.",
@@ -304,6 +823,19 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--planner", action="store_true")
     parser.add_argument("--planner-horizon", type=int, default=5)
+    parser.add_argument(
+        "--cruise-veto",
+        action="store_true",
+        help="Score the Phase-2 step with the krs6 consequence ensemble and "
+        "replace circles / unsafe cruise steps with a goal-aligned step.",
+    )
+    parser.add_argument(
+        "--consequence-ckpt",
+        action="append",
+        default=None,
+        help="Consequence checkpoint. Repeat for an ensemble. "
+        "Default is the three krs6 seeds.",
+    )
     parser.add_argument(
         "--planner-rollout",
         choices=("open_loop", "closed_loop"),
@@ -443,11 +975,11 @@ def main() -> int:
         "--subgoal-source",
         type=str,
         default="polyline",
-        choices=("polyline", "toward_g", "direct_g", "scene"),
+        choices=("polyline", "toward_g", "direct_g", "scene", "road_center"),
         help=(
             "polyline=waterline; toward_g=main (clip toward G, policy handles obstacles); "
             "scene=alias for toward_g (fan intent removed; see E1r2 analysis); "
-            "direct_g=ablation A"
+            "direct_g=ablation A; road_center=follow the open street, turn when it ends"
         ),
     )
     parser.add_argument(
@@ -546,7 +1078,12 @@ def main() -> int:
     from experiments.aerial.rl.global_ref_planner import GlobalRefConfig, GlobalRefPlanner
     from experiments.aerial.rl.depth_predictor import DepthMinPredictor, GTDepthAdapter
     from experiments.aerial.rl.tau_predictor import make_tau_predictor
-    from experiments.aerial.rl.scene_intent import SceneIntentPlanner, TowardGoalIntent
+    from experiments.aerial.rl.scene_intent import (
+        RoadCenterIntent,
+        SceneIntentPlanner,
+        TowardGoalIntent,
+        annotation_yaw_rad,
+    )
     from experiments.aerial.rl.subgoal_generator import (
         AdaptiveSubgoalGenerator,
         nearest_on_polyline,
@@ -653,6 +1190,19 @@ def main() -> int:
             tau_path,
         )
 
+    cruise_veto = None
+    if bool(args.cruise_veto):
+        from experiments.aerial.rl.cruise_veto import KRS6_CKPTS, CruiseVeto, ensemble_score_fn
+
+        ckpts = list(args.consequence_ckpt or [])
+        if not ckpts:
+            ckpts = [str((root / rel).resolve()) for rel in KRS6_CKPTS]
+        missing = [p for p in ckpts if not Path(p).is_file()]
+        if missing:
+            raise SystemExit(f"ABORT: consequence checkpoint missing: {missing}")
+        cruise_veto = CruiseVeto(ensemble_score_fn(ckpts, device_str))
+        logger.info("cruise veto on, %d consequence ckpts, surv>=%.2f", len(ckpts), cruise_veto.surv_min)
+
     phys_limits = body_delta_limits(1.0 / float(args.step_hz))
     vx_max_step = float(
         min(float(args.cruise_speed) / float(args.step_hz), float(phys_limits[0]))
@@ -671,8 +1221,17 @@ def main() -> int:
     reward_cfg.success_dist_m = float(args.success_dist)
 
     policy = LatentActorDeployPolicy(
-        dynamics, actor_ac, deterministic=True, stream_latent=True
+        dynamics,
+        actor_ac,
+        deterministic=True,
+        stream_latent=not bool(args.encode_current),
     )
+    if bool(args.encode_current):
+        logger.warning(
+            "encode-current: each step uses the current frame only"
+        )
+    else:
+        logger.info("stream latent: each step carries the previous latent and action")
 
     planner = None
     if args.planner:
@@ -762,6 +1321,11 @@ def main() -> int:
             mode=subgoal_source,
             cruise_speed=float(args.cruise_speed),
         )
+    elif subgoal_source == "road_center":
+        intent = RoadCenterIntent(
+            r_m=min(r_intent, 25.0),
+            cruise_speed=float(args.cruise_speed),
+        )
     elif subgoal_source == "scene":
         # Set d_clear proportional to the ThreeZoneShield engage threshold so E1
         # starts routing before the shield fires (not after).  At cs=25 the shield
@@ -827,6 +1391,100 @@ def main() -> int:
                 old.unlink()
             logger.info("save-dataset: %s", save_dir)
 
+    wall_passage = None
+    wall_bits = os.environ.get("WALL_BITS")
+    if wall_bits:
+        from experiments.aerial.rl.near_wall_turn import WallBitPassage
+
+        wall_passage = WallBitPassage.load(wall_bits)
+        logger.warning("wall-bit passage armed (%d bits)", int(wall_passage.bits.size))
+    visual_residual = None
+    visual_path = os.environ.get("VISUAL_RESIDUAL")
+    if visual_path:
+        from experiments.aerial.rl.visual_residual import VisualResidual
+
+        visual_residual = VisualResidual.load(visual_path, device=device_str)
+        logger.warning("visual residual armed: %s", visual_path)
+    clearance_head = None
+    clearance_path = os.environ.get("CLEARANCE_HEAD")
+    if clearance_path:
+        from experiments.aerial.rl.clearance_head import ClearanceHead
+
+        clearance_head = ClearanceHead.load(clearance_path, device=device_str)
+        logger.warning("clearance head armed: %s", clearance_path)
+    clearance_stick = None
+    yaw_prior = os.environ.get("YAW_PRIOR")
+    depth_policy = os.environ.get("DEPTH_POLICY")
+    depth_stick = os.environ.get("DEPTH_STICK")
+    clearance_stick_spec = os.environ.get("CLEARANCE_STICK")
+    if yaw_prior:
+        from experiments.aerial.rl.wm_yaw_prior import YawPriorDeploy
+
+        clearance_stick = YawPriorDeploy.load(yaw_prior, device_str)
+        logger.warning("yaw prior armed: %s", yaw_prior)
+    elif depth_policy:
+        from experiments.aerial.rl.depth_policy import DepthPolicyDeploy
+
+        clearance_stick = DepthPolicyDeploy.load(depth_policy, device_str)
+        logger.warning("depth policy armed: %s", depth_policy)
+    elif depth_stick:
+        from experiments.aerial.rl.clearance_stick import DepthStickDeploy
+
+        clearance_stick = DepthStickDeploy.load(depth_stick, device_str)
+        logger.warning("depth stick armed: %s", depth_stick)
+    elif clearance_stick_spec:
+        from experiments.aerial.rl.clearance_stick import ClearanceStickDeploy
+
+        clearance_stick = ClearanceStickDeploy.load(clearance_stick_spec, device_str)
+        logger.warning("clearance stick armed: %s", clearance_stick_spec)
+    action_chunk = None
+    chunk_path = os.environ.get("ACTION_CHUNK")
+    if chunk_path:
+        from experiments.aerial.rl.action_chunk import ActionChunkNet, ActionChunkRunner
+
+        action_chunk = ActionChunkRunner(ActionChunkNet.load(chunk_path, device=device_str))
+        logger.warning("action chunk armed: %s", chunk_path)
+    passage_player = None
+    passage_path = os.environ.get("PASSAGE_CODE")
+    if passage_path:
+        from experiments.aerial.rl.passage_code import PassagePlayer
+
+        passage_player = PassagePlayer.load(passage_path, device=device_str)
+        logger.warning(
+            "passage code armed: %s margin=%.3f release=%d",
+            passage_path,
+            passage_player.margin,
+            passage_player.release_idx,
+        )
+    passage_record = os.environ.get("PASSAGE_RECORD") == "1"
+    vision_policy = None
+    vision_path = os.environ.get("VISION_POLICY")
+    if vision_path:
+        from experiments.aerial.rl.visual_residual import VisualResidual
+
+        vision_policy = VisualResidual.load(vision_path, device=device_str)
+        logger.warning("vision policy armed: %s", vision_path)
+    learned_passage = None
+    learned_path = os.environ.get("LEARNED_PASSAGE")
+    if learned_path:
+        from experiments.aerial.rl.passage_code import LearnedPassage
+
+        learned_passage = LearnedPassage.load(learned_path, device=device_str)
+        logger.warning(
+            "learned passage armed: %s margin=%.3f", learned_path, learned_passage.margin
+        )
+    latched_stick = None
+    latched_path = os.environ.get("LATCHED_STICK")
+    if latched_path and passage_player is not None:
+        from experiments.aerial.rl.passage_code import LatchedStick
+        from experiments.aerial.rl.visual_residual import VisualResidual
+
+        latched_stick = LatchedStick(
+            passage_player, VisualResidual.load(latched_path, device=device_str)
+        )
+        logger.warning("latched stick armed: %s", latched_path)
+        passage_player = None
+
     for slot, ep_idx in enumerate(route_idxs):
         r_info = routes[ep_idx]
         pts = np.array(r_info.get("pos", r_info.get("positions")), dtype=np.float64)
@@ -838,7 +1496,10 @@ def main() -> int:
 
         subgoal_gen.reset()
         if intent is not None:
-            intent.reset()
+            if isinstance(intent, RoadCenterIntent):
+                intent.reset(heading=annotation_yaw_rad(start_yaw))
+            else:
+                intent.reset()
         # NOTE: global_planner.reset(pts, goal=goal_pos) is deferred until after
         # reset_with_spawn_retries() below, once pts/goal_pos have been
         # recomputed from the actually-lifted+retried episode. Calling it here
@@ -851,6 +1512,18 @@ def main() -> int:
             depth_pred.reset()
         tau_pred.reset()
         policy.reset()
+        if wall_passage is not None:
+            wall_passage.reset()
+        if action_chunk is not None:
+            action_chunk.reset()
+        if passage_record:
+            from experiments.aerial.rl.gap_passage import reset_close_passage
+
+            reset_close_passage()
+        if passage_player is not None:
+            passage_player.reset()
+        if latched_stick is not None:
+            latched_stick.reset()
         if planner is not None:
             planner.reset()
 
@@ -952,7 +1625,10 @@ def main() -> int:
                         logger.warning("recover script missing: %s", recover_path)
                 subgoal_gen.reset()
                 if intent is not None:
-                    intent.reset()
+                    if isinstance(intent, RoadCenterIntent):
+                        intent.reset(heading=annotation_yaw_rad(start_yaw))
+                    else:
+                        intent.reset()
                 if global_planner is not None:
                     global_planner.reset(pts, goal=goal_pos)
                 if shield is not None:
@@ -961,6 +1637,14 @@ def main() -> int:
                     depth_pred.reset()
                 tau_pred.reset()
                 policy.reset()
+                if wall_passage is not None:
+                    wall_passage.reset()
+                if action_chunk is not None:
+                    action_chunk.reset()
+                if passage_player is not None:
+                    passage_player.reset()
+                if latched_stick is not None:
+                    latched_stick.reset()
                 if planner is not None:
                     planner.reset()
                 obs = env.reset(ep_dict)
@@ -983,6 +1667,17 @@ def main() -> int:
             fail_tag: str | None = None
             interventions = 0
             hard_brakes = 0
+            veto_counts = {
+                "cruise": 0,
+                "straight": 0,
+                "peel": 0,
+                "ahead": 0,
+                "stall": 0,
+                "hover": 0,
+                "nodepth": 0,
+            }
+            if cruise_veto is not None:
+                cruise_veto.reset()
             governor_caps = 0
             intervened_steps: set[int] = set()
             hard_brake_steps: set[int] = set()
@@ -1010,11 +1705,51 @@ def main() -> int:
             stuck_best_d = float(d0)
             stuck_best_step = 0
             stuck_aborted = False
+            script_peel_left = 0
+            script_peel_sign = 0.0
+            script_peel_used = False
+            script_yaw_phase = None
+            script_yaw_sign = 0.0
+            script_yaw_n = 0
+            script_fwd_n = 0
+            script_open_mode = os.environ.get("SCRIPT_OPEN", "").strip()
+            script_open_phase = None
+            script_open_sign = 0.0
+            script_open_left = 0
+            script_open_used = False
+            yaw_collect = os.environ.get("YAW_COLLECT", "").strip() == "1"
+            yaw_collect_phase = None
+            yaw_collect_sign = 0.0
+            yaw_collect_left = 0
+            yaw_collect_used = False
+            early_press = os.environ.get("EARLY_PRESS_COLLECT", "").strip() == "1"
+            early_press_phase = None
+            early_press_sign = 0.0
+            early_press_left = 0
+            early_press_n = 0
+            early_press_hist = []
+            street_mem: Dict[str, float] = {}
+            around = None
+            if os.environ.get("AROUND") == "1":
+                from experiments.aerial.rl.around import AroundDetour
 
+                around = AroundDetour()
+            corner90 = None
+            if os.environ.get("CORNER90") == "1":
+                from experiments.aerial.rl.corner90 import Corner90Controller
+
+                corner90 = Corner90Controller.load(
+                    os.environ["CORNER90_CKPT"],
+                    depth_pred._model,
+                    args.device,
+                )
+
+            z_hold = float(np.asarray(obs.state, dtype=np.float64).reshape(-1)[2])
             for step in range(args.max_steps):
                 d_fwd = None
                 obs.info.pop("depth_min_pred", None)
                 obs.info.pop("depth_cones_pred", None)
+                obs.info.pop("depth_profile_pred", None)
                 obs.info.pop("tau_pred", None)
                 if depth_pred is not None and obs.rgb is not None:
                     pred_both = getattr(depth_pred, "predict_min_and_cones", None)
@@ -1026,18 +1761,27 @@ def main() -> int:
                         if d_min is not None:
                             obs.info["depth_min_pred"] = float(d_min)
                             d_fwd = float(d_min)
+                        depth_map = getattr(depth_pred, "last_depth", None)
+                        if depth_map is not None:
+                            from experiments.aerial.rl.depth_geometry import deploy_cones
+
+                            cones = deploy_cones(np.asarray(depth_map, dtype=np.float64))
                         if isinstance(cones, dict):
                             obs.info["depth_cones_pred"] = {
-                                k: (float(v) if v is not None else None)
+                                k: (float(v) if v is not None and np.isfinite(float(v)) else None)
                                 for k, v in cones.items()
                             }
                             cf = cones.get("forward")
                             if cf is not None and np.isfinite(float(cf)):
                                 d_fwd = float(cf)
+                                obs.info["depth_min_pred"] = float(cf)
                     else:
                         d_fwd = depth_pred.predict_min(obs)
                         if d_fwd is not None:
                             obs.info["depth_min_pred"] = float(d_fwd)
+                    from experiments.aerial.rl.cone_transition import stamp_column_profile
+
+                    stamp_column_profile(obs, depth_pred)
                 tau_v = tau_pred.predict_tau(obs)
                 if tau_v is not None:
                     obs.info["tau_pred"] = float(tau_v)
@@ -1050,7 +1794,11 @@ def main() -> int:
                         curr_yaw=curr_yaw,
                         goal=goal_pos,
                         d_fwd_hat=d_fwd,
-                        depth_cones=obs.info.get("depth_cones_pred") if subgoal_source == "scene" else None,
+                        depth_cones=(
+                            obs.info.get("depth_cones_pred")
+                            if subgoal_source in ("scene", "road_center")
+                            else None
+                        ),
                     )
                     target_world = np.array(s_info["target_world"], dtype=np.float64)
                     rem_dist = float(s_info["rem_dist"])
@@ -1140,6 +1888,10 @@ def main() -> int:
                 # In-distribution local goal for Phase 1 policy / planner
                 obs.info["goal"] = target_world.tolist()
                 obs.info["goal_rel"] = g_rel_body.tolist()
+                obs.info["hold_street"] = bool(
+                    s_info.get("subgoal_source") == "road_center"
+                    and not s_info.get("road_committed")
+                )
                 # Body yaw-to-carrot for F15 heading cost / diagnostics.
                 if float(np.hypot(g_rel_body[0], g_rel_body[1])) > 1e-6:
                     obs.info["yaw_err_rad"] = float(
@@ -1154,8 +1906,321 @@ def main() -> int:
                     planner.set_goal(target_world)
 
                 action = policy.act(obs)
+                if clearance_stick is not None:
+                    action = clearance_stick.act(obs)
+                    if step % 5 == 0 or float(np.asarray(action).reshape(-1)[0]) < 0.2:
+                        logger.info(
+                            "CLEARANCE_STICK step=%d act=%s near=%s",
+                            step,
+                            np.round(np.asarray(action), 3).tolist(),
+                            getattr(clearance_stick, "last_logit", None),
+                        )
+                elif vision_policy is not None:
+                    _lim = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                    action = np.clip(vision_policy.residual(obs.rgb), -_lim, _lim)
+                    if step < 3 or step % 20 == 0:
+                        logger.info(
+                            "VISION step=%d act=%s",
+                            step,
+                            np.round(np.asarray(action), 3).tolist(),
+                        )
+                elif passage_record:
+                    from experiments.aerial.rl.gap_passage import close_then_gap_action, gap_action
+
+                    _close_m = os.environ.get("PASSAGE_CLOSE_M")
+                    if _close_m:
+                        action, _passage_phase = close_then_gap_action(
+                            p_curr,
+                            float(curr_yaw),
+                            goal_pos,
+                            max(float(p_curr[2]), 29.0),
+                            getattr(obs, "depth", None),
+                            close_m=float(_close_m),
+                            press_yaw=float(start_yaw)
+                            + float(os.environ.get("PASSAGE_PRESS_OFFSET", "0")),
+                        )
+                    else:
+                        action, _passage_phase = gap_action(
+                            p_curr,
+                            float(curr_yaw),
+                            goal_pos,
+                            z_hold=max(float(p_curr[2]), 29.0),
+                        )
+                    if step < 3 or step % 20 == 0:
+                        logger.info(
+                            "PASSAGE step=%d phase=%s xy=(%.0f,%.0f) yaw=%.2f",
+                            step,
+                            _passage_phase,
+                            float(p_curr[0]),
+                            float(p_curr[1]),
+                            float(curr_yaw),
+                        )
+                elif latched_stick is not None:
+                    _latched = latched_stick.maybe(obs.rgb)
+                    if _latched is not None:
+                        action, _n = _latched
+                        if step < 3 or step % 20 == 0:
+                            logger.info(
+                                "LATCH step=%d n=%s act=%s",
+                                step,
+                                _n,
+                                np.round(np.asarray(action), 3).tolist(),
+                            )
+                elif learned_passage is not None:
+                    _learned = learned_passage.maybe(obs.rgb)
+                    if _learned is not None:
+                        action, _code = _learned
+                        if step < 3 or step % 20 == 0:
+                            logger.info(
+                                "LEARNED step=%d code=%s act=%s",
+                                step,
+                                _code,
+                                np.round(np.asarray(action), 3).tolist(),
+                            )
+                elif passage_player is not None:
+                    _played = passage_player.maybe(obs.rgb)
+                    if _played is not None:
+                        action = _played
+                        if step < 3 or step % 20 == 0:
+                            logger.info(
+                                "PASSAGE_CODE step=%d idx=%s act=%s",
+                                step,
+                                passage_player.idx,
+                                np.round(np.asarray(action), 3).tolist(),
+                            )
+                elif action_chunk is not None:
+                    action = action_chunk.next_action(obs.rgb)
+                    if step < 3 or step % 20 == 0:
+                        logger.info(
+                            "CHUNK step=%d q=%d act=%s",
+                            step,
+                            len(action_chunk.queue),
+                            np.round(np.asarray(action), 3).tolist(),
+                        )
+                elif clearance_head is not None and getattr(obs, "depth", None) is not None:
+                    _res = clearance_head.residual(obs)
+                    _lim = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                    action = np.clip(np.asarray(action, dtype=np.float64) + _res, -_lim, _lim)
+                    if step < 3 or step % 20 == 0:
+                        logger.info(
+                            "CLEAR step=%d res=%s act=%s",
+                            step,
+                            np.round(_res, 3).tolist(),
+                            np.round(np.asarray(action), 3).tolist(),
+                        )
+                elif visual_residual is not None:
+                    _res = visual_residual.residual(obs.rgb)
+                    _lim = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                    action = np.clip(np.asarray(action, dtype=np.float64) + _res, -_lim, _lim)
+                    if step < 3 or step % 20 == 0:
+                        logger.info(
+                            "VRES step=%d res=%s act=%s",
+                            step,
+                            np.round(_res, 3).tolist(),
+                            np.round(np.asarray(action), 3).tolist(),
+                        )
+                if wall_passage is not None:
+                    _z = getattr(policy, "_latent", None)
+                    _wall = wall_passage.apply(_z, p_curr, curr_yaw, goal_pos)
+                    if _wall is not None:
+                        action, _wall_phase = _wall
+                        if step < 3 or step % 20 == 0 or _wall_phase != getattr(wall_passage, "_logged", ""):
+                            logger.info(
+                                "WALL step=%d phase=%s xy=(%.0f,%.0f) yaw=%.2f",
+                                step,
+                                _wall_phase,
+                                float(p_curr[0]),
+                                float(p_curr[1]),
+                                float(curr_yaw),
+                            )
+                            wall_passage._logged = _wall_phase
+                    elif wall_passage.phase == "release" and not getattr(wall_passage, "_release_logged", False):
+                        logger.info(
+                            "WALL release step=%d xy=(%.0f,%.0f) yaw=%.2f",
+                            step,
+                            float(p_curr[0]),
+                            float(p_curr[1]),
+                            float(curr_yaw),
+                        )
+                        wall_passage._release_logged = True
                 action_actor = np.asarray(action, dtype=np.float64).reshape(4).copy()
                 oa_step: dict = {}
+                # Cost-head probe, including --no-planner runs: press-forward vs
+                # lateral peel toward the more open side. Does not change the action.
+                _feat = getattr(policy, "_latent", None)
+                if (
+                    _feat is not None
+                    and bool(getattr(dynamics, "obstacle_cost_trained", False))
+                    and hasattr(dynamics, "predict_obstacle_cost")
+                ):
+                    _lim = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                    _cones_now = obs.info.get("depth_cones_pred") or {}
+                    _dl, _dr = _cones_now.get("left"), _cones_now.get("right")
+                    _open = 1.0
+                    if _dl is not None and _dr is not None:
+                        _open = 1.0 if float(_dl) >= float(_dr) else -1.0
+                    _a_press = np.clip(
+                        np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64), -_lim, _lim
+                    )
+                    _a_peel = np.clip(
+                        np.array([0.2, _open * 0.7, 0.0, 0.0], dtype=np.float64),
+                        -_lim,
+                        _lim,
+                    )
+                    _a_back = np.clip(
+                        np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float64), -_lim, _lim
+                    )
+                    _a_exec = np.clip(
+                        np.asarray(action_actor, dtype=np.float64).reshape(4), -_lim, _lim
+                    )
+                    try:
+                        _oc_press = float(dynamics.predict_obstacle_cost(_feat, _a_press))
+                        _oc_peel = float(dynamics.predict_obstacle_cost(_feat, _a_peel))
+                        _oc_back = float(dynamics.predict_obstacle_cost(_feat, _a_back))
+                        _oc_exec = float(dynamics.predict_obstacle_cost(_feat, _a_exec))
+                        oa_step["oc_press"] = _oc_press
+                        oa_step["oc_peel"] = _oc_peel
+                        oa_step["oc_back"] = _oc_back
+                        oa_step["oc_exec"] = _oc_exec
+                        oa_step["oc_peel_beats_press"] = bool(_oc_peel + 1e-4 < _oc_press)
+                        oa_step["oc_peel_beats_back"] = bool(_oc_peel + 1e-4 < _oc_back)
+                        oa_step["act_dx"] = float(action_actor[0])
+                        oa_step["act_dy"] = float(action_actor[1])
+                    except Exception:
+                        pass
+                if os.environ.get("G0_LEAVE") == "1" and _feat is not None:
+                    _cones_g0 = obs.info.get("depth_cones_pred") or {}
+                    _df = _cones_g0.get("forward")
+                    _dl, _dr = _cones_g0.get("left"), _cones_g0.get("right")
+                    if (
+                        _df is not None
+                        and float(_df) < 8.0
+                        and _dl is not None
+                        and _dr is not None
+                    ):
+                        _open = 1.0 if float(_dl) >= float(_dr) else -1.0
+                        try:
+                            _g0 = g0_leave_returns(
+                                dynamics,
+                                _feat,
+                                g_rel_body,
+                                reward_cfg=reward_cfg,
+                                limits=cur_limits,
+                                dy=float(action_actor[1]),
+                                open_sign=_open,
+                            )
+                            oa_step["g0_strafe"] = _g0["strafe"]
+                            oa_step["g0_peel"] = _g0["peel"]
+                            oa_step["g0_yawgo"] = _g0["yawgo"]
+                            oa_step["g0_climb"] = _g0["climb"]
+                            _best = max(_g0, key=_g0.get)
+                            oa_step["g0_best"] = _best
+                            oa_step["g0_leave_wins"] = bool(
+                                max(_g0["peel"], _g0["yawgo"]) > _g0["strafe"] + 0.05
+                            )
+                            oa_step["g0_climb_wins"] = bool(
+                                _g0["climb"] > _g0["strafe"] + 0.05
+                            )
+                            logger.info(
+                                "G0 d_fwd=%.1f strafe=%.3f peel=%.3f yawgo=%.3f climb=%.3f best=%s",
+                                float(_df),
+                                _g0["strafe"],
+                                _g0["peel"],
+                                _g0["yawgo"],
+                                _g0["climb"],
+                                _best,
+                            )
+                        except Exception:
+                            logger.exception("G0 leave rollout failed")
+                if os.environ.get("EARLY_YAW_READ") == "1" and _feat is not None:
+                    _cones_ey = obs.info.get("depth_cones_pred") or {}
+                    _df_ey = _cones_ey.get("forward")
+                    _dl_ey, _dr_ey = _cones_ey.get("left"), _cones_ey.get("right")
+                    if (
+                        _df_ey is not None
+                        and _dl_ey is not None
+                        and _dr_ey is not None
+                        and 8.0 < float(_df_ey) <= 18.0
+                    ):
+                        from experiments.aerial.rl.depth_geometry import forward_view_mass
+
+                        _gt_near = _gt_med = _enc_near = _enc_med = float("nan")
+                        _live_near = _live_med = float("nan")
+                        _gt = getattr(obs, "depth", None)
+                        if _gt is not None:
+                            _gt_a = np.asarray(_gt, dtype=np.float64)
+                            if _gt_a.ndim == 3:
+                                _gt_a = _gt_a[0]
+                            if _gt_a.ndim == 2:
+                                _gm = forward_view_mass(_gt_a)
+                                _gt_near, _gt_med = float(_gm["near_center"]), float(_gm["med_center"])
+                        try:
+                            _ed = dynamics.predicted_depth(dynamics.encode(obs))
+                            if _ed is not None:
+                                _em = forward_view_mass(_ed)
+                                _enc_near = float(_em["near_center"])
+                                _enc_med = float(_em["med_center"])
+                            _ld = dynamics.predicted_depth(_feat)
+                            if _ld is not None:
+                                _lm = forward_view_mass(_ld)
+                                _live_near = float(_lm["near_center"])
+                                _live_med = float(_lm["med_center"])
+                        except Exception:
+                            logger.exception("DEPTH compare failed")
+                        logger.info(
+                            "DEPTH d_fwd=%.1f gt_near=%.2f gt_med=%.1f enc_near=%.2f enc_med=%.1f live_near=%.2f live_med=%.1f",
+                            float(_df_ey),
+                            _gt_near,
+                            _gt_med,
+                            _enc_near,
+                            _enc_med,
+                            _live_near,
+                            _live_med,
+                        )
+                        _open_m = max(float(_dl_ey), float(_dr_ey))
+                        _short_m = min(float(_dl_ey), float(_dr_ey))
+                        if _open_m >= float(_df_ey) and _open_m - _short_m >= 2.0:
+                            _sign_ey = 1.0 if float(_dl_ey) >= float(_dr_ey) else -1.0
+                            try:
+                                _ey = distribution_yaw_readout(
+                                    dynamics,
+                                    _feat,
+                                    g_rel_body,
+                                    limits=cur_limits,
+                                    open_sign=_sign_ey,
+                                )
+                                logger.info(
+                                    "VIEW d_fwd=%.1f sign=%+.0f near0=%.2f near_yaw=%.2f "
+                                    "near_straight=%.2f med0=%.1f med_open=%.1f med_yaw=%.1f "
+                                    "yaw_n=%d shifted=%s occ_n=%d "
+                                    "straight_p=%.3f yaw_p=%.3f "
+                                    "seq_straight_p=%.3f seq_yaw_p=%.3f better=%s",
+                                    float(_df_ey),
+                                    _sign_ey,
+                                    _ey["near0"],
+                                    _ey["near_yaw"],
+                                    _ey["near_straight"],
+                                    _ey["med0"],
+                                    _ey["med_open"],
+                                    _ey["med_yaw"],
+                                    int(_ey["yaw_n"]),
+                                    bool(_ey["shifted"]),
+                                    int(_ey["occ_n"]),
+                                    _ey["straight_p"],
+                                    _ey["yaw_p"],
+                                    _ey["seq_straight_p"],
+                                    _ey["seq_yaw_p"],
+                                    bool(_ey["better"]),
+                                )
+                            except Exception:
+                                logger.exception("EARLY_YAW readout failed")
+                        else:
+                            logger.info(
+                                "EARLY_YAW skip d_fwd=%.1f L=%.1f R=%.1f side_not_clearer",
+                                float(_df_ey),
+                                float(_dl_ey),
+                                float(_dr_ey),
+                            )
                 if planner is not None:
                     action = planner.plan(obs, action, latent=policy._latent)
                     plan_meta = getattr(planner, "last_plan_meta", None) or {}
@@ -1241,7 +2306,28 @@ def main() -> int:
                             cur_limits,
                             forbid_backward=bool(
                                 getattr(reward_cfg, "forbid_backward_motion", False)
-                            ),
+                        ),
+                    )
+
+                if cruise_veto is not None:
+                    _depth_map = (
+                        getattr(depth_pred, "last_depth", None) if depth_pred is not None else None
+                    )
+                    action, _vtag = cruise_veto.apply(
+                        action, _depth_map, p_curr, float(curr_yaw), goal_pos, cur_limits
+                    )
+                    veto_counts[_vtag] = veto_counts.get(_vtag, 0) + 1
+                    if step < 3 or step % 20 == 0:
+                        _vl = cruise_veto.last
+                        logger.info(
+                            "VETO step=%d tag=%s surv_c=%.2f surv_s=%.2f prog_c=%.2f prog_s=%.2f d=%.1f",
+                            step,
+                            _vtag,
+                            float(_vl.get("surv_c", float("nan"))),
+                            float(_vl.get("surv_s", float("nan"))),
+                            float(_vl.get("prog_c", float("nan"))),
+                            float(_vl.get("prog_s", float("nan"))),
+                            float(_vl.get("d_goal", float("nan"))),
                         )
 
                 # Probe p_coll for shield without consuming deploy latent stream
@@ -1295,11 +2381,731 @@ def main() -> int:
                         governor_cap_steps.add(step)
                     action = act_safe
 
+                if corner90 is not None and obs.rgb is not None:
+                    action = corner90.act(obs.rgb, p_curr, curr_yaw, goal_pos)
+                    action = np.clip(
+                        action,
+                        -np.abs(np.asarray(cur_limits, dtype=np.float64)),
+                        np.abs(np.asarray(cur_limits, dtype=np.float64)),
+                    )
+                    oa_step["corner90"] = True
+                    if step < 3 or step % 20 == 0:
+                        logger.info(
+                            "CORNER90 step=%d dx=%.2f dy=%.2f dyaw=%.2f",
+                            step,
+                            float(action[0]),
+                            float(action[1]),
+                            float(action[3]),
+                        )
+
+                if around is not None:
+                    gt_depth = getattr(obs, "depth", None)
+                    if gt_depth is not None:
+                        gt_arr = np.asarray(gt_depth, dtype=np.float64)
+                        if gt_arr.ndim == 3:
+                            gt_arr = gt_arr[0]
+                        from experiments.aerial.rl.depth_geometry import approach_clearances
+
+                        gf, gl, gr = approach_clearances(gt_arr, center_frac=0.12)
+                    else:
+                        cones_now = obs.info.get("depth_cones_pred") or {}
+                        gf = cones_now.get("forward")
+                        gl = cones_now.get("left")
+                        gr = cones_now.get("right")
+                    if gf is not None and gl is not None and gr is not None:
+                        action, around_phase = around.act(
+                            p_curr,
+                            curr_yaw,
+                            goal_pos,
+                            float(gf),
+                            float(gl),
+                            float(gr),
+                            cur_limits,
+                        )
+                        oa_step["around"] = around_phase
+                        if step < 5 or step % 15 == 0 or around_phase in (
+                            "latch",
+                            "relatch",
+                            "flip",
+                            "recheck",
+                        ):
+                            logger.info(
+                                "AROUND step=%d phase=%s F=%.1f L=%.1f R=%.1f",
+                                step,
+                                around_phase,
+                                float(gf),
+                                float(gl),
+                                float(gr),
+                            )
+
                 if bool(getattr(reward_cfg, "forbid_backward_motion", False)):
                     from experiments.aerial.rl.env.action import forbid_backward_dx
 
                     action = forbid_backward_dx(action)
 
+                if os.environ.get("ORACLE_STEP") == "1" and policy._latent is not None:
+                    try:
+                        _oa, _oname, _ocost, _oprog = select_receding_primitive(
+                            dynamics,
+                            policy._latent,
+                            g_rel_body,
+                            cur_limits,
+                        )
+                        action = np.asarray(_oa, dtype=np.float64).reshape(4)
+                        oa_step["oracle"] = _oname
+                        oa_step["oracle_cost"] = float(_ocost)
+                        oa_step["oracle_prog"] = float(_oprog)
+                        if step < 3 or step % 25 == 0:
+                            logger.info(
+                                "ORACLE step=%d choice=%s cost=%.3f prog=%.3f",
+                                step,
+                                _oname,
+                                float(_ocost),
+                                float(_oprog),
+                            )
+                    except Exception:
+                        logger.exception("ORACLE select failed")
+
+                if os.environ.get("STREET") == "1" and policy._latent is not None:
+                    _cones_st = obs.info.get("depth_cones_pred") or {}
+                    _yaw_err = float(obs.info.get("yaw_err_rad") or 0.0)
+                    try:
+                        _sa, _sname, _scost, _sprog = select_receding_primitive(
+                            dynamics,
+                            policy._latent,
+                            g_rel_body,
+                            cur_limits,
+                            horizon=8,
+                            cones=_cones_st,
+                            yaw_err=_yaw_err,
+                            allow_hits=False,
+                        )
+                        action = np.asarray(_sa, dtype=np.float64).reshape(4)
+                        action[2] = 0.0
+                        _sf = _cones_st.get("forward")
+                        _sl = _cones_st.get("left")
+                        _sr = _cones_st.get("right")
+                        _su = _cones_st.get("up")
+                        try:
+                            _sf, _sl, _sr = float(_sf), float(_sl), float(_sr)
+                        except (TypeError, ValueError):
+                            _sf = _sl = _sr = None
+                        try:
+                            _su = float(_su)
+                        except (TypeError, ValueError):
+                            _su = None
+                        _skirt_left = int(street_mem.get("skirt_left") or 0)
+                        _skirt_on = False
+                        if _sf is not None and _sl is not None and _sr is not None:
+                            _locked = float(street_mem.get("skirt") or 0.0)
+                            _open_locked = (
+                                _sl if _locked > 0.0 else _sr if _locked < 0.0 else 0.0
+                            )
+                            # Stay on the side chosen at trigger. Do not flip:
+                            # flipping yawed the nose back and forth in place.
+                            if (
+                                _skirt_left > 0
+                                and _open_locked >= 8.0
+                                and _sf >= 6.0
+                            ):
+                                _skirt_on = True
+                            elif (
+                                _skirt_left <= 0
+                                and 8.0 <= _sf <= 16.0
+                                and min(_sl, _sr) >= 8.0
+                                and abs(_yaw_err) < 0.35
+                            ):
+                                street_mem["skirt"] = 1.0 if _sl >= _sr else -1.0
+                                street_mem["skirt_left"] = 16
+                                street_mem["skirt_mode"] = "commit"
+                                _skirt_left = 16
+                                _skirt_on = True
+                        if _skirt_on:
+                            _side = float(street_mem.get("skirt") or 1.0)
+                            _open = _sl if _side > 0.0 else _sr
+                            _lims = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                            _yaw_cap = min(0.12, float(_lims[3]))
+                            if _sf >= 8.0 and abs(_yaw_err) <= 0.50:
+                                action = np.array(
+                                    [min(0.50, float(_lims[0])), 0.0, 0.0, 0.0],
+                                    dtype=np.float64,
+                                )
+                                _sname = "skirt_go"
+                                if _sf >= 14.0:
+                                    street_mem["skirt_left"] = 0
+                                    street_mem["skirt_mode"] = ""
+                            elif _open >= _sf + 2.0 and abs(_yaw_err) < 0.90:
+                                action = np.array(
+                                    [0.0, 0.0, 0.0, _side * _yaw_cap],
+                                    dtype=np.float64,
+                                )
+                                _sname = "skirt_yaw"
+                            elif _sf >= 6.0:
+                                action = np.array(
+                                    [min(0.35, float(_lims[0])), 0.0, 0.0, 0.0],
+                                    dtype=np.float64,
+                                )
+                                _sname = "skirt_go"
+                            else:
+                                action = np.zeros(4, dtype=np.float64)
+                                _sname = "hold"
+                                street_mem["skirt_left"] = 0
+                                street_mem["skirt_mode"] = ""
+                            if street_mem.get("skirt_left", 0):
+                                street_mem["skirt_left"] = max(0, _skirt_left - 1)
+                        # Corner: goal bearing goes through the facade and every
+                        # cone is short. Yaw off that bearing, then fly the new
+                        # heading. Do not yaw back toward the goal until it is
+                        # ahead again. One attempt per episode.
+                        if _sf is not None and _sl is not None and _sr is not None:
+                            if max(_sl, _sr) >= 15.0 and abs(_sl - _sr) >= 5.0:
+                                street_mem["open_side"] = 1.0 if _sl >= _sr else -1.0
+                            _phase = int(street_mem.get("escape_phase") or 0)
+                            _pocket = (
+                                _sf < 8.0
+                                and _sl < 10.0
+                                and _sr < 10.0
+                                and float(d_to_goal) > 20.0
+                                and not _skirt_on
+                            )
+                            if _phase == 0 and _pocket and not street_mem.get("escape_used"):
+                                street_mem["escape_phase"] = 1
+                                street_mem["escape_left"] = 14
+                                street_mem["escape_side"] = float(
+                                    street_mem.get("open_side") or 1.0
+                                )
+                                street_mem["escape_d0"] = float(d_to_goal)
+                                street_mem["escape_used"] = 1.0
+                                _phase = 1
+                            if _phase == 1 or _phase == 2:
+                                _lims = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                                _yside = float(street_mem.get("escape_side") or 1.0)
+                                _d0 = float(street_mem.get("escape_d0") or d_to_goal)
+                                _left = int(street_mem.get("escape_left") or 0)
+                                _best = float(street_mem.get("escape_best") or _d0)
+                                if float(d_to_goal) < _best:
+                                    _best = float(d_to_goal)
+                                    street_mem["escape_best"] = _best
+                                _flew_away = float(d_to_goal) > min(_d0 + 30.0, _best + 8.0)
+                                if _flew_away:
+                                    street_mem["escape_phase"] = 0
+                                    street_mem["escape_left"] = 0
+                                    _face = math.copysign(
+                                        min(0.12, float(_lims[3])),
+                                        _yaw_err if abs(_yaw_err) > 0.2 else 1.0,
+                                    )
+                                    action = np.array([0.0, 0.0, 0.0, _face], dtype=np.float64)
+                                    _sname = "escape_back"
+                                elif _phase == 1 and _sf >= 12.0:
+                                    street_mem["escape_phase"] = 2
+                                    street_mem["escape_left"] = 80
+                                    action = np.array(
+                                        [min(0.45, float(_lims[0])), 0.0, 0.0, 0.0],
+                                        dtype=np.float64,
+                                    )
+                                    _sname = "escape_go"
+                                elif _phase == 1 and _left > 0:
+                                    action = np.array(
+                                        [0.0, 0.0, 0.0, _yside * min(0.12, float(_lims[3]))],
+                                        dtype=np.float64,
+                                    )
+                                    _sname = "escape_yaw"
+                                    street_mem["escape_left"] = _left - 1
+                                elif _phase == 1:
+                                    street_mem["escape_phase"] = 2
+                                    street_mem["escape_left"] = 80
+                                    action = np.zeros(4, dtype=np.float64)
+                                    _sname = "escape_yaw"
+                                else:
+                                    _clear = abs(_yaw_err) < 0.45 and _sf >= 10.0
+                                    if _clear or _left <= 0 or _sf < 6.0:
+                                        street_mem["escape_phase"] = 0
+                                        street_mem["escape_left"] = 0
+                                        if _sf < 6.0 and not _clear:
+                                            action = np.zeros(4, dtype=np.float64)
+                                            _sname = "hold"
+                                            # First yaw never opened a lane. Try the
+                                            # other direction once before sitting.
+                                            if (
+                                                float(d_to_goal) > 20.0
+                                                and not street_mem.get("escape_flipped")
+                                            ):
+                                                street_mem["escape_flipped"] = 1.0
+                                                street_mem["escape_used"] = 0.0
+                                                street_mem["escape_side"] = -float(
+                                                    street_mem.get("escape_side") or 1.0
+                                                )
+                                                street_mem["open_side"] = street_mem["escape_side"]
+                                    else:
+                                        _longer = _sl if _sl >= _sr else _sr
+                                        if _sf < 12.0 and _longer > _sf + 1.0:
+                                            _turn = 1.0 if _sl >= _sr else -1.0
+                                            action = np.array(
+                                                [0.0, 0.0, 0.0, _turn * min(0.10, float(_lims[3]))],
+                                                dtype=np.float64,
+                                            )
+                                            _sname = "escape_yaw"
+                                        else:
+                                            action = np.array(
+                                                [min(0.45, float(_lims[0])), 0.0, 0.0, 0.0],
+                                                dtype=np.float64,
+                                            )
+                                            _sname = "escape_go"
+                                        street_mem["escape_left"] = _left - 1
+                            # Last few metres: a zero command sinks, and the 3D
+                            # distance grows even though the horizontal gap is small.
+                            if (
+                                int(street_mem.get("escape_phase") or 0) == 0
+                                and 8.0 < float(d_to_goal) < 30.0
+                                and _sf < 8.0
+                            ):
+                                _lims = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                                _dz = 0.0
+                                if float(p_curr[2]) < float(goal_pos[2]) - 0.4:
+                                    _dz = min(0.15, float(_lims[2]))
+                                _slide = 0.0
+                                if _sl >= _sf + 0.8 and _sl >= _sr and _sl >= 6.0:
+                                    _slide = 1.0
+                                elif _sr >= _sf + 0.8 and _sr > _sl and _sr >= 6.0:
+                                    _slide = -1.0
+                                _close_left = int(street_mem.get("close_left") or 0)
+                                _rev_left = int(street_mem.get("rev_left") or 0)
+                                _walled = max(_sf, _sl, _sr) < 6.0
+                                _overhead_closed = (
+                                    _su is not None and _su < 8.0 and _sf < 10.0 and float(d_to_goal) > 12.0
+                                )
+                                if _overhead_closed and (
+                                    _rev_left > 0 or not street_mem.get("rev_used")
+                                ):
+                                    if _rev_left <= 0:
+                                        street_mem["rev_left"] = 24
+                                        street_mem["rev_used"] = 1.0
+                                        street_mem["rev_side"] = -float(
+                                            street_mem.get("escape_side") or 1.0
+                                        )
+                                        _rev_left = 24
+                                    _turn = float(street_mem.get("rev_side") or 1.0)
+                                    action = np.array(
+                                        [0.0, 0.0, 0.0, _turn * min(0.12, float(_lims[3]))],
+                                        dtype=np.float64,
+                                    )
+                                    _sname = "reverse_yaw"
+                                    street_mem["rev_left"] = _rev_left - 1
+                                elif _slide != 0.0 and _close_left <= 0:
+                                    action = np.array(
+                                        [
+                                            min(0.12, float(_lims[0])),
+                                            _slide * min(0.25, float(_lims[1])),
+                                            _dz,
+                                            0.0,
+                                        ],
+                                        dtype=np.float64,
+                                    )
+                                    _sname = "finish_slide"
+                                elif (
+                                    _walled
+                                    and _su is not None
+                                    and _su >= 10.0
+                                    and float(p_curr[2]) < 40.0
+                                    and int(street_mem.get("climb_left") or 0) > 0
+                                    or (
+                                        _walled
+                                        and _su is not None
+                                        and _su >= 10.0
+                                        and float(p_curr[2]) < 40.0
+                                        and not street_mem.get("climb_used")
+                                    )
+                                ):
+                                    if int(street_mem.get("climb_left") or 0) <= 0:
+                                        street_mem["climb_left"] = 20
+                                        street_mem["climb_used"] = 1.0
+                                    action = np.array(
+                                        [0.0, 0.0, min(0.25, float(_lims[2])), 0.0],
+                                        dtype=np.float64,
+                                    )
+                                    _sname = "climb_out"
+                                    street_mem["climb_left"] = int(street_mem["climb_left"]) - 1
+                                elif _walled and (
+                                    _close_left > 0 or not street_mem.get("close_used")
+                                ):
+                                    if _close_left <= 0:
+                                        street_mem["close_left"] = 18
+                                        street_mem["close_side"] = 1.0 if _sl >= _sr else -1.0
+                                        street_mem["close_used"] = 1.0
+                                        _close_left = 18
+                                    _turn = float(street_mem.get("close_side") or 1.0)
+                                    action = np.array(
+                                        [0.0, 0.0, _dz, _turn * min(0.12, float(_lims[3]))],
+                                        dtype=np.float64,
+                                    )
+                                    _sname = "close_yaw"
+                                    street_mem["close_left"] = _close_left - 1
+                                elif _sf >= 6.0 and min(_sl, _sr) >= 6.0 and abs(_yaw_err) < 0.5:
+                                    action = np.array(
+                                        [min(0.22, float(_lims[0])), 0.0, _dz, 0.0],
+                                        dtype=np.float64,
+                                    )
+                                    _sname = "finish_creep"
+                                elif _dz > 0.0:
+                                    action = np.array([0.0, 0.0, _dz, 0.0], dtype=np.float64)
+                                    _sname = "finish_z"
+                        oa_step["street"] = _sname
+                        if step < 5 or step % 20 == 0:
+                            logger.info(
+                                "STREET step=%d choice=%s cost=%.2f d_fwd=%s L=%s R=%s U=%s yaw_err=%.2f z=%.1f d_to_g=%.1f",
+                                step,
+                                _sname,
+                                float(_scost) if np.isfinite(_scost) else -1.0,
+                                None if _cones_st.get("forward") is None else round(float(_cones_st["forward"]), 1),
+                                None if _cones_st.get("left") is None else round(float(_cones_st["left"]), 1),
+                                None if _cones_st.get("right") is None else round(float(_cones_st["right"]), 1),
+                                None if _cones_st.get("up") is None else round(float(_cones_st["up"]), 1),
+                                _yaw_err,
+                                float(p_curr[2]),
+                                float(d_to_goal),
+                            )
+                    except Exception:
+                        logger.exception("STREET select failed")
+                        _sa, _sname = select_street_action(
+                            obs.info.get("depth_cones_pred") or {},
+                            float(obs.info.get("yaw_err_rad") or 0.0),
+                            cur_limits,
+                        )
+                        action = np.asarray(_sa, dtype=np.float64).reshape(4)
+                        oa_step["street"] = _sname
+
+                # One 15-step open-side peel, then back to the policy. No training.
+                if os.environ.get("SCRIPT_PEEL") == "1":
+                    _c_sp = obs.info.get("depth_cones_pred") or {}
+                    _df_sp = _c_sp.get("forward")
+                    _dl_sp, _dr_sp = _c_sp.get("left"), _c_sp.get("right")
+                    if (
+                        script_peel_left <= 0
+                        and not script_peel_used
+                        and _df_sp is not None
+                        and _dl_sp is not None
+                        and _dr_sp is not None
+                        and float(_df_sp) < 8.0
+                        and max(float(_dl_sp), float(_dr_sp)) - float(_df_sp) >= 2.0
+                    ):
+                        script_peel_left = 15
+                        script_peel_sign = 1.0 if float(_dl_sp) >= float(_dr_sp) else -1.0
+                        script_peel_used = True
+                        logger.info(
+                            "SCRIPT_PEEL start step=%d d_to_g=%.2f d_fwd=%.2f sign=%+.0f",
+                            step,
+                            float(d_to_goal),
+                            float(_df_sp),
+                            script_peel_sign,
+                        )
+                    if script_peel_left > 0:
+                        _lim_sp = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                        action = np.clip(
+                            np.array(
+                                [0.2, script_peel_sign * 0.4, 0.0, 0.0],
+                                dtype=np.float64,
+                            ),
+                            -_lim_sp,
+                            _lim_sp,
+                        )
+                        action[0] = max(0.0, float(action[0]))
+                        script_peel_left -= 1
+                        oa_step["script_peel"] = True
+                        oa_step["script_peel_last"] = script_peel_left == 0
+
+                # Yaw toward the open side with no forward speed. Go forward only
+                # after the forward cone has opened. One burst per episode.
+                if os.environ.get("SCRIPT_YAWGO") == "1":
+                    _c_y = obs.info.get("depth_cones_pred") or {}
+                    _df_y = _c_y.get("forward")
+                    _dl_y, _dr_y = _c_y.get("left"), _c_y.get("right")
+                    if (
+                        script_yaw_phase is None
+                        and _df_y is not None
+                        and _dl_y is not None
+                        and _dr_y is not None
+                        and float(_df_y) < 8.0
+                        and max(float(_dl_y), float(_dr_y)) - float(_df_y) >= 2.0
+                    ):
+                        script_yaw_phase = "yaw"
+                        script_yaw_sign = 1.0 if float(_dl_y) >= float(_dr_y) else -1.0
+                        logger.info(
+                            "SCRIPT_YAW start step=%d d_to_g=%.2f d_fwd=%.2f sign=%+.0f yaw=%.1f",
+                            step,
+                            float(d_to_goal),
+                            float(_df_y),
+                            script_yaw_sign,
+                            float(np.degrees(curr_yaw)),
+                        )
+                    if script_yaw_phase == "yaw":
+                        _opened = _df_y is not None and float(_df_y) >= 8.0
+                        if _opened or script_yaw_n >= 10:
+                            if _opened:
+                                script_yaw_phase = "fwd"
+                                logger.info(
+                                    "SCRIPT_YAW opened step=%d d_fwd=%.2f yaw_steps=%d yaw=%.1f",
+                                    step,
+                                    float(_df_y),
+                                    script_yaw_n,
+                                    float(np.degrees(curr_yaw)),
+                                )
+                            else:
+                                script_yaw_phase = "done"
+                                logger.info(
+                                    "SCRIPT_YAW no-open step=%d d_fwd=%.2f yaw_steps=%d",
+                                    step,
+                                    float(_df_y) if _df_y is not None else -1.0,
+                                    script_yaw_n,
+                                )
+                        else:
+                            _lim_y = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                            action = np.clip(
+                                np.array(
+                                    [0.0, 0.0, 0.0, script_yaw_sign * float(_lim_y[3])],
+                                    dtype=np.float64,
+                                ),
+                                -_lim_y,
+                                _lim_y,
+                            )
+                            script_yaw_n += 1
+                            oa_step["script_yaw"] = True
+                    if script_yaw_phase == "fwd":
+                        if script_fwd_n >= 5:
+                            script_yaw_phase = "done"
+                        else:
+                            _lim_y = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                            action = np.clip(
+                                np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64),
+                                -_lim_y,
+                                _lim_y,
+                            )
+                            script_fwd_n += 1
+                            oa_step["script_fwd"] = True
+                            oa_step["script_fwd_last"] = script_fwd_n == 5
+                            if script_fwd_n == 5:
+                                script_yaw_phase = "done"
+
+                # One open-loop burst at the first wall contact, then the policy.
+                # climb: straight up. long: 40-step open-side peel. pull: strafe
+                # clear, then yaw toward the opening, then a short forward.
+                if script_open_mode in ("climb", "long", "pull"):
+                    _c_o = obs.info.get("depth_cones_pred") or {}
+                    _df_o = _c_o.get("forward")
+                    _dl_o, _dr_o = _c_o.get("left"), _c_o.get("right")
+                    _wall = (
+                        _df_o is not None
+                        and _dl_o is not None
+                        and _dr_o is not None
+                        and float(_df_o) < 8.0
+                        and max(float(_dl_o), float(_dr_o)) - float(_df_o) >= 2.0
+                    )
+                    if script_open_phase is None and not script_open_used and _wall:
+                        script_open_used = True
+                        script_open_sign = 1.0 if float(_dl_o) >= float(_dr_o) else -1.0
+                        if script_open_mode == "climb":
+                            script_open_phase = "climb"
+                            script_open_left = 25
+                        elif script_open_mode == "long":
+                            script_open_phase = "long"
+                            script_open_left = 40
+                        else:
+                            script_open_phase = "pull"
+                            script_open_left = 20
+                        logger.info(
+                            "SCRIPT_OPEN %s start step=%d d_to_g=%.2f d_fwd=%.2f sign=%+.0f",
+                            script_open_mode,
+                            step,
+                            float(d_to_goal),
+                            float(_df_o),
+                            script_open_sign,
+                        )
+                    if script_open_phase in ("climb", "long", "pull", "yaw", "fwd"):
+                        _lim_o = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                        if script_open_phase == "climb" and script_open_left > 0:
+                            action = np.array([0.0, 0.0, float(_lim_o[2]), 0.0])
+                            script_open_left -= 1
+                            oa_step["script_open"] = "climb"
+                            if script_open_left == 0:
+                                script_open_phase = "done"
+                        elif script_open_phase == "long" and script_open_left > 0:
+                            action = np.array(
+                                [0.2, script_open_sign * 0.4, 0.0, 0.0], dtype=np.float64
+                            )
+                            script_open_left -= 1
+                            oa_step["script_open"] = "long"
+                            if script_open_left == 0:
+                                script_open_phase = "done"
+                        elif script_open_phase == "pull" and script_open_left > 0:
+                            action = np.array(
+                                [0.0, script_open_sign * 0.4, 0.0, 0.0], dtype=np.float64
+                            )
+                            script_open_left -= 1
+                            oa_step["script_open"] = "pull"
+                            if script_open_left == 0:
+                                script_open_phase = "yaw"
+                        elif script_open_phase == "yaw":
+                            _opened = _df_o is not None and float(_df_o) >= 8.0
+                            if _opened or script_open_left >= 8:
+                                script_open_phase = "fwd"
+                                script_open_left = 10
+                                logger.info(
+                                    "SCRIPT_OPEN pull yaw done step=%d d_fwd=%.2f opened=%s",
+                                    step,
+                                    float(_df_o) if _df_o is not None else -1.0,
+                                    _opened,
+                                )
+                            else:
+                                action = np.array(
+                                    [0.0, 0.0, 0.0, script_open_sign * float(_lim_o[3])],
+                                    dtype=np.float64,
+                                )
+                                script_open_left += 1
+                                oa_step["script_open"] = "pull_yaw"
+                        if script_open_phase == "fwd" and script_open_left > 0:
+                            action = np.array([0.5, 0.0, 0.0, 0.0], dtype=np.float64)
+                            script_open_left -= 1
+                            oa_step["script_open"] = "pull_fwd"
+                            if script_open_left == 0:
+                                script_open_phase = "done"
+                        if script_open_phase == "done" and oa_step.get("script_open"):
+                            action = np.clip(action, -_lim_o, _lim_o)
+                            action[0] = max(0.0, float(action[0]))
+                        elif script_open_phase not in (None, "done"):
+                            action = np.clip(
+                                np.asarray(action, dtype=np.float64).reshape(4),
+                                -_lim_o,
+                                _lim_o,
+                            )
+                            action[0] = max(0.0, float(action[0]))
+
+                # One latched yaw, then a short forward. Records a real turn.
+                if yaw_collect:
+                    _c_yc = obs.info.get("depth_cones_pred") or {}
+                    _df_yc = _c_yc.get("forward")
+                    _dl_yc, _dr_yc = _c_yc.get("left"), _c_yc.get("right")
+                    _early = (
+                        _df_yc is not None
+                        and _dl_yc is not None
+                        and _dr_yc is not None
+                        and 8.0 < float(_df_yc) <= 18.0
+                        and max(float(_dl_yc), float(_dr_yc)) >= float(_df_yc)
+                        and max(float(_dl_yc), float(_dr_yc)) - min(float(_dl_yc), float(_dr_yc)) >= 2.0
+                    )
+                    if yaw_collect_phase is None and not yaw_collect_used and _early:
+                        yaw_collect_used = True
+                        yaw_collect_phase = "yaw"
+                        yaw_collect_left = 10
+                        yaw_collect_sign = 1.0 if float(_dl_yc) >= float(_dr_yc) else -1.0
+                        logger.info(
+                            "YAW_COLLECT start step=%d d_fwd=%.2f sign=%+.0f",
+                            step,
+                            float(_df_yc),
+                            yaw_collect_sign,
+                        )
+                    if yaw_collect_phase == "yaw" and yaw_collect_left > 0:
+                        _lim_yc = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                        action = np.array(
+                            [0.0, 0.0, 0.0, yaw_collect_sign * float(_lim_yc[3])],
+                            dtype=np.float64,
+                        )
+                        yaw_collect_left -= 1
+                        if yaw_collect_left == 0:
+                            yaw_collect_phase = "fwd"
+                            yaw_collect_left = 8
+                    elif yaw_collect_phase == "fwd" and yaw_collect_left > 0:
+                        action = np.array([0.5, 0.0, 0.0, 0.0], dtype=np.float64)
+                        yaw_collect_left -= 1
+                        if yaw_collect_left == 0:
+                            yaw_collect_phase = "done"
+                            logger.info("YAW_COLLECT end step=%d", step)
+
+                # Frontal obstacle only: 10th-percentile forward, neither side
+                # closer than that. Press while the range keeps falling, then
+                # yaw only if the run is a stable approach.
+                if early_press:
+                    from experiments.aerial.rl.depth_geometry import (
+                        approach_clearances,
+                        frontal_obstacle_frame,
+                        stable_approach,
+                    )
+
+                    _depth_ep = getattr(obs, "depth", None)
+                    _df_ep = _dl_ep = _dr_ep = None
+                    _ok_ep = False
+                    if _depth_ep is not None:
+                        try:
+                            _df_ep, _dl_ep, _dr_ep = approach_clearances(_depth_ep)
+                            _ok_ep = frontal_obstacle_frame(_df_ep, _dl_ep, _dr_ep)
+                        except ValueError:
+                            _ok_ep = False
+                    if early_press_phase is None and _ok_ep:
+                        early_press_phase = "press"
+                        early_press_left = 8
+                        early_press_hist = []
+                        early_press_sign = 1.0 if float(_dl_ep) >= float(_dr_ep) else -1.0
+                        logger.info(
+                            "EARLY_PRESS start step=%d d_fwd=%.2f L=%.1f R=%.1f sign=%+.0f",
+                            step,
+                            float(_df_ep),
+                            float(_dl_ep),
+                            float(_dr_ep),
+                            early_press_sign,
+                        )
+                    if early_press_phase == "press":
+                        _prev_ep = early_press_hist[-1] if early_press_hist else None
+                        _jump_ep = (
+                            _prev_ep is not None
+                            and _df_ep is not None
+                            and abs(float(_df_ep) - float(_prev_ep)) > 2.0
+                        )
+                        _take_ep = bool(
+                            _ok_ep and not _jump_ep and early_press_left > 0 and _df_ep is not None
+                        )
+                        if _take_ep:
+                            action = np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float64)
+                            early_press_hist.append(float(_df_ep))
+                            early_press_left -= 1
+                        if (not _take_ep) or early_press_left == 0:
+                            _drop = float(early_press_hist[0] - early_press_hist[-1]) if early_press_hist else 0.0
+                            if stable_approach(early_press_hist):
+                                early_press_phase = "yaw"
+                                early_press_left = 8
+                                logger.info(
+                                    "EARLY_PRESS keep step=%d n=%d drop=%.2f",
+                                    step,
+                                    len(early_press_hist),
+                                    _drop,
+                                )
+                            else:
+                                early_press_phase = None
+                                logger.info(
+                                    "EARLY_PRESS drop step=%d n=%d drop=%.2f",
+                                    step,
+                                    len(early_press_hist),
+                                    _drop,
+                                )
+                                early_press_hist = []
+                    elif early_press_phase == "yaw" and early_press_left > 0:
+                        _lim_ep = np.asarray(cur_limits, dtype=np.float64).reshape(4)
+                        action = np.array(
+                            [0.0, 0.0, 0.0, early_press_sign * float(_lim_ep[3])],
+                            dtype=np.float64,
+                        )
+                        early_press_left -= 1
+                        if early_press_left == 0:
+                            early_press_phase = None
+                            early_press_hist = []
+                            logger.info("EARLY_PRESS end step=%d", step)
+
+                # Keep the flight at the spawn height. Below it, climb back;
+                # above it, descend back. Inside the band, do not accumulate climb.
+                _z_now = float(np.asarray(obs.state, dtype=np.float64).reshape(-1)[2])
+                if _z_now < z_hold - 0.5:
+                    action[2] = max(float(action[2]), 0.25)
+                elif _z_now > z_hold + 0.5:
+                    action[2] = min(float(action[2]), -0.25)
+                else:
+                    action[2] = 0.0
                 # Snapshot cones before step — post-step obs has no depth_cones_pred.
                 _cones_pre = dict(obs.info.get("depth_cones_pred") or {})
 
@@ -1313,6 +3119,20 @@ def main() -> int:
                 p_prev = p_curr.copy()
                 p_curr = np.array(obs.position, dtype=np.float64)
                 curr_yaw = float(obs.yaw) if hasattr(obs, "yaw") else curr_yaw
+                if oa_step.get("script_peel_last"):
+                    logger.info(
+                        "SCRIPT_PEEL end step=%d d_to_g=%.2f collided=%s",
+                        step,
+                        float(np.linalg.norm(goal_pos - p_curr)),
+                        bool(getattr(obs, "collided", False)),
+                    )
+                if oa_step.get("script_fwd_last"):
+                    logger.info(
+                        "SCRIPT_YAW end step=%d d_to_g=%.2f collided=%s",
+                        step,
+                        float(np.linalg.norm(goal_pos - p_curr)),
+                        bool(getattr(obs, "collided", False)),
+                    )
 
                 # F-tele: detect AirSim teleportation (position jump > 20 m in one
                 # step is physically impossible; flag episode so it is not reported
@@ -1357,6 +3177,30 @@ def main() -> int:
                         "oc_climb_beats_fwd": (
                             oa_step.get("oc_climb_beats_fwd") if oa_step else None
                         ),
+                        "oc_press": oa_step.get("oc_press") if oa_step else None,
+                        "oc_peel": oa_step.get("oc_peel") if oa_step else None,
+                        "oc_back": oa_step.get("oc_back") if oa_step else None,
+                        "oc_exec": oa_step.get("oc_exec") if oa_step else None,
+                        "oc_peel_beats_press": (
+                            oa_step.get("oc_peel_beats_press") if oa_step else None
+                        ),
+                        "oc_peel_beats_back": (
+                            oa_step.get("oc_peel_beats_back") if oa_step else None
+                        ),
+                        "act_dx": oa_step.get("act_dx") if oa_step else None,
+                        "act_dy": oa_step.get("act_dy") if oa_step else None,
+                        "g0_strafe": oa_step.get("g0_strafe") if oa_step else None,
+                        "g0_peel": oa_step.get("g0_peel") if oa_step else None,
+                        "g0_yawgo": oa_step.get("g0_yawgo") if oa_step else None,
+                        "g0_climb": oa_step.get("g0_climb") if oa_step else None,
+                        "g0_climb_wins": oa_step.get("g0_climb_wins") if oa_step else None,
+                        "g0_best": oa_step.get("g0_best") if oa_step else None,
+                        "g0_leave_wins": oa_step.get("g0_leave_wins") if oa_step else None,
+                        "script_peel": oa_step.get("script_peel") if oa_step else None,
+                        "script_yaw": oa_step.get("script_yaw") if oa_step else None,
+                        "script_fwd": oa_step.get("script_fwd") if oa_step else None,
+                        "oracle": oa_step.get("oracle") if oa_step else None,
+                        "street": oa_step.get("street") if oa_step else None,
                     }) + "\n")
 
                 seg_d = _segment_min_dist(p_prev, p_curr, goal_pos)
@@ -1515,6 +3359,7 @@ def main() -> int:
                 "oa_mean_planner_delta": round(
                     oa_sum_planner_delta / max(1, oa_n_steps), 4
                 ),
+                "veto_counts": dict(veto_counts),
             }
             if traj_writer is not None:
                 traj_writer.close()
@@ -1554,6 +3399,12 @@ def main() -> int:
             f"spl={ep_result['spl']:.3f} | IR={ep_result['intervention_rate']:.3f}"
             f"{intent_tail}{_retry_tag}"
             + (
+                " | veto "
+                + " ".join(f"{k}={v}" for k, v in (ep_result.get("veto_counts") or {}).items())
+                if ep_result.get("veto_counts")
+                else ""
+            )
+            + (
                 f" | oa_esc={ep_result.get('oa_offer_escape_rate', 0):.2f}"
                 f" climb={ep_result.get('oa_chose_climb_rate', 0):.2f}"
                 f" oc↑={ep_result.get('oa_oc_climb_beats_fwd_rate', 0):.2f}"
@@ -1566,6 +3417,7 @@ def main() -> int:
     summary = {
         "protocol_version": "wam_phase2_goal_scene_e0_20260903",
         "goal_feat_mode": str(args.goal_feat_mode),
+        "encode_current": bool(args.encode_current),
         "actor_ckpt": str(actor_path),
         "depth_ckpt": str(depth_path),
         "tau_ckpt": str(tau_path),

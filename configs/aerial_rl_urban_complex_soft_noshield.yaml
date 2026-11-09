@@ -1,0 +1,27 @@
+# Soft stage (breakout Soft→Hard): no-shield collect; contact costs but does
+# NOT terminate — accumulate leave-wall positives. Obstacle cost head frozen
+# (WM not updated in train_v4_ac). Still --no-shield at launch.
+#
+# Hard flips terminate_on_collision back to true + full collision weight.
+
+reward:
+  w_collision: 1.0
+  terminate_on_collision: false
+  w_progress: 1.0
+  use_learned_obstacle_cost: true
+  obstacle_cost_ceiling: 1.0
+  blend_clearance_risk: true
+  # Keep anti-stick peel signal so Soft can leave walls
+  w_press_wall: 0.8
+  w_clearance_center: 0.6
+  center_fwd_thresh_m: 8.0
+  center_progress_eps: 0.15
+  # Goal-behind-wall still shrinks distance. Keep the peel on inside 8 m.
+  peel_despite_progress: true
+  center_min_lat_adv_m: 2.0
+
+planner:
+  enable: false
+
+safety:
+  kind: null

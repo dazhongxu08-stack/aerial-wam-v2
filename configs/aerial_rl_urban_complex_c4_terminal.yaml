@@ -1,0 +1,32 @@
+# C4 · terminal closing + light anti-stick (overnight 2026-09-25).
+# Pair with near_goal_frac≈0.5 so last-10m gets gradient; light press/center
+# so OA is not zeroed while chasing arrival.
+
+reward:
+  w_progress: 2.5
+  w_away: 2.0
+  w_collision: 2.0
+  success_bonus: 20.0
+  success_dist_m: 3.0
+  w_straight: 0.8
+  w_curiosity: 0.0
+  w_press_wall: 1.5
+  w_clearance_center: 1.0
+  center_fwd_thresh_m: 8.0
+  center_progress_eps: 0.15
+  center_min_lat_adv_m: 2.0
+  center_yaw_scale: 1.0
+  forbid_backward_motion: true
+  gate_progress_by_heading: true
+  use_learned_obstacle_cost: true
+  blend_clearance_risk: true
+
+planner:
+  enable: false
+
+safety:
+  kind: null
+
+v4:
+  actor_lr: 5.0e-5
+  critic_lr: 5.0e-5

@@ -1,0 +1,40 @@
+{
+  "name": "office_daylight",
+  "map": "/Game/StorageHouse/Maps/Demonstration.umap",
+  "note": "Runtime lights only. The editor crashes if a light is set movable, and spawned lights stay at the origin. Re-apply this file after every map launch. Do not recollect or retrain while this lighting is on: yaw_o depth already reads the gap and the straight gap closed loop passed.",
+  "fog": {
+    "r.Fog": 0,
+    "r.VolumetricFog": 0,
+    "hide": ["ExponentialHeightFog_1"]
+  },
+  "exposure": {
+    "r.EyeAdaptationQuality": 0,
+    "r.DefaultFeature.AutoExposure": 0,
+    "r.ExposureOffset": 7
+  },
+  "lights": {
+    "class": "PointLight",
+    "names": ["DayFill1", "DayFill2", "DayFill3", "DayFill4", "DayFill5", "DayFill6", "DayFill7", "DayFill8", "DayFill9"],
+    "color": [255, 246, 214],
+    "location_cm": [0, 0, 0],
+    "do_not_set_object_mobility": true
+  },
+  "barrels": {
+    "manifest": "/data/simworld/run/aisle_props.json",
+    "z": -48,
+    "mobility": true,
+    "physics": false
+  },
+  "weights": {
+    "depth": "/data/aerial-wam-v2/experiments/aerial/rl/artifacts/da3_office_cone_yaw_o_20261102/depth_office_cone_yaw.pt",
+    "consequence": "/data/aerial-wam-v2/experiments/aerial/rl/artifacts/indoor_office_mix_angle_f_20261102/c_s218/consequence_best.pt"
+  },
+  "gap_start_check": {
+    "xy_yaw": [-160, -200, 0],
+    "center": 136.3,
+    "rgb": [142.0, 144.4, 122.3],
+    "gt_cones": [2.46, 1.49, 1.46],
+    "da_cones": [2.37, 1.49, 2.14],
+    "straight_survival": 0.998
+  }
+}

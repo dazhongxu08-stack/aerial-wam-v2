@@ -1,0 +1,13 @@
+# 11 — mid progress (between failed A″ p=5 and baseline A‴ p=2)
+reward:
+  w_progress: 3.5
+  w_away: 1.5
+  success_bonus: 20.0
+  w_collision: 6.0
+  w_backward: 5.0
+  w_descent: 1.5
+  w_press_wall: 0.0
+  w_clearance_center: 0.0
+  w_curiosity: 0.0
+  forbid_backward_motion: true
+  gate_progress_by_heading: true

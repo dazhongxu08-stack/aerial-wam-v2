@@ -1,0 +1,16 @@
+{
+ "drone_id": "sim_drone_1",
+ "out_dir": "runs",
+ "server": {"host": "0.0.0.0", "port": 8088},
+ "backend": {"type": "airsim", "host": "127.0.0.1", "port": 41451, "vehicle": "drone_1", "camera": "front_custom",
+             "hfov_deg": 90.0, "step_hz": 5.0, "sensor_depth": true},
+ "depth": {"type": "da3", "path": "weights/da3_depth_env.ts", "device": "cuda"},
+ "nav": {"type": "consequence", "device": "cuda",
+         "surv_ckpts": ["weights/surv_krs6/c_s218.pt", "weights/surv_krs6/c_s219.pt", "weights/surv_krs6/c_s220.pt"],
+         "prog_ckpts": ["weights/prog_env/e_s218.pt", "weights/prog_env/e_s219.pt", "weights/prog_env/e_s220.pt"],
+         "surv_min": 0.95, "fwd_dx": 0.8, "fov_max_deg": 35.0, "seed": 0},
+ "detector": {"type": "yolo_world", "model": "weights/yolov8s-worldv2.pt", "device": "cuda", "imgsz": 1280,
+              "conf": 0.05, "min_color_frac": 0.2, "color_hints": true},
+ "dog": {},
+ "mission": {"locate_depth": "model", "cam_offset_frd": [0.0, 0.0, 1.0], "detect_every": 1}
+}

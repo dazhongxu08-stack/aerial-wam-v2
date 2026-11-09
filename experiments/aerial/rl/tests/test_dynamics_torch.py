@@ -13,10 +13,14 @@ torch = pytest.importorskip("torch")  # noqa: E402  (skip whole module off-H100)
 
 from experiments.aerial.rl import dreamer_recipe as ref  # noqa: E402
 from experiments.aerial.rl.buffer import Transition  # noqa: E402
+from experiments.aerial.rl.depth_geometry import cone_clearances, cone_mins_torch  # noqa: E402
 from experiments.aerial.rl.dynamics_torch import (  # noqa: E402
     TorchRSSMDynamics,
     _categorical_kl,
+    _cone_side_loss,
     _filter_compatible_state_dict,
+    _center_median_match,
+    _forward_center_depth_loss,
     _symexp,
     _symlog,
     _twohot_decode,
@@ -257,6 +261,164 @@ def test_collision_targets_soft_near_depth_and_auto_pos_weight():
     assert float(target2[0, 0]) == pytest.approx(0.0)
 
 
+def test_early_forward_target_stays_in_unit_interval_and_skips_yaw():
+    """A forward action into a centre obstacle inside 18 m is a soft collision.
+
+    A pure yaw at the same depth is not. Both sides being near does not cancel
+    the centre. The target never exceeds 1.
+    """
+    m = TorchRSSMDynamics(
+        image_size=16, device="cpu", coll_early_fwd_m=18.0, coll_pos_weight=1.0,
+    )
+    depth = torch.ones(1, 4, 16, 16) * 20.0
+    for i, dist in enumerate((16.0, 15.0, 14.0, 13.0)):
+        depth[:, i, 4:12, 4:12] = dist
+    collided = torch.zeros(1, 4)
+    press = torch.zeros(1, 4, 4)
+    press[..., 0] = 0.7
+    yaw = torch.zeros(1, 4, 4)
+    yaw[..., 3] = 0.25
+    t_press, _ = m._collision_train_targets(collided, depth, action=press)
+    t_yaw, _ = m._collision_train_targets(collided, depth, action=yaw)
+    assert float(t_press.min()) > 0.0
+    assert float(t_press.max()) <= 0.55
+    assert float(t_yaw.max()) == pytest.approx(0.0)
+    blocked = depth.clone()
+    blocked[:, :, 4:12, :4] = 5.0
+    blocked[:, :, 4:12, 12:] = 5.0
+    t_blocked, _ = m._collision_train_targets(collided, blocked, action=press)
+    assert float(t_blocked.min()) > 0.0
+    assert float(t_blocked.max()) <= 0.55
+
+
+def test_center_pair_labels_one_occupied_frame_without_a_press_run():
+    """Centre p10 writes the forward target. Yaw stays 0. aux_w does not scale it."""
+    m = TorchRSSMDynamics(
+        image_size=16,
+        device="cpu",
+        coll_early_fwd_m=18.0,
+        coll_near_depth_m=8.0,
+        coll_fwd_depth_aux_weight=5.0,
+        coll_pos_weight=1.5,
+    )
+    assert float(m._center_proximity_target(torch.tensor(8.0))) == pytest.approx(0.55)
+    assert float(m._center_proximity_target(torch.tensor(4.0))) == pytest.approx(0.55)
+    assert float(m._center_proximity_target(torch.tensor(2.0))) == pytest.approx(0.75)
+    assert float(m._center_proximity_target(torch.tensor(12.0))) == pytest.approx((18.0 - 12.0) / 18.0)
+    assert float(m._center_proximity_target(torch.tensor(40.0))) == pytest.approx(0.0)
+
+    depth = torch.ones(1, 1, 16, 16) * 40.0
+    depth[:, :, 4:12, 4:12] = 8.0
+    yaw = torch.zeros(1, 1, 4)
+    yaw[..., 3] = 0.25
+    press = torch.zeros(1, 1, 4)
+    press[..., 0] = 0.7
+    collided = torch.zeros(1, 1)
+    t_yaw, _ = m._collision_train_targets(collided, depth, action=yaw)
+    t_press, _ = m._collision_train_targets(collided, depth, action=press)
+    assert float(t_yaw) == pytest.approx(0.0)
+    assert float(t_press) == pytest.approx(0.55)
+
+    feat = torch.zeros(1, 1, m.latent_dim)
+    loss, n_pos = m._center_pair_loss(feat, depth)
+    assert n_pos == 1
+    assert float(loss.detach()) > 0.0
+    loss.backward()
+    assert m.coll_head[0].weight.grad is not None
+    assert float(m.coll_head[0].weight.grad.abs().sum()) > 0.0
+
+
+def test_early_yaw_hinge_reports_gap_on_the_early_band():
+    """Sequence gap is max p(straight) - max p(yaw then forward). Margin is 0.05."""
+    m = TorchRSSMDynamics(
+        image_size=16,
+        device="cpu",
+        coll_early_fwd_m=18.0,
+        coll_early_yaw_margin=0.10,
+    )
+    with torch.no_grad():
+        for layer in m.coll_head:
+            if hasattr(layer, "weight"):
+                layer.weight.zero_()
+            if hasattr(layer, "bias"):
+                layer.bias.zero_()
+    depth = torch.ones(1, 4, 16, 16) * 20.0
+    for i, dist in enumerate((16.0, 15.0, 14.0, 13.0)):
+        depth[:, i, 4:12, 4:12] = dist
+    feat = torch.zeros(1, 4, m.latent_dim)
+    press = torch.zeros(1, 4, 4)
+    press[..., 0] = 0.7
+    loss, gap, n = m._early_yaw_hinge_loss(feat, depth, action=press)
+    assert n == 4
+    assert float(gap) == pytest.approx(0.0)
+    assert float(loss.detach()) == pytest.approx(0.05)
+    far = torch.ones(1, 4, 16, 16) * 30.0
+    loss_far, _, n_far = m._early_yaw_hinge_loss(feat, far, action=press)
+    assert n_far == 0
+    assert float(loss_far.detach()) == pytest.approx(0.0)
+    blocked = depth.clone()
+    blocked[:, :, 4:12, :4] = 5.0
+    blocked[:, :, 4:12, 12:] = 5.0
+    loss_side, _, n_side = m._early_yaw_hinge_loss(feat, blocked, action=press)
+    assert n_side == 0
+    assert float(loss_side.detach()) == pytest.approx(0.0)
+
+
+def test_deploy_cones_scale_da3_and_keep_sides_outside_the_center():
+    """Road-strip forward ignores flanking facades; sides sit outside that strip."""
+    from experiments.aerial.rl.depth_geometry import DEPLOY_ROAD_CENTER_FRAC, deploy_cones
+
+    depth = np.full((100, 100), 30.0, np.float64)
+    dw = max(1, int(100 * DEPLOY_ROAD_CENTER_FRAC))
+    c0 = (100 - dw) // 2
+    r0 = c0
+    depth[r0 : r0 + dw, :c0] = 8.0
+    depth[r0 : r0 + dw, c0 + dw :] = 5.0
+    got = deploy_cones(depth)
+    assert got["forward"] == pytest.approx(60.0)
+    assert got["left"] == pytest.approx(16.0)
+    assert got["right"] == pytest.approx(10.0)
+
+
+def test_train_lateral_clearances_match_collision_crop():
+    from experiments.aerial.rl.depth_geometry import (
+        early_press_mask,
+        train_lateral_clearances,
+    )
+
+    depth = np.ones((16, 16), np.float32) * 20.0
+    depth[4:12, 4:12] = 12.0
+    d_fwd, d_left, d_right = train_lateral_clearances(depth)
+    assert d_fwd == pytest.approx(12.0)
+    assert d_left == pytest.approx(20.0)
+    assert d_right == pytest.approx(20.0)
+    assert early_press_mask(d_fwd, d_left, d_right)
+    assert not early_press_mask(30.0, 40.0, 40.0)
+    m = TorchRSSMDynamics(image_size=16, device="cpu")
+    batched = torch.from_numpy(depth).unsqueeze(0)
+    tf, tl, tr = m._fwd_lateral_depths_torch(batched)
+    assert float(tf) == pytest.approx(d_fwd)
+    assert float(tl) == pytest.approx(d_left)
+    assert float(tr) == pytest.approx(d_right)
+    from experiments.aerial.rl.depth_geometry import frontal_obstacle_frame, stable_approach
+    from experiments.aerial.rl.depth_geometry import forward_view_mass
+    view = np.ones((16, 16), np.float32) * 40.0
+    view[4:12, 4:12] = 12.0
+    mass = forward_view_mass(view)
+    assert mass["near_center"] == pytest.approx(1.0)
+    assert mass["near_left"] == pytest.approx(0.0)
+    assert mass["med_center"] == pytest.approx(12.0)
+    speck = np.ones((16, 16), np.float32) * 40.0
+    speck[8, 8] = 10.0
+    assert forward_view_mass(speck)["near_center"] < 0.05
+    assert frontal_obstacle_frame(12.0, 20.0, 20.0)
+    assert frontal_obstacle_frame(12.0, 5.0, 30.0)
+    assert not frontal_obstacle_frame(12.0, 5.0, 6.0)
+    assert stable_approach([16.0, 15.2, 14.4])
+    assert not stable_approach([16.0, 15.8])
+    assert not stable_approach([16.0, 19.5, 14.0])
+
+
 def test_coll_logits_depends_on_action():
     m = _tiny_model()
     feat = torch.zeros(1, m.latent_dim)
@@ -298,8 +460,8 @@ def test_coll_rank_hinge_loss_and_depth_aux():
     action = torch.zeros(1, 1, 4)
     action[0, 0, 0] = 1.0  # forward action
     target, _ = m._collision_train_targets(collided, depth, action=action)
-    # proximity = (5.0 - 2.5) / 5.0 * 0.8 = 0.5 * 0.8 = 0.4
-    assert float(target[0, 0]) == pytest.approx(0.4)
+    # proximity = (5.0 - 2.5) / 5.0 = 0.5  (aux_w gates continuous mode; NOT a multiplier)
+    assert float(target[0, 0]) == pytest.approx(0.5)
 
     # 2. Hinge loss when coll_target > 0
     feat = torch.zeros(1, 1, m.latent_dim)
@@ -337,6 +499,24 @@ def test_coll_rank_hinge_loss_and_depth_aux():
     depth_corridor[0, 0, 4:12, 4:12] = 2.0  # forward 2.0m
     loss_geom_corridor, _ = m._coll_rank_hinge_loss(feat, target, depth=depth_corridor)
     assert float(loss_geom_corridor.detach()) == pytest.approx(0.0)
+
+
+def test_collision_soft_targets_never_exceed_one():
+    """aux_w must not inflate BCE targets above 1 (R4 saturation root cause)."""
+    m = TorchRSSMDynamics(
+        image_size=16,
+        device="cpu",
+        coll_near_depth_m=5.0,
+        coll_fwd_depth_aux_weight=5.0,  # historically multiplied into target
+    )
+    collided = torch.zeros(1, 1)
+    depth = torch.ones(1, 1, 16, 16) * 0.5  # very near
+    action = torch.zeros(1, 1, 4)
+    action[0, 0, 0] = 1.0
+    target, _ = m._collision_train_targets(collided, depth, action=action)
+    assert float(target[0, 0]) <= 1.0 + 1e-6
+    assert float(target[0, 0]) == pytest.approx(0.9)  # (5-0.5)/5
+
 
 
 def test_from_config_reads_coll_geom_keys():
@@ -384,4 +564,153 @@ def test_d_fwd_hat_gated_until_depth_decoder_trained():
     assert payload["depth_decoder_trained"] is False
     assert m2.depth_decoder_trained is False
     assert m2.step(z, a).d_fwd_hat is None
+
+
+def test_cone_mins_match_numpy_and_swapped_side_is_costly():
+    d = np.full((8, 8), 20.0, dtype=np.float64)
+    d[2:6, :4] = 4.0
+    d[2:6, 4:] = 12.0
+    cones = cone_clearances(d, center_frac=0.5)
+    fwd, left, right = cone_mins_torch(torch.from_numpy(d), center_frac=0.5)
+    assert abs(float(fwd) - cones["forward"]) < 1e-5
+    assert abs(float(left) - cones["left"]) < 1e-5
+    assert abs(float(right) - cones["right"]) < 1e-5
+
+    gt = torch.from_numpy(d).unsqueeze(0)
+    swapped = gt.flip(-1)
+    def _sym(x):
+        return torch.sign(x) * torch.log1p(torch.abs(x))
+    bad = float(_cone_side_loss(_sym(swapped), gt))
+    good = float(_cone_side_loss(_sym(gt), gt))
+    assert bad > good
+
+
+def test_forward_center_loss_penalizes_a_far_read_of_a_near_obstacle():
+    """A flat ~26 m decode must cost more than the true center depth."""
+    gt = torch.full((1, 16, 16), 40.0)
+    gt[:, 4:12, 4:12] = 11.0
+    far = _symlog(torch.full((1, 16, 16), 26.0))
+    matched = _symlog(gt)
+    assert float(_forward_center_depth_loss(far, gt)) > float(
+        _forward_center_depth_loss(matched, gt)
+    ) + 0.2
+    far = far.detach().requires_grad_(True)
+    _forward_center_depth_loss(far, gt).backward()
+    assert float(far.grad[:, 4:12, 4:12].abs().mean()) > 0.0
+
+
+def test_forward_center_loss_penalizes_reading_a_far_center_as_near():
+    """A far center painted at 8 m costs more than the true depth, and 4 m is not free for an 8 m wall."""
+    far_gt = torch.full((1, 16, 16), 40.0)
+    too_close = _symlog(torch.full((1, 16, 16), 8.0))
+    matched = _symlog(far_gt)
+    assert float(_forward_center_depth_loss(too_close, far_gt)) > float(
+        _forward_center_depth_loss(matched, far_gt)
+    ) + 0.2
+    wall = torch.full((1, 16, 16), 8.0)
+    short = _symlog(torch.full((1, 16, 16), 4.0))
+    assert float(_forward_center_depth_loss(short, wall)) > float(
+        _forward_center_depth_loss(_symlog(wall), wall)
+    ) + 0.05
+
+
+def test_center_loss_charges_reading_a_wall_too_close():
+    """4 m for a 7 m wall is not the cheap direction."""
+    gt = torch.full((1, 16, 16), 7.0)
+    under = float(_forward_center_depth_loss(_symlog(torch.full((1, 16, 16), 4.0)), gt))
+    over = float(_forward_center_depth_loss(_symlog(torch.full((1, 16, 16), 12.0)), gt))
+    assert under > 0.5 * over
+
+
+def test_far_center_read_closer_than_truth_costs_metres():
+    """A 70 m center read as 50 m costs more than the true distance."""
+    gt = torch.full((1, 16, 16), 70.0)
+    short = float(_forward_center_depth_loss(_symlog(torch.full((1, 16, 16), 50.0)), gt))
+    matched = float(_forward_center_depth_loss(_symlog(gt), gt))
+    assert short > matched + 2.0
+
+
+def test_center_loss_grows_with_metre_error():
+    """A 9 m miss on a 22 m center costs more than a 2 m miss."""
+    gt = torch.full((1, 16, 16), 22.0)
+    close = float(_forward_center_depth_loss(_symlog(torch.full((1, 16, 16), 20.0)), gt))
+    far = float(_forward_center_depth_loss(_symlog(torch.full((1, 16, 16), 13.0)), gt))
+    assert far > close + 1.0
+
+
+def test_center_median_matches_each_frame():
+    """A 3 m frame and a 9 m frame must not cancel into one mid reading."""
+    gt = torch.stack([torch.full((16, 16), 3.0), torch.full((16, 16), 9.0)])
+    level = float(torch.expm1(0.5 * (_symlog(gt[0, 0, 0]) + _symlog(gt[1, 0, 0]))))
+    pred = torch.full_like(gt, level)
+    valid = torch.ones_like(gt, dtype=torch.bool)
+    assert float(_center_median_match(pred, gt, valid)) > 0.05
+
+
+def test_collision_head_only_leaves_the_backbone_fixed():
+    m = TorchRSSMDynamics(
+        image_size=16,
+        device="cpu",
+        recurrent_dim=16,
+        stoch_dim=4,
+        stoch_classes=4,
+        coll_near_depth_m=8.0,
+        coll_pos_weight=1.0,
+        coll_fwd_depth_aux_weight=1.0,
+        center_depth_weight=4.0,
+    )
+    m.freeze_backbone_train_collision_head(lr=1e-4, early_fwd_m=18.0)
+    assert m.encoder.conv[0].weight.requires_grad is False
+    assert m.coll_head[0].weight.requires_grad is True
+    assert m.coll_loss_scale == 1.0
+    assert m.center_depth_weight == 0.0
+    depth = torch.full((1, 2, 16, 16), 30.0)
+    depth[:, :, 4:12, 4:12] = 6.0
+    sample = {
+        "rgb": torch.randint(0, 255, (1, 2, 16, 16, 3), dtype=torch.uint8),
+        "proprio": torch.zeros(1, 2, 4),
+        "action": torch.tensor([[[0.7, 0.0, 0.0, 0.0], [0.7, 0.0, 0.0, 0.0]]]),
+        "reward": torch.zeros(1, 2),
+        "done": torch.zeros(1, 2, dtype=torch.bool),
+        "collided": torch.zeros(1, 2),
+        "depth": depth,
+    }
+    loss, _stats = m.training_loss(sample)
+    m.zero_grad(set_to_none=True)
+    loss.backward()
+    assert m.coll_head[0].weight.grad is not None
+    assert float(m.coll_head[0].weight.grad.abs().sum()) > 0.0
+    assert m.encoder.conv[0].weight.grad is None or float(m.encoder.conv[0].weight.grad.abs().sum()) == 0.0
+
+
+def test_center_depth_weight_enters_the_loss_and_collision_can_be_held():
+    m = TorchRSSMDynamics(
+        image_size=16,
+        device="cpu",
+        recurrent_dim=16,
+        stoch_dim=4,
+        stoch_classes=4,
+        center_depth_weight=4.0,
+        coll_loss_scale=0.0,
+        coll_pos_weight=1.5,
+        coll_near_depth_m=8.0,
+    )
+    sample = {
+        "rgb": torch.randint(0, 255, (1, 2, 16, 16, 3), dtype=torch.uint8),
+        "proprio": torch.zeros(1, 2, 4),
+        "action": torch.zeros(1, 2, 4),
+        "reward": torch.zeros(1, 2),
+        "done": torch.zeros(1, 2, dtype=torch.bool),
+        "collided": torch.zeros(1, 2),
+        "depth": torch.full((1, 2, 16, 16), 11.0),
+    }
+    loss, stats = m.training_loss(sample)
+    assert np.isfinite(stats["loss_center_depth"])
+    assert stats["loss_center_depth"] > 0.0
+    m.zero_grad(set_to_none=True)
+    loss.backward()
+    coll_grad = m.coll_head[0].weight.grad
+    assert coll_grad is None or float(coll_grad.abs().sum()) == 0.0
+    assert m.depth_decoder.fc.weight.grad is not None
+    assert float(m.depth_decoder.fc.weight.grad.abs().sum()) > 0.0
 

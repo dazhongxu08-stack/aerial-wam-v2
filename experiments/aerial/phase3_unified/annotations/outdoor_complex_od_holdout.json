@@ -1,0 +1,1706 @@
+{
+  "protocol_version": "interior_od_holdout_v1",
+  "scene": "outdoor_complex",
+  "n_episodes": 18,
+  "template": "interior_od_v1",
+  "episodes": [
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          260.0,
+          90.0,
+          24.0
+        ],
+        [
+          250.0,
+          90.0,
+          24.0
+        ],
+        [
+          240.0,
+          90.0,
+          24.0
+        ],
+        [
+          230.0,
+          90.0,
+          24.0
+        ],
+        [
+          220.0,
+          90.0,
+          24.0
+        ],
+        [
+          210.0,
+          90.0,
+          24.0
+        ],
+        [
+          200.0,
+          90.0,
+          24.0
+        ],
+        [
+          190.0,
+          90.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793
+      ],
+      "variant_id": "od_interior_east_00",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_00",
+      "route_idx": 0,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 70.0,
+        "heading_deg": 180.0,
+        "spawn_inland_m": 105.0,
+        "goal_inland_m": 105.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 29.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 48.8
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          -10.0,
+          110.0,
+          24.0
+        ],
+        [
+          -1.25,
+          111.25,
+          24.0
+        ],
+        [
+          7.5,
+          112.5,
+          24.0
+        ],
+        [
+          16.25,
+          113.75,
+          24.0
+        ],
+        [
+          25.0,
+          115.0,
+          24.0
+        ],
+        [
+          33.75,
+          116.25,
+          24.0
+        ],
+        [
+          42.5,
+          117.5,
+          24.0
+        ],
+        [
+          51.25,
+          118.75,
+          24.0
+        ],
+        [
+          60.0,
+          120.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394
+      ],
+      "variant_id": "od_interior_east_01",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_01",
+      "route_idx": 1,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 70.7,
+        "heading_deg": 8.1,
+        "spawn_inland_m": 125.0,
+        "goal_inland_m": 135.0,
+        "path_min_inland_m": 125.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 62.3
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          170.0,
+          90.0,
+          24.0
+        ],
+        [
+          161.0,
+          92.0,
+          24.0
+        ],
+        [
+          152.0,
+          94.0,
+          24.0
+        ],
+        [
+          143.0,
+          96.0,
+          24.0
+        ],
+        [
+          134.0,
+          98.0,
+          24.0
+        ],
+        [
+          125.0,
+          100.0,
+          24.0
+        ],
+        [
+          116.0,
+          102.0,
+          24.0
+        ],
+        [
+          107.0,
+          104.0,
+          24.0
+        ],
+        [
+          98.0,
+          106.0,
+          24.0
+        ],
+        [
+          89.0,
+          108.0,
+          24.0
+        ],
+        [
+          80.0,
+          110.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851,
+        2.922923707715851
+      ],
+      "variant_id": "od_interior_east_02",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_02",
+      "route_idx": 2,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 92.2,
+        "heading_deg": 167.5,
+        "spawn_inland_m": 105.0,
+        "goal_inland_m": 125.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 23.4
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          10.0,
+          90.0,
+          24.0
+        ],
+        [
+          19.090909090909093,
+          91.81818181818181,
+          24.0
+        ],
+        [
+          28.181818181818183,
+          93.63636363636364,
+          24.0
+        ],
+        [
+          37.272727272727266,
+          95.45454545454545,
+          24.0
+        ],
+        [
+          46.36363636363637,
+          97.27272727272728,
+          24.0
+        ],
+        [
+          55.45454545454546,
+          99.0909090909091,
+          24.0
+        ],
+        [
+          64.54545454545453,
+          100.9090909090909,
+          24.0
+        ],
+        [
+          73.63636363636363,
+          102.72727272727272,
+          24.0
+        ],
+        [
+          82.72727272727273,
+          104.54545454545455,
+          24.0
+        ],
+        [
+          91.81818181818183,
+          106.36363636363636,
+          24.0
+        ],
+        [
+          100.90909090909092,
+          108.18181818181819,
+          24.0
+        ],
+        [
+          110.0,
+          110.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075,
+        0.19739555984988075
+      ],
+      "variant_id": "od_interior_east_04",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_04",
+      "route_idx": 3,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 102.0,
+        "heading_deg": 11.3,
+        "spawn_inland_m": 105.0,
+        "goal_inland_m": 125.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 29.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 5.9
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          130.0,
+          110.0,
+          24.0
+        ],
+        [
+          139.16666666666666,
+          108.33333333333333,
+          24.0
+        ],
+        [
+          148.33333333333334,
+          106.66666666666667,
+          24.0
+        ],
+        [
+          157.5,
+          105.0,
+          24.0
+        ],
+        [
+          166.66666666666666,
+          103.33333333333333,
+          24.0
+        ],
+        [
+          175.83333333333331,
+          101.66666666666667,
+          24.0
+        ],
+        [
+          185.0,
+          100.0,
+          24.0
+        ],
+        [
+          194.16666666666666,
+          98.33333333333334,
+          24.0
+        ],
+        [
+          203.33333333333331,
+          96.66666666666667,
+          24.0
+        ],
+        [
+          212.5,
+          95.0,
+          24.0
+        ],
+        [
+          221.66666666666666,
+          93.33333333333334,
+          24.0
+        ],
+        [
+          230.83333333333331,
+          91.66666666666667,
+          24.0
+        ],
+        [
+          240.0,
+          90.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783,
+        -0.1798534997924783
+      ],
+      "variant_id": "od_interior_east_06",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_06",
+      "route_idx": 4,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 111.8,
+        "heading_deg": -10.3,
+        "spawn_inland_m": 125.0,
+        "goal_inland_m": 105.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 34.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 17.1
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          70.0,
+          90.0,
+          24.0
+        ],
+        [
+          79.0,
+          92.0,
+          24.0
+        ],
+        [
+          88.0,
+          94.0,
+          24.0
+        ],
+        [
+          97.0,
+          96.0,
+          24.0
+        ],
+        [
+          106.0,
+          98.0,
+          24.0
+        ],
+        [
+          115.0,
+          100.0,
+          24.0
+        ],
+        [
+          124.0,
+          102.0,
+          24.0
+        ],
+        [
+          133.0,
+          104.0,
+          24.0
+        ],
+        [
+          142.0,
+          106.0,
+          24.0
+        ],
+        [
+          151.0,
+          108.0,
+          24.0
+        ],
+        [
+          160.0,
+          110.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198,
+        0.21866894587394198
+      ],
+      "variant_id": "od_interior_east_10",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_10",
+      "route_idx": 5,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 92.2,
+        "heading_deg": 12.5,
+        "spawn_inland_m": 105.0,
+        "goal_inland_m": 125.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 29.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 30.6
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          110.0,
+          130.0,
+          24.0
+        ],
+        [
+          102.85714285714286,
+          124.28571428571429,
+          24.0
+        ],
+        [
+          95.71428571428572,
+          118.57142857142857,
+          24.0
+        ],
+        [
+          88.57142857142857,
+          112.85714285714286,
+          24.0
+        ],
+        [
+          81.42857142857143,
+          107.14285714285714,
+          24.0
+        ],
+        [
+          74.28571428571429,
+          101.42857142857143,
+          24.0
+        ],
+        [
+          67.14285714285714,
+          95.71428571428572,
+          24.0
+        ],
+        [
+          60.0,
+          90.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -2.4668517113662407,
+        -2.4668517113662407,
+        -2.4668517113662407,
+        -2.4668517113662407,
+        -2.4668517113662407,
+        -2.4668517113662407,
+        -2.4668517113662407,
+        -2.4668517113662407
+      ],
+      "variant_id": "od_interior_east_12",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_12",
+      "route_idx": 6,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 64.0,
+        "heading_deg": -141.3,
+        "spawn_inland_m": 145.0,
+        "goal_inland_m": 105.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 22.3
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          90.0,
+          110.0,
+          24.0
+        ],
+        [
+          98.57142857142857,
+          107.14285714285714,
+          24.0
+        ],
+        [
+          107.14285714285714,
+          104.28571428571429,
+          24.0
+        ],
+        [
+          115.71428571428571,
+          101.42857142857143,
+          24.0
+        ],
+        [
+          124.28571428571428,
+          98.57142857142857,
+          24.0
+        ],
+        [
+          132.85714285714286,
+          95.71428571428572,
+          24.0
+        ],
+        [
+          141.42857142857142,
+          92.85714285714286,
+          24.0
+        ],
+        [
+          150.0,
+          90.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -0.3217505543966422,
+        -0.3217505543966422,
+        -0.3217505543966422,
+        -0.3217505543966422,
+        -0.3217505543966422,
+        -0.3217505543966422,
+        -0.3217505543966422,
+        -0.3217505543966422
+      ],
+      "variant_id": "od_interior_east_15",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_15",
+      "route_idx": 7,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 63.2,
+        "heading_deg": -18.4,
+        "spawn_inland_m": 125.0,
+        "goal_inland_m": 105.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 29.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 14.0
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          90.0,
+          130.0,
+          24.0
+        ],
+        [
+          81.11111111111111,
+          127.77777777777777,
+          24.0
+        ],
+        [
+          72.22222222222223,
+          125.55555555555556,
+          24.0
+        ],
+        [
+          63.333333333333336,
+          123.33333333333333,
+          24.0
+        ],
+        [
+          54.44444444444444,
+          121.11111111111111,
+          24.0
+        ],
+        [
+          45.55555555555556,
+          118.88888888888889,
+          24.0
+        ],
+        [
+          36.66666666666667,
+          116.66666666666667,
+          24.0
+        ],
+        [
+          27.777777777777786,
+          114.44444444444444,
+          24.0
+        ],
+        [
+          18.888888888888886,
+          112.22222222222223,
+          24.0
+        ],
+        [
+          10.0,
+          110.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929,
+        -2.896613990462929
+      ],
+      "variant_id": "od_interior_east_17",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_17",
+      "route_idx": 8,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 82.5,
+        "heading_deg": -166.0,
+        "spawn_inland_m": 145.0,
+        "goal_inland_m": 125.0,
+        "path_min_inland_m": 125.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 8.2
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          20.0,
+          130.0,
+          24.0
+        ],
+        [
+          27.77777777777778,
+          125.55555555555556,
+          24.0
+        ],
+        [
+          35.55555555555556,
+          121.11111111111111,
+          24.0
+        ],
+        [
+          43.33333333333333,
+          116.66666666666667,
+          24.0
+        ],
+        [
+          51.111111111111114,
+          112.22222222222223,
+          24.0
+        ],
+        [
+          58.88888888888889,
+          107.77777777777777,
+          24.0
+        ],
+        [
+          66.66666666666666,
+          103.33333333333334,
+          24.0
+        ],
+        [
+          74.44444444444443,
+          98.88888888888889,
+          24.0
+        ],
+        [
+          82.22222222222223,
+          94.44444444444444,
+          24.0
+        ],
+        [
+          90.0,
+          90.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229,
+        -0.5191461142465229
+      ],
+      "variant_id": "od_interior_east_19",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_19",
+      "route_idx": 9,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 80.6,
+        "heading_deg": -29.7,
+        "spawn_inland_m": 145.0,
+        "goal_inland_m": 105.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 27.1
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          160.0,
+          120.0,
+          24.0
+        ],
+        [
+          170.0,
+          120.0,
+          24.0
+        ],
+        [
+          180.0,
+          120.0,
+          24.0
+        ],
+        [
+          190.0,
+          120.0,
+          24.0
+        ],
+        [
+          200.0,
+          120.0,
+          24.0
+        ],
+        [
+          210.0,
+          120.0,
+          24.0
+        ],
+        [
+          220.0,
+          120.0,
+          24.0
+        ],
+        [
+          230.0,
+          120.0,
+          24.0
+        ],
+        [
+          240.0,
+          120.0,
+          24.0
+        ],
+        [
+          250.0,
+          120.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "variant_id": "od_interior_east_22",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_22",
+      "route_idx": 10,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 90.0,
+        "heading_deg": 0.0,
+        "spawn_inland_m": 135.0,
+        "goal_inland_m": 135.0,
+        "path_min_inland_m": 135.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 29.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 14.4
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          230.0,
+          90.0,
+          24.0
+        ],
+        [
+          220.0,
+          90.0,
+          24.0
+        ],
+        [
+          210.0,
+          90.0,
+          24.0
+        ],
+        [
+          200.0,
+          90.0,
+          24.0
+        ],
+        [
+          190.0,
+          90.0,
+          24.0
+        ],
+        [
+          180.0,
+          90.0,
+          24.0
+        ],
+        [
+          170.0,
+          90.0,
+          24.0
+        ],
+        [
+          160.0,
+          90.0,
+          24.0
+        ],
+        [
+          150.0,
+          90.0,
+          24.0
+        ],
+        [
+          140.0,
+          90.0,
+          24.0
+        ],
+        [
+          130.0,
+          90.0,
+          24.0
+        ],
+        [
+          120.0,
+          90.0,
+          24.0
+        ],
+        [
+          110.0,
+          90.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793
+      ],
+      "variant_id": "od_interior_east_23",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_23",
+      "route_idx": 11,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 120.0,
+        "heading_deg": 180.0,
+        "spawn_inland_m": 105.0,
+        "goal_inland_m": 105.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": true,
+        "goal_line_depth_p5_m": 71.9
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          70.0,
+          130.0,
+          24.0
+        ],
+        [
+          77.5,
+          125.0,
+          24.0
+        ],
+        [
+          85.0,
+          120.0,
+          24.0
+        ],
+        [
+          92.5,
+          115.0,
+          24.0
+        ],
+        [
+          100.0,
+          110.0,
+          24.0
+        ],
+        [
+          107.5,
+          105.0,
+          24.0
+        ],
+        [
+          115.0,
+          100.0,
+          24.0
+        ],
+        [
+          122.5,
+          95.0,
+          24.0
+        ],
+        [
+          130.0,
+          90.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -0.5880026035475675,
+        -0.5880026035475675,
+        -0.5880026035475675,
+        -0.5880026035475675,
+        -0.5880026035475675,
+        -0.5880026035475675,
+        -0.5880026035475675,
+        -0.5880026035475675,
+        -0.5880026035475675
+      ],
+      "variant_id": "od_interior_east_03",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_03",
+      "route_idx": 12,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 72.1,
+        "heading_deg": -33.7,
+        "spawn_inland_m": 145.0,
+        "goal_inland_m": 105.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": false,
+        "goal_line_depth_p5_m": 3446.0
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          280.0,
+          120.0,
+          24.0
+        ],
+        [
+          271.0,
+          119.0,
+          24.0
+        ],
+        [
+          262.0,
+          118.0,
+          24.0
+        ],
+        [
+          253.0,
+          117.0,
+          24.0
+        ],
+        [
+          244.0,
+          116.0,
+          24.0
+        ],
+        [
+          235.0,
+          115.0,
+          24.0
+        ],
+        [
+          226.0,
+          114.0,
+          24.0
+        ],
+        [
+          217.0,
+          113.0,
+          24.0
+        ],
+        [
+          208.0,
+          112.0,
+          24.0
+        ],
+        [
+          199.0,
+          111.0,
+          24.0
+        ],
+        [
+          190.0,
+          110.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977,
+        -3.0309354324158977
+      ],
+      "variant_id": "od_interior_east_05",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_05",
+      "route_idx": 13,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 90.6,
+        "heading_deg": -173.7,
+        "spawn_inland_m": 135.0,
+        "goal_inland_m": 125.0,
+        "path_min_inland_m": 125.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 29.0,
+        "blocked": false,
+        "goal_line_depth_p5_m": 86.4
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          40.0,
+          130.0,
+          24.0
+        ],
+        [
+          49.0,
+          129.0,
+          24.0
+        ],
+        [
+          58.0,
+          128.0,
+          24.0
+        ],
+        [
+          67.0,
+          127.0,
+          24.0
+        ],
+        [
+          76.0,
+          126.0,
+          24.0
+        ],
+        [
+          85.0,
+          125.0,
+          24.0
+        ],
+        [
+          94.0,
+          124.0,
+          24.0
+        ],
+        [
+          103.0,
+          123.0,
+          24.0
+        ],
+        [
+          112.0,
+          122.0,
+          24.0
+        ],
+        [
+          121.0,
+          121.0,
+          24.0
+        ],
+        [
+          130.0,
+          120.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565,
+        -0.11065722117389565
+      ],
+      "variant_id": "od_interior_east_07",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_07",
+      "route_idx": 14,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 90.6,
+        "heading_deg": -6.3,
+        "spawn_inland_m": 145.0,
+        "goal_inland_m": 135.0,
+        "path_min_inland_m": 135.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": false,
+        "goal_line_depth_p5_m": 315.1
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          40.0,
+          110.0,
+          24.0
+        ],
+        [
+          31.42857142857143,
+          112.85714285714286,
+          24.0
+        ],
+        [
+          22.857142857142858,
+          115.71428571428571,
+          24.0
+        ],
+        [
+          14.285714285714288,
+          118.57142857142857,
+          24.0
+        ],
+        [
+          5.714285714285715,
+          121.42857142857143,
+          24.0
+        ],
+        [
+          -2.857142857142854,
+          124.28571428571428,
+          24.0
+        ],
+        [
+          -11.428571428571423,
+          127.14285714285714,
+          24.0
+        ],
+        [
+          -20.0,
+          130.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        2.8198420991931514,
+        2.8198420991931514,
+        2.8198420991931514,
+        2.8198420991931514,
+        2.8198420991931514,
+        2.8198420991931514,
+        2.8198420991931514,
+        2.8198420991931514
+      ],
+      "variant_id": "od_interior_east_08",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_08",
+      "route_idx": 15,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 63.2,
+        "heading_deg": 161.6,
+        "spawn_inland_m": 125.0,
+        "goal_inland_m": 145.0,
+        "path_min_inland_m": 125.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 29.0,
+        "blocked": false,
+        "goal_line_depth_p5_m": 85.3
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          140.0,
+          130.0,
+          24.0
+        ],
+        [
+          130.0,
+          130.0,
+          24.0
+        ],
+        [
+          120.0,
+          130.0,
+          24.0
+        ],
+        [
+          110.0,
+          130.0,
+          24.0
+        ],
+        [
+          100.0,
+          130.0,
+          24.0
+        ],
+        [
+          90.0,
+          130.0,
+          24.0
+        ],
+        [
+          80.0,
+          130.0,
+          24.0
+        ],
+        [
+          70.00000000000001,
+          130.0,
+          24.0
+        ],
+        [
+          60.0,
+          130.0,
+          24.0
+        ],
+        [
+          50.0,
+          130.0,
+          24.0
+        ],
+        [
+          40.000000000000014,
+          130.0,
+          24.0
+        ],
+        [
+          30.0,
+          130.0,
+          24.0
+        ],
+        [
+          20.0,
+          130.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793,
+        3.141592653589793
+      ],
+      "variant_id": "od_interior_east_11",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_11",
+      "route_idx": 16,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 120.0,
+        "heading_deg": 180.0,
+        "spawn_inland_m": 145.0,
+        "goal_inland_m": 145.0,
+        "path_min_inland_m": 145.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 24.0,
+        "blocked": false,
+        "goal_line_depth_p5_m": 3420.0
+      }
+    },
+    {
+      "image_path": "",
+      "gpt_instruction": "",
+      "action": [],
+      "index_list": [],
+      "pos": [
+        [
+          200.0,
+          90.0,
+          24.0
+        ],
+        [
+          208.75,
+          91.25,
+          24.0
+        ],
+        [
+          217.5,
+          92.5,
+          24.0
+        ],
+        [
+          226.25,
+          93.75,
+          24.0
+        ],
+        [
+          235.0,
+          95.0,
+          24.0
+        ],
+        [
+          243.75,
+          96.25,
+          24.0
+        ],
+        [
+          252.5,
+          97.5,
+          24.0
+        ],
+        [
+          261.25,
+          98.75,
+          24.0
+        ],
+        [
+          270.0,
+          100.0,
+          24.0
+        ]
+      ],
+      "yaw": [
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394,
+        0.14189705460416394
+      ],
+      "variant_id": "od_interior_east_13",
+      "source_kind": "interior_od",
+      "route_id": "od_holdout_13",
+      "route_idx": 17,
+      "base_route_idx": null,
+      "category": "outdoor_complex",
+      "scene": "outdoor_complex",
+      "template": "interior_od_v1",
+      "complexity_meta": {
+        "split": "holdout",
+        "region": "interior_east",
+        "chord_m": 70.7,
+        "heading_deg": 8.1,
+        "spawn_inland_m": 105.0,
+        "goal_inland_m": 115.0,
+        "path_min_inland_m": 105.0,
+        "in_urban": true,
+        "in_interior": true,
+        "in_water": false,
+        "spawn_z_ok": 34.0,
+        "blocked": false,
+        "goal_line_depth_p5_m": 418.5
+      }
+    }
+  ]
+}

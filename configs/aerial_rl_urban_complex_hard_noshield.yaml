@@ -1,0 +1,23 @@
+# Hard stage (breakout Soft→Hard): no-shield collect; collision terminates
+# and uses the locked directional-OA collision weight (2.0, not Soft's 1.0).
+# Obstacle cost head stays frozen (WM not updated in train_v4_ac).
+# Init actor is the Soft best checkpoint.
+
+reward:
+  w_collision: 2.0
+  terminate_on_collision: true
+  w_progress: 1.0
+  use_learned_obstacle_cost: true
+  obstacle_cost_ceiling: 1.0
+  blend_clearance_risk: true
+  w_press_wall: 0.8
+  w_clearance_center: 0.6
+  center_fwd_thresh_m: 8.0
+  center_progress_eps: 0.15
+  center_min_lat_adv_m: 2.0
+
+planner:
+  enable: false
+
+safety:
+  kind: null

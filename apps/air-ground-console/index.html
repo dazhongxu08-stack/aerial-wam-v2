@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>空地巡检台</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>空地巡检台</h1>
+          <p>任务单 · 双第一视角 · 里程计轨迹</p>
+        </div>
+      </div>
+      <p class="mode" id="seat-mode">只看 · 回放 · 无活链路</p>
+      <p class="site" id="site-line">正在读取真机记录…<span>里程计 · 不同场地、不同时间</span></p>
+      <time id="clock">--:--:--</time>
+    </header>
+
+    <div class="stage">
+      <section class="panel cam" aria-label="无人机第一视角">
+        <div class="panel-h">
+          <h2>无人机第一视角</h2>
+          <p class="meta"><b id="air-name">Tello</b><em id="air-mode">回放</em><span id="air-when"></span></p>
+        </div>
+        <div class="view">
+          <video id="air-video" muted playsinline preload="auto" aria-label="无人机真机第一视角"></video>
+          <p class="empty-view" id="air-empty" hidden>这一行没有真机录像。</p>
+          <p class="telem" id="air-telem"></p>
+        </div>
+      </section>
+
+      <section class="panel map-panel" aria-label="实时轨迹">
+        <div class="panel-h">
+          <h2>实时轨迹</h2>
+          <ul class="legend">
+            <li><i class="swatch air"></i>无人机</li>
+            <li><i class="swatch dog"></i>机器狗</li>
+            <li><i class="swatch plan"></i>全程</li>
+            <li><i class="swatch hold"></i>中止</li>
+          </ul>
+        </div>
+        <div class="view">
+          <canvas id="map-view" aria-label="无人机与机器狗的里程计轨迹"></canvas>
+          <p class="map-note" id="map-note">起点对齐，不是同场测绘</p>
+        </div>
+        <div class="transport">
+          <button type="button" id="play-toggle">暂停</button>
+          <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="回放进度" />
+          <span id="time-read">0:00</span>
+          <div class="rates" role="group" aria-label="回放速度">
+            <button type="button" data-rate="1" aria-pressed="true">1×</button>
+            <button type="button" data-rate="2">2×</button>
+            <button type="button" data-rate="4">4×</button>
+          </div>
+        </div>
+        <div class="poses">
+          <p id="air-pose"></p>
+          <p id="dog-pose"></p>
+        </div>
+      </section>
+
+      <section class="panel cam dog" aria-label="机器狗第一视角">
+        <div class="panel-h">
+          <h2>机器狗第一视角</h2>
+          <p class="meta"><b id="dog-name">Lumos</b><em id="dog-mode">回放</em><span id="dog-when"></span></p>
+        </div>
+        <div class="view">
+          <video id="dog-video" muted playsinline preload="auto" aria-label="机器狗真机第一视角"></video>
+          <p class="empty-view" id="dog-empty" hidden>这一行没有真机录像。</p>
+          <p class="telem" id="dog-telem"></p>
+        </div>
+      </section>
+    </div>
+
+    <section class="fleet" aria-label="同型分配">
+      <div class="fleet-h">
+        <h2>同型分配</h2>
+        <p class="sub" id="fleet-note">有录像才回放。没有录像的同型席位只排队。两条 Tello 是不同日期的录像，点一行才换主画面。</p>
+      </div>
+      <div class="fleet-table" id="fleet-rows"></div>
+    </section>
+
+    <div class="deck">
+      <section aria-label="任务单">
+        <div class="kicker-row">
+          <h2 class="kicker">任务单</h2>
+          <span id="ticket-id">未下发</span>
+        </div>
+        <p class="ticket-text" id="ticket-text">去前方30米找红色凳子，然后把位置发给机器狗</p>
+        <p class="sub" id="ticket-result">尚未下发。</p>
+        <p class="sub" id="ticket-actors">空中与地面都还在待命。</p>
+        <p class="sub" id="ticket-frame">起点各自归零，两机不是同一坐标系。</p>
+        <p class="sub" id="ticket-loss">断链声明：空中悬停，地面停车。当前是回放，声明没有执行。</p>
+        <p class="sub" id="ticket-evidence">证据未挂上</p>
+      </section>
+
+      <section aria-label="分工与机况">
+        <h2 class="kicker">分工</h2>
+        <p class="sub"><b class="air-ink">无人机</b> <span id="role-air">补高处和视野盲区，锁定后留在附近监视</span></p>
+        <p class="sub"><b class="dog-ink">机器狗</b> <span id="role-dog">沿通道抵近</span></p>
+        <h2 class="kicker">机况</h2>
+        <p class="health" id="air-health">电量无记录 · 链路回放 · 急停无记录 · 定位里程计</p>
+        <p class="health" id="dog-health">电量无记录 · 链路回放 · 急停无记录 · 定位里程计</p>
+        <p class="sub" id="air-dist"></p>
+        <p class="sub" id="dog-dist"></p>
+        <div class="takes">
+          <button type="button" id="take-air" disabled title="回放没有飞控，不能接管">接管空中</button>
+          <button type="button" id="take-dog" disabled title="回放没有飞控，不能接管">接管地面</button>
+        </div>
+        <p class="sub">本席只看，不能打杆。</p>
+      </section>
+
+      <section aria-label="风险与移交">
+        <h2 class="kicker">风险与移交</h2>
+        <p class="risk warn" id="air-risk">报警 · 未锁定</p>
+        <p class="sub" id="air-risk-why">前方最近约 1.22 m，是整趟记录，不是当前帧。</p>
+        <p class="risk stop" id="dog-risk">应停下 · 未停</p>
+        <p class="sub" id="dog-risk-why">侧向约 0.63 m 仍在走。这是整趟结论，没有逐帧净空。</p>
+        <p class="sub" id="gate-line">门禁待记录装载</p>
+        <button type="button" id="handoff" disabled>移交</button>
+        <p class="sub" id="handoff-why">移交要同一坐标系。现在两段轨迹只是起点对齐。</p>
+      </section>
+
+      <section aria-label="发现与报告">
+        <div class="kicker-row">
+          <h2 class="kicker" id="side-title">发现</h2>
+          <button type="button" id="report-toggle" aria-pressed="false">一页报告</button>
+        </div>
+        <div id="findings">
+          <p class="find-title air-ink">空中</p>
+          <p class="sub" id="air-find">正在读取记录…</p>
+          <p class="find-title dog-ink">地面</p>
+          <p class="sub" id="dog-find">正在读取记录…</p>
+        </div>
+        <div id="report" hidden>
+          <p class="sub" id="report-brief"></p>
+          <div class="frames">
+            <figure>
+              <canvas id="air-frame" width="320" height="180"></canvas>
+              <figcaption>无人机当前帧 · 不是锁定帧</figcaption>
+            </figure>
+            <figure>
+              <canvas id="dog-frame" width="320" height="180"></canvas>
+              <figcaption>机器狗当前帧</figcaption>
+            </figure>
+          </div>
+          <p class="sub" id="report-gap"></p>
+          <button type="button" id="frame-refresh">刷新当前帧</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="command" aria-label="任务下发">
+      <form id="task-form">
+        <label for="task-input">任务下发</label>
+        <input
+          id="task-input"
+          name="instruction"
+          maxlength="200"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="例如：去前方30米找红色凳子，然后把位置发给机器狗"
+          value="去前方30米找红色凳子，然后把位置发给机器狗"
+        />
+        <button id="abort" type="button" disabled>中止</button>
+        <button id="task-submit" type="submit">下发</button>
+      </form>
+      <div class="command-row">
+        <div id="parse-out" class="parse" aria-live="polite"></div>
+        <div class="presets" role="group" aria-label="真机记录">
+          <button type="button" data-fill="去前方30米找红色凳子，然后把位置发给机器狗">红凳 · 30米</button>
+          <button type="button" data-fill="前方3米找蓝色桶">蓝色桶</button>
+          <button type="button" data-fill="机器狗走正前方12米">机器狗 · 12米</button>
+          <button type="button" data-fill="三条通道各看一遍">三条通道</button>
+          <button type="button" data-fill="一架找红凳，另一架找蓝桶">两架分头</button>
+        </div>
+      </div>
+      <p id="mission-status" class="status" aria-live="polite">正在装载真机录像…</p>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

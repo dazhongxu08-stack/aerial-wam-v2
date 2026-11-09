@@ -70,6 +70,8 @@ class DepthMinPredictor:
         self.last_depth: Optional[np.ndarray] = None
         self.forward_scale = 1.0
         self.forward_exponent = 1.0
+        self._office_scale = None
+        self._office_meter = None
 
     @classmethod
     def from_checkpoint(
@@ -81,7 +83,13 @@ class DepthMinPredictor:
         import torch
         from experiments.aerial.rl.dynamics_torch import build_depth_head
 
-        payload = torch.load(str(path), map_location="cpu")
+        try:
+            from experiments.aerial.deploy.rtw_blob import unpack
+        except ImportError:
+            unpack = None
+        payload = unpack(path) if unpack is not None else None
+        if payload is None:
+            payload = torch.load(str(path), map_location="cpu", weights_only=False)
         n_frames = int(payload.get("n_frames", 4))
         # Factory dispatches on payload["backbone"] ("scratch" default → _DepthHead;
         # "da3" → DA3DepthHead). Canonical depth_step_5000.pt has no backbone key →
@@ -95,6 +103,34 @@ class DepthMinPredictor:
         calib = read_forward_calibration(path, payload)
         pred.forward_scale = calib["scale"]
         pred.forward_exponent = calib["exponent"]
+        pred._office_scale = None
+        spec = payload.get("office_scale")
+        if isinstance(spec, dict) and spec.get("state"):
+            from experiments.aerial.rl.office_depth_scale import OfficeDepthScale
+
+            mod = OfficeDepthScale()
+            state = spec["state"]
+            if "bank_code" in state:
+                mod.bank_code = state["bank_code"].detach().clone()
+                mod.bank_mul = state["bank_mul"].detach().clone()
+                if "bank_max_dist" in state:
+                    mod.bank_max_dist = state["bank_max_dist"].detach().clone()
+            mod.load_state_dict(state, strict=False)
+            mod.use_thirds = bool(spec.get("thirds"))
+            mod.use_bank = bool(spec.get("bank"))
+            mod.to(device)
+            mod.eval()
+            pred._office_scale = mod
+        pred._office_meter = None
+        meter_spec = payload.get("office_meter")
+        if isinstance(meter_spec, dict) and meter_spec.get("state"):
+            from experiments.aerial.rl.office_meter_field import OfficeMeterField
+
+            meter = OfficeMeterField()
+            meter.load_state_dict(meter_spec["state"])
+            meter.to(device)
+            meter.eval()
+            pred._office_meter = meter
         return pred
 
     def reset(self) -> None:
@@ -125,6 +161,11 @@ class DepthMinPredictor:
         fp16 = str(self.device).startswith("cuda") and os.environ.get("AERIAL_DA3_FP16") == "1"
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=fp16):
             depth, _ = self._model.predict_from_window(tensor.to(self.device))
+            rgb_t = torch.from_numpy(frames[-1]).to(depth.device)
+            if self._office_scale is not None:
+                depth, _ = self._office_scale(rgb_t.unsqueeze(0), depth)
+            if self._office_meter is not None:
+                depth, _ = self._office_meter(rgb_t.unsqueeze(0), depth)
         out = depth.squeeze(0).detach().float().cpu().numpy()
         scale = float(self.forward_scale)
         exponent = float(self.forward_exponent)

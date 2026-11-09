@@ -5,7 +5,7 @@ import math
 
 import numpy as np
 
-from experiments.aerial.rl.env.tello_env import body_delta_to_rc
+from experiments.aerial.rl.env.tello_env import body_delta_to_rc, rc_to_body_delta
 
 
 def test_body_delta_to_rc_forward_positive() -> None:
@@ -30,3 +30,19 @@ def test_body_delta_to_rc_yaw_ccw_maps_negative_d() -> None:
         np.array([0.0, 0.0, 0.0, dyaw]), dt, max_yaw_rad_s=math.pi / 4.0
     )
     assert d == -100
+
+
+def test_rc_to_body_delta_round_trips_stick() -> None:
+    dt = 0.2
+    for rc in ((0, 100, 0, 0), (-40, 22, 18, -28), (0, 0, 0, 0), (100, 0, 0, -100)):
+        delta = rc_to_body_delta(rc, dt, max_v_mps=0.6, max_yaw_rad_s=math.pi / 4.0)
+        back = body_delta_to_rc(delta, dt, max_v_mps=0.6, max_yaw_rad_s=math.pi / 4.0)
+        assert back == rc
+
+
+def test_rc_to_body_delta_right_stick_is_negative_body_y() -> None:
+    dt = 0.2
+    delta = rc_to_body_delta((100, 0, 0, 0), dt, max_v_mps=0.6)
+    assert delta[1] < 0.0
+    np.testing.assert_allclose(delta[0], 0.0)
+    np.testing.assert_allclose(delta[1], -0.12)

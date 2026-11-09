@@ -18,8 +18,11 @@ PAYLOAD=(
   experiments/aerial/scripts/run_geomfix_r2_collect_84.sh
   experiments/aerial/scripts/run_geomfix_r3_wm_near.sh
   experiments/aerial/scripts/run_geomfix_r4_wm_probe.sh
+  experiments/aerial/scripts/run_geomfix_near_episode_collect.sh
+  experiments/aerial/scripts/run_cone_pass_reflow.sh
   experiments/aerial/scripts/geomfix_launch_on_125.sh
   experiments/aerial/scripts/watch_geomfix_quad.sh
+  experiments/aerial/scripts/auto_advance_geomfix.sh
   experiments/aerial/scripts/wam_latent_depth_probe.py
   experiments/aerial/scripts/wam_imagine_coll_rank.py
   experiments/aerial/scripts/wam_obstacle_cost_cone_rank.py
@@ -33,7 +36,7 @@ echo "=== deploy geomfix → $SSH125 stamp=$STAMP ==="
 ssh -o ConnectTimeout=45 -o BatchMode=yes "$SSH125" 'mkdir -p /tmp/geomfix_deploy'
 rsync -avz "${PAYLOAD[@]}" "$SSH125:/tmp/geomfix_deploy/"
 ssh -n -o ConnectTimeout=45 -o BatchMode=yes "$SSH125" \
-  "chmod +x /tmp/geomfix_deploy/geomfix_launch_on_125.sh /tmp/geomfix_deploy/run_geomfix_r*.sh /tmp/geomfix_deploy/watch_geomfix_quad.sh && \
+  "chmod +x /tmp/geomfix_deploy/geomfix_launch_on_125.sh /tmp/geomfix_deploy/run_geomfix_r*.sh /tmp/geomfix_deploy/watch_geomfix_quad.sh /tmp/geomfix_deploy/auto_advance_geomfix.sh /tmp/geomfix_deploy/run_cone_pass_reflow.sh && \
    export STAMP='$STAMP' && bash /tmp/geomfix_deploy/geomfix_launch_on_125.sh"
 
 mkdir -p "$ROOT/artifacts"
@@ -43,12 +46,13 @@ cat > "$ROOT/artifacts/geomfix_STATUS.md" <<EOF
 
 | 臂 | 机 | 任务 | 罩 |
 |----|----|------|----|
-| R1 | 125 | left_near pack+reflow+cone (+AirSim top-up) | 关 |
+| R1 | 125 | window pack-cone + scene-rank → gate+cone | 关 |
 | R2 | 84 | 并行 GT left_near 采集 | 关（采集） |
 | R3 | 14 | 近场 WM FT + B′-1 | n/a |
 | R4 | 11 | 更强 hinge WM + imagine/cone | n/a |
 
 出门：\`experiments/aerial/rl/artifacts/geomfix_${STAMP}/PHASE0_VERDICT.md\`  
 \`READY_SOFT.txt\` 出现后才允许 Soft→Hard（仍关罩）。
+监控：Mac \`artifacts/geomfix_monitor.log\` + 125 \`watch_geomfix\` / \`auto_advance_geomfix\`。
 EOF
 echo "MAC_DEPLOY_DONE stamp=$STAMP"

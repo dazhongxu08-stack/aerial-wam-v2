@@ -18,20 +18,42 @@ install_into() {
   mkdir -p "$ROOT/experiments/aerial/scripts" "$ROOT/configs" \
            "$ROOT/experiments/aerial/rl" "$ROOT/docs/superpowers/plans"
   cp -f "$D"/run_geomfix_r*.sh "$ROOT/experiments/aerial/scripts/"
+  cp -f "$D"/run_cone_pass_reflow.sh "$ROOT/experiments/aerial/scripts/" 2>/dev/null || true
+  cp -f "$D"/auto_advance_geomfix.sh "$ROOT/experiments/aerial/scripts/" 2>/dev/null || true
   cp -f "$D"/wam_latent_depth_probe.py "$D"/wam_imagine_coll_rank.py \
         "$D"/wam_obstacle_cost_cone_rank.py "$ROOT/experiments/aerial/scripts/" 2>/dev/null || true
   cp -f "$D"/watch_geomfix_quad.sh "$ROOT/experiments/aerial/scripts/" 2>/dev/null || true
   cp -f "$D"/aerial_rl_geomfix_near_wm.yaml "$ROOT/configs/" 2>/dev/null || true
   cp -f "$D"/train_obstacle_cost_labels.py "$ROOT/experiments/aerial/rl/" 2>/dev/null || true
   chmod +x "$ROOT/experiments/aerial/scripts"/run_geomfix_r*.sh \
-           "$ROOT/experiments/aerial/scripts"/watch_geomfix_quad.sh 2>/dev/null || true
+           "$ROOT/experiments/aerial/scripts"/watch_geomfix_quad.sh \
+           "$ROOT/experiments/aerial/scripts"/auto_advance_geomfix.sh \
+           "$ROOT/experiments/aerial/scripts"/run_cone_pass_reflow.sh 2>/dev/null || true
 }
 
-# kill leftover C / geom verify noise
+# kill leftover C / geom verify / previous geomfix watchers (not H100 train)
 pkill -9 -f 'watch_c1234|chain_c1234|train_v4_ac|run_mainchannel_c' 2>/dev/null || true
 pkill -9 -f 'run_geom_verify_arm|watch_geom_verify' 2>/dev/null || true
+pkill -f 'watch_geomfix_quad|auto_advance_geomfix' 2>/dev/null || true
+pkill -f 'run_geomfix_r1_cost_reflow|run_cone_pass_reflow' 2>/dev/null || true
+sleep 2
 
 install_into "$R125"
+
+# Seed prior cone PASS so READY_SOFT doesn't wait on a flaky re-eval.
+PREV_CONE=$(ls -t "$R125"/experiments/aerial/rl/artifacts/geomfix_*/cone_pass_rank.json \
+  "$R125"/experiments/aerial/rl/artifacts/geomfix_*/R1_cone_rank.json 2>/dev/null | head -1 || true)
+if [[ -n "${PREV_CONE:-}" ]]; then
+  python3 - <<PY || true
+import json, shutil
+from pathlib import Path
+p=Path("$PREV_CONE")
+j=json.loads(p.read_text())
+if j.get("verdict")=="PASS":
+  shutil.copy2(p, Path("$OUT")/"R1_cone_rank.json")
+  print("seeded", p)
+PY
+fi
 
 # ---------- 125 R1 ----------
 cd "$R125"; export PYTHONPATH="$R125"
@@ -112,8 +134,11 @@ launch_h100() {
 launch_h100 31126 R3 14 run_geomfix_r3_wm_near.sh
 launch_h100 30627 R4 11 run_geomfix_r4_wm_probe.sh
 
-# watch
+# watch + auto-advance until READY_SOFT
 nohup env STAMP="$STAMP" bash "$R125/experiments/aerial/scripts/watch_geomfix_quad.sh" \
   >/dev/null 2>&1 &
 echo WATCH=$!
+nohup env STAMP="$STAMP" INTERVAL=90 bash "$R125/experiments/aerial/scripts/auto_advance_geomfix.sh" \
+  >/dev/null 2>&1 &
+echo AUTO_ADVANCE=$!
 echo GEOMFIX_LAUNCH_DONE

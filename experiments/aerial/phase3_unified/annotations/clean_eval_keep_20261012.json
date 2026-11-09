@@ -1,0 +1,45 @@
+{
+  "note": "Routes whose reference polyline at 24 m crosses a measured invisible collision volume, plus routes whose spawn is embedded in a building. Measured at AirSim NED z=-24 on 2026-10-12.",
+  "boxes_ned_z24_margin_1p5m": {
+    "SM_NYCB_578": {"x": [131.0, 149.5], "y": [82.0, 120.5]},
+    "SM_NYCB_869": {"x": [-879.0, -842.5], "y": [27.0, 46.5]},
+    "SM_NYCB_867": {"x": [-900.5, -879.0], "y": [11.0, 47.0]},
+    "SM_NYCB_22": {"x": [-1009.0, -972.0], "y": [66.5, 100.5]},
+    "SM_NYCB_1-5_2406": {"x": [-1091.5, -1066.0], "y": [77.0, 102.5]}
+  },
+  "east_drop": {
+    "od_holdout_02": "crosses SM_NYCB_578",
+    "od_holdout_06": "crosses SM_NYCB_578",
+    "od_holdout_10": "crosses SM_NYCB_578",
+    "od_holdout_15": "crosses SM_NYCB_578",
+    "od_holdout_23": "crosses SM_NYCB_578",
+    "od_holdout_13": "spawn embedded in SM_NYCB_604"
+  },
+  "east_keep": [
+    "od_holdout_00", "od_holdout_01", "od_holdout_03", "od_holdout_04",
+    "od_holdout_05", "od_holdout_07", "od_holdout_08", "od_holdout_11",
+    "od_holdout_12", "od_holdout_17", "od_holdout_19", "od_holdout_22"
+  ],
+  "measured_shore_rule": "spawn >= 100 m and every path point >= 80 m from open water, measured on experiments/aerial/rl/artifacts/water_map_measured_20261012.npz (looking down from 150 m; the hand-drawn water_exclusion rectangles miss the shoreline by up to ~80 m and two urban_interior polygons lie entirely over water). Full numbers: experiments/aerial/rl/artifacts/WATER_AUDIT_20261012.json on 125.",
+  "measured_shore_drop": {
+    "east": ["od_holdout_00", "od_holdout_05", "od_holdout_13"],
+    "clean_pool": ["od_clean_06", "od_clean_07", "od_clean_08", "od_clean_11", "od_clean_12", "od_clean_16", "od_clean_17",
+                   "od_clean_19", "od_clean_20", "od_clean_27", "od_clean_28", "od_clean_29", "od_clean_30", "od_clean_32",
+                   "od_clean_33", "od_clean_34", "od_clean_40"],
+    "train": ["od_train_01", "od_train_02", "od_train_05", "od_train_13", "od_train_19", "od_train_26", "od_train_28",
+              "od_train_29", "od_train_31", "od_train_32", "od_train_36", "od_train_37"]
+  },
+  "east_keep_inland": [
+    "od_holdout_01", "od_holdout_03", "od_holdout_04", "od_holdout_07", "od_holdout_08", "od_holdout_11",
+    "od_holdout_12", "od_holdout_17", "od_holdout_19", "od_holdout_22"
+  ],
+  "train_eval_drop": {
+    "od_train_16": "crosses SM_NYCB_22",
+    "od_train_18": "crosses SM_NYCB_22",
+    "od_train_27": "crosses SM_NYCB_22",
+    "od_train_21": "crosses SM_NYCB_22 and spawn embedded",
+    "od_train_02": "spawn embedded in SM_NYCB_954",
+    "od_train_24": "spawn embedded in SM_NYCB_200",
+    "od_train_05": "goal ~4 m from SM_NYCB_22 volume; every named collision on this route is SM_NYCB_22 inside the box near the goal"
+  }
+}

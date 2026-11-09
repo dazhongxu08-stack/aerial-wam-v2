@@ -1,0 +1,54 @@
+{
+ "model": "opencv_fisheye_kannala_brandt",
+ "width": 1280,
+ "height": 720,
+ "K": [
+  [
+   824.259808042931,
+   0.0,
+   608.6946498372004
+  ],
+  [
+   0.0,
+   824.259808042931,
+   395.5
+  ],
+  [
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "D": [
+  -0.14900957734944056,
+  0.05917332406710893,
+  -0.05774290692732022,
+  0.027884825383194752
+ ],
+ "hfov_deg": 97.97594273513228,
+ "vfov_deg": 51.466972064179984,
+ "pairs_fit": 65,
+ "pairs_holdout": 65,
+ "holdout_reproj_median_px": 0.8790639993426623,
+ "holdout_angle_abs_err_median_deg": 0.6196813099813561,
+ "note": "1280x720 full sensor frame; the recorded frames drop the bottom 72 rows, cy unchanged",
+ "cy_source": "tape: two crosses 1.00 m apart, 0.20 m above a level camera, wall 3.00 m ahead. cy moved 418.2 -> 395.5 so both elevations match atan(0.20*cos(az)/3). f and D kept from the IMU turn calibration.",
+ "tape_check": {
+  "pixels": [
+   [
+    407.9,
+    344.21
+   ],
+   [
+    666.01,
+    338.76
+   ]
+  ],
+  "wall_m": 3.0,
+  "slant_m": [3.099, 3.014],
+  "baseline_m_from_model": 0.964,
+  "elev_residual_deg": 0.14,
+  "da3_90_m": [7.377, 8.050],
+  "da3_metric_scale": 0.396
+ }
+}

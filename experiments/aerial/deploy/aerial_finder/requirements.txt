@@ -1,0 +1,9 @@
+# torch / torchvision: use the platform build (JetPack wheel on Orin, CUDA wheel on x86); not pinned here.
+numpy>=1.24
+opencv-python-headless>=4.8
+ultralytics>=8.3
+# YOLO-World text prompts need CLIP; ultralytics installs it on first use, preinstall for offline hosts:
+git+https://github.com/ultralytics/CLIP.git
+# optional
+airsim>=1.8          # simulation backend only
+paho-mqtt>=1.6       # MQTT dog reporter only

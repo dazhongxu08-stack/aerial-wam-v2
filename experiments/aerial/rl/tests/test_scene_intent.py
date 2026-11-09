@@ -4,9 +4,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import math
+
 from experiments.aerial.rl.scene_intent import (
+    RoadCenterIntent,
     SceneIntentPlanner,
     TowardGoalIntent,
+    annotation_yaw_rad,
     clip_toward_goal,
 )
 
@@ -279,6 +283,8 @@ def test_stuck_escape_triggers_after_prolonged_no_progress():
         step_hz=5.0,
         stuck_escape_after_s=2.0,  # short window for a fast test
         stuck_escape_hold_s=1.0,
+        peel_fwd_m=0.0,  # isolate stuck-escape from mid-course peel
+        peel_climb_m=0.0,
     )
     pl.reset()
     p = np.zeros(3)
@@ -306,7 +312,7 @@ def test_stuck_escape_triggers_after_prolonged_no_progress():
 def test_stuck_escape_disabled_by_default_zero():
     """stuck_escape_after_s=0 must fully preserve legacy behaviour (never
     widen the fan / override progress-based scoring)."""
-    pl = SceneIntentPlanner(stuck_escape_after_s=0.0)
+    pl = SceneIntentPlanner(stuck_escape_after_s=0.0, peel_fwd_m=0.0)
     pl.reset()
     p = np.zeros(3)
     goal = np.array([100.0, 0.0, 0.0])
@@ -317,3 +323,304 @@ def test_stuck_escape_disabled_by_default_zero():
         )
         assert not info["in_escape"]
     assert pl.escape_count == 0
+
+
+def test_midcourse_peel_triggers_on_asymmetric_side_clearance():
+    """R0/R1 choke (2026-09-23 GT-depth): wall ahead + open left should peel
+    immediately while still far from G — not wait for stuck-escape timeout."""
+    pl = SceneIntentPlanner(
+        r_m=25.0,
+        d_danger=3.0,
+        d_clear=40.0,
+        step_hz=5.0,
+        stuck_escape_after_s=30.0,  # must NOT be the trigger
+        peel_fwd_m=12.0,
+        peel_side_advantage_m=6.0,
+        peel_min_rem_m=25.0,
+        peel_hold_s=1.0,
+        peel_climb_m=0.0,
+    )
+    pl.reset()
+    p = np.zeros(3)
+    goal = np.array([100.0, 0.0, 0.0])  # rem=100 > peel_min_rem
+    cones = {"forward": 8.0, "left": 25.0, "right": 5.0}  # left clearly open
+    _, info = pl.compute(
+        curr_pos=p,
+        curr_yaw=0.0,
+        goal=goal,
+        d_fwd_hat=8.0,
+        depth_cones=cones,
+    )
+    assert info["in_peel"], "expected proactive mid-course peel"
+    assert pl.peel_count >= 1
+    assert info["chosen_idx"] != 0, "peel must leave toward_g candidate"
+
+
+def test_midcourse_peel_without_cones_falls_back_to_goal_side():
+    """Daytime R1 crash mode: d_fwd tight but cones missing/symmetric — still peel."""
+    pl = SceneIntentPlanner(
+        peel_fwd_m=18.0,
+        peel_min_rem_m=20.0,
+        peel_hold_s=1.0,
+        peel_climb_m=4.0,
+        stuck_escape_after_s=0.0,
+    )
+    pl.reset()
+    p = np.zeros(3)
+    goal = np.array([100.0, 30.0, 0.0])  # goal to the left → peel left
+    _, info = pl.compute(
+        curr_pos=p, curr_yaw=0.0, goal=goal, d_fwd_hat=10.0, depth_cones=None
+    )
+    assert info["in_peel"]
+    tw = info["target_world"]
+    assert tw[2] >= 4.0 - 1e-6, "peel should climb"
+
+
+def test_midcourse_peel_disabled_near_goal():
+    pl = SceneIntentPlanner(
+        peel_fwd_m=12.0,
+        peel_side_advantage_m=6.0,
+        peel_min_rem_m=25.0,
+        stuck_escape_after_s=0.0,
+    )
+    pl.reset()
+    p = np.zeros(3)
+    goal = np.array([20.0, 0.0, 0.0])  # rem < peel_min_rem
+    cones = {"forward": 8.0, "left": 25.0, "right": 5.0}
+    _, info = pl.compute(
+        curr_pos=p, curr_yaw=0.0, goal=goal, d_fwd_hat=8.0, depth_cones=cones
+    )
+    assert not info["in_peel"]
+    assert pl.peel_count == 0
+
+def test_force_peel_rem_band_triggers_without_tight_fwd():
+    """R1 ~57 m choke: force peel in rem band even when nose is still open."""
+    pl = SceneIntentPlanner(
+        peel_fwd_m=0.0,  # mid-course peel OFF — only force band
+        stuck_escape_after_s=0.0,
+        force_peel_rem_lo_m=45.0,
+        force_peel_rem_hi_m=70.0,
+        force_peel_min_yaw_deg=75.0,
+        peel_hold_s=1.0,
+        peel_climb_m=4.0,
+        step_hz=5.0,
+    )
+    pl.reset()
+    p = np.zeros(3)
+    goal = np.array([57.0, 0.0, 0.0])  # rem in force band
+    cones = {"forward": 40.0, "left": 30.0, "right": 8.0}  # left clearer
+    _, info = pl.compute(
+        curr_pos=p,
+        curr_yaw=0.0,
+        goal=goal,
+        d_fwd_hat=40.0,
+        depth_cones=cones,
+    )
+    assert info["in_peel"]
+    assert info["force_peel"]
+    assert pl.peel_count >= 1
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    bearing = float(np.rad2deg(np.arctan2(tw[1], tw[0])))
+    assert abs(bearing) >= 70.0, f"expected large side peel, got bearing={bearing}"
+    assert tw[2] >= 4.0 - 1e-6
+
+
+def test_force_peel_rem_band_off_outside_window():
+    pl = SceneIntentPlanner(
+        peel_fwd_m=0.0,
+        stuck_escape_after_s=0.0,
+        force_peel_rem_lo_m=45.0,
+        force_peel_rem_hi_m=70.0,
+    )
+    pl.reset()
+    p = np.zeros(3)
+    goal = np.array([100.0, 0.0, 0.0])  # rem outside band
+    _, info = pl.compute(
+        curr_pos=p, curr_yaw=0.0, goal=goal, d_fwd_hat=40.0, depth_cones=None
+    )
+    assert not info["in_peel"]
+    assert not info["force_peel"]
+    assert pl.peel_count == 0
+
+
+def test_road_center_stays_on_the_street_while_the_nose_is_open():
+    intent = RoadCenterIntent(r_m=20.0)
+    intent.reset()
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([80.0, 10.0, 0.0]),
+        depth_cones={"forward": 20.0, "left": 18.0, "right": 8.0},
+    )
+    assert info["road_committed"] is False
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert tw[0] > 15.0
+    assert abs(tw[1]) < 1.0
+
+
+def test_annotation_yaw_degrees_become_radians():
+    assert annotation_yaw_rad(0.0) == 0.0
+    assert annotation_yaw_rad(math.pi / 2.0) == pytest.approx(math.pi / 2.0)
+    assert annotation_yaw_rad(90.0) == pytest.approx(math.pi / 2.0)
+    assert annotation_yaw_rad(-90.0) == pytest.approx(-math.pi / 2.0)
+    assert annotation_yaw_rad(180.0) == pytest.approx(math.pi)
+
+
+def test_road_center_keeps_the_commanded_street_when_yaw_has_drifted():
+    intent = RoadCenterIntent(r_m=20.0)
+    intent.reset(heading=math.pi / 2.0)
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=2.035,
+        goal=np.array([0.0, 200.0, 0.0]),
+        depth_cones={"forward": 20.0, "left": 29.0, "right": 11.0},
+    )
+    assert info["road_committed"] is False
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert abs(tw[0]) < 1.0
+    assert tw[1] > 15.0
+
+
+def test_road_center_does_not_turn_into_a_side_that_opens_early():
+    intent = RoadCenterIntent(r_m=20.0)
+    intent.reset(heading=0.0)
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([56.0, 56.0, 0.0]),
+        depth_cones={"forward": 38.0, "left": 12.0, "right": 40.0},
+    )
+    assert info["road_committed"] is False
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert tw[0] > 15.0
+    assert abs(tw[1]) < 1.0
+
+
+def test_road_center_holds_the_street_until_the_corner_is_close():
+    intent = RoadCenterIntent(r_m=25.0)
+    intent.reset(heading=0.0)
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([18.0, 56.0, 0.0]),
+        depth_cones={"forward": 36.0, "left": 43.0, "right": 43.0},
+    )
+    assert info["road_committed"] is False
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert tw[0] > 15.0
+    assert abs(tw[1]) < 1.0
+
+
+def test_road_center_turns_at_the_corner_even_if_both_sides_are_open():
+    intent = RoadCenterIntent(r_m=25.0, release_m=12.0)
+    intent.reset(heading=0.0)
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([6.0, 56.0, 0.0]),
+        depth_cones={"forward": 35.0, "left": 43.0, "right": 43.0},
+    )
+    assert info["road_committed"] is True
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert tw[0] == pytest.approx(6.0, abs=0.5)
+    assert tw[1] == pytest.approx(12.0, abs=0.5)
+
+
+def test_road_center_takes_a_short_gap_once_the_corner_is_reached():
+    intent = RoadCenterIntent(r_m=25.0, release_m=12.0)
+    intent.reset(heading=math.pi / 2.0)
+    _, early = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=math.pi / 2.0,
+        goal=np.array([-40.0, 14.0, 0.0]),
+        depth_cones={"forward": 32.0, "left": 17.0, "right": 20.0},
+    )
+    assert early["road_committed"] is False
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=math.pi / 2.0,
+        goal=np.array([-40.0, 4.0, 0.0]),
+        depth_cones={"forward": 32.0, "left": 17.0, "right": 22.0},
+    )
+    assert info["road_committed"] is True
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert tw[0] == pytest.approx(-12.0, abs=0.5)
+    assert tw[1] == pytest.approx(4.0, abs=0.5)
+
+
+def test_road_center_carrot_stays_on_the_exit_centerline():
+    intent = RoadCenterIntent(r_m=25.0, release_m=12.0)
+    intent.reset(heading=math.pi / 2.0)
+    _, info = intent.compute(
+        curr_pos=np.array([0.0, 0.0, 0.0]),
+        curr_yaw=math.pi / 2.0,
+        goal=np.array([56.0, 6.0, 0.0]),
+        depth_cones={"forward": 30.0, "left": 30.0, "right": 36.0},
+    )
+    assert info["road_committed"] is True
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert tw[0] == pytest.approx(12.0, abs=0.5)
+    assert tw[1] == pytest.approx(6.0, abs=0.5)
+
+
+def test_road_center_turns_when_a_closed_side_opens():
+    intent = RoadCenterIntent(r_m=20.0)
+    intent.reset()
+    intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([8.0, 40.0, 0.0]),
+        depth_cones={"forward": 28.0, "left": 14.0, "right": 8.0},
+    )
+    _, info = intent.compute(
+        curr_pos=np.array([10.0, 0.0, 0.0]),
+        curr_yaw=0.0,
+        goal=np.array([8.0, 40.0, 0.0]),
+        depth_cones={"forward": 28.0, "left": 32.0, "right": 8.0},
+    )
+    assert info["road_committed"] is True
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    assert tw[1] > tw[0]
+
+
+def test_road_center_aims_at_the_goal_once_it_falls_behind():
+    intent = RoadCenterIntent(r_m=20.0)
+    intent.reset(heading=0.0)
+    intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([6.0, 56.0, 0.0]),
+        depth_cones={"forward": 28.0, "left": 32.0, "right": 32.0},
+    )
+    _, info = intent.compute(
+        curr_pos=np.array([0.0, 80.0, 0.0]),
+        curr_yaw=float(np.pi / 2.0),
+        goal=np.array([8.0, 40.0, 0.0]),
+        depth_cones={"forward": 28.0, "left": 32.0, "right": 8.0},
+    )
+    tw = np.asarray(info["target_world"], dtype=np.float64)
+    np.testing.assert_allclose(tw[:2], [8.0, 40.0], atol=1e-4)
+
+
+def test_road_center_does_not_turn_while_the_goal_is_still_mostly_ahead():
+    intent = RoadCenterIntent(r_m=20.0)
+    intent.reset()
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([80.0, 40.0, 0.0]),
+        depth_cones={"forward": 8.0, "left": 20.0, "right": 6.0},
+    )
+    assert info["road_committed"] is False
+
+
+def test_road_center_does_not_turn_away_from_the_goal():
+    intent = RoadCenterIntent(r_m=20.0)
+    intent.reset()
+    _, info = intent.compute(
+        curr_pos=np.zeros(3),
+        curr_yaw=0.0,
+        goal=np.array([80.0, 0.0, 0.0]),
+        depth_cones={"forward": 8.0, "left": 20.0, "right": 6.0},
+    )
+    assert info["road_committed"] is False

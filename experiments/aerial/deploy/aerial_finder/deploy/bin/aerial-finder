@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Product entrypoint: only HTTP / CLI of aerial_finder; no training tree needed.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export AERIAL_FINDER_HOME="${AERIAL_FINDER_HOME:-$ROOT}"
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+CFG="${AERIAL_FINDER_CONFIG:-$ROOT/config.json}"
+PY="${ROOT}/venv/bin/python"
+if [[ ! -x "$PY" ]]; then
+  echo "missing $PY — run deploy/install.sh first" >&2
+  exit 1
+fi
+cd "$ROOT"
+if [[ $# -eq 0 ]]; then
+  exec "$PY" -m aerial_finder serve --config "$CFG"
+fi
+exec "$PY" -m aerial_finder "$@"

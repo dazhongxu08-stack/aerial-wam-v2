@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from experiments.aerial.rl.depth_geometry import CONE_KEYS, cone_clearances
-from experiments.aerial.rl.depth_predictor import DepthMinPredictor
+from experiments.aerial.rl.depth_predictor import DepthMinPredictor, read_forward_scale
 from experiments.aerial.rl.env.obs import Observation
 
 
@@ -145,6 +145,19 @@ def test_predict_cones_none_when_all_invalid():
     pred = DepthMinPredictor(n_frames=1)
     _bind_stub_depth(pred, np.full((4, 4), np.nan, dtype=np.float32))
     assert pred.predict_cones(_obs(size=4)) is None
+
+
+def test_read_forward_scale_missing_is_one(tmp_path):
+    path = tmp_path / "depth.pt"
+    path.write_bytes(b"")
+    assert read_forward_scale(path) == 1.0
+
+
+def test_read_forward_scale_sidecar(tmp_path):
+    path = tmp_path / "depth.pt"
+    path.write_bytes(b"")
+    (tmp_path / "depth.pt.forward_scale.json").write_text('{"scale": 1.6}')
+    assert read_forward_scale(path) == 1.6
 
 
 def test_forward_min_depth_min_crop_size():

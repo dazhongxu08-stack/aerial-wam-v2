@@ -183,10 +183,12 @@ def _load_buffer(root: Path, window: int, heldout_frac: float = 0.0) -> ReplayBu
 
 def _check_learning(model: TorchRSSMDynamics, buf: ReplayBuffer,
                     steps: int, wm_batch: int, window: int,
-                    log_path: Optional[Path] = None) -> bool:
+                    log_path: Optional[Path] = None,
+                    head_only: bool = False) -> bool:
     losses: List[float] = []
     recons: List[float] = []
     ent_fracs: List[float] = []
+    pair_losses: List[float] = []
     if log_path is not None and log_path.exists():
         log_path.unlink()
     for i in range(steps):
@@ -195,6 +197,7 @@ def _check_learning(model: TorchRSSMDynamics, buf: ReplayBuffer,
         losses.append(out["loss"])
         recons.append(out["recon_err"])
         ent_fracs.append(out.get("post_entropy_frac", 1.0))
+        pair_losses.append(float(out.get("loss_coll_pair", float("nan"))))
         if log_path is not None:
             # Field names MUST match _v0_gate._signal1abc_from_log (loss /
             # recon_err / post_entropy_frac) so ①a–c reads this as its curve.
@@ -207,9 +210,16 @@ def _check_learning(model: TorchRSSMDynamics, buf: ReplayBuffer,
                 "loss_rep": float(out.get("loss_rep", float("nan"))),
                 "loss_reward": float(out.get("loss_reward", float("nan"))),
                 "loss_coll": float(out.get("loss_coll", float("nan"))),
+                "loss_coll_pair": float(out.get("loss_coll_pair", float("nan"))),
+                "coll_pair_n": int(out.get("coll_pair_n", 0)),
                 "loss_coll_hinge": float(out.get("loss_coll_hinge", float("nan"))),
                 "loss_depth_aux": float(out.get("loss_depth_aux", float("nan"))),
+                "loss_center_depth": float(out.get("loss_center_depth", float("nan"))),
+                "loss_cone_side": float(out.get("loss_cone_side", float("nan"))),
                 "coll_hinge_gap": float(out.get("coll_hinge_gap", float("nan"))),
+                "loss_early_yaw": float(out.get("loss_early_yaw", float("nan"))),
+                "early_yaw_gap": float(out.get("early_yaw_gap", float("nan"))),
+                "early_yaw_n": int(out.get("early_yaw_n", 0)),
                 "grad_norm": float(out.get("grad_norm", float("nan"))),
             }
             with log_path.open("a") as f:
@@ -218,9 +228,16 @@ def _check_learning(model: TorchRSSMDynamics, buf: ReplayBuffer,
             print(f"[wm-validate] step {i:4d} | loss={out['loss']:.4f} "
                   f"recon={out['recon_err']:.4f} rew={out.get('loss_reward', float('nan')):.3f} "
                   f"coll={out.get('loss_coll', float('nan')):.3f} "
+                  f"pair={out.get('loss_coll_pair', float('nan')):.3f} "
+                  f"pair_n={int(out.get('coll_pair_n', 0))} "
                   f"hinge={out.get('loss_coll_hinge', float('nan')):.3f} "
                   f"d_aux={out.get('loss_depth_aux', float('nan')):.3f} "
+                  f"center={out.get('loss_center_depth', float('nan')):.3f} "
+                  f"cone={out.get('loss_cone_side', float('nan')):.3f} "
                   f"gap={out.get('coll_hinge_gap', float('nan')):.3f} "
+                  f"early={out.get('loss_early_yaw', float('nan')):.3f} "
+                  f"early_n={int(out.get('early_yaw_n', 0))} "
+                  f"early_gap={out.get('early_yaw_gap', float('nan')):.3f} "
                   f"dyn={out['loss_dyn']:.3f} "
                   f"rep={out['loss_rep']:.3f} ent={ent_fracs[-1]:.2f} "
                   f"|g|={out['grad_norm']:.1f}")
@@ -232,9 +249,20 @@ def _check_learning(model: TorchRSSMDynamics, buf: ReplayBuffer,
     first, last = float(np.mean(losses[:k])), float(np.mean(losses[-k:]))
     recon_first, recon_last = float(np.mean(recons[:k])), float(np.mean(recons[-k:]))
     min_ent = float(np.min(ent_fracs))
+    collapse_ok = min_ent >= model.collapse_entropy_frac
+    if head_only:
+        # Backbone is frozen, so total loss and recon are KL/decode noise.
+        # The trained quantity is the forward/yaw pair loss.
+        pair_first = float(np.mean(pair_losses[:k]))
+        pair_last = float(np.mean(pair_losses[-k:]))
+        loss_ok = np.isfinite(pair_last) and pair_last < pair_first * 0.98
+        print(f"[wm-validate] LEARNING: pair {pair_first:.4f}→{pair_last:.4f} "
+              f"({'OK' if loss_ok else 'FAIL'}) | "
+              f"total {first:.4f}→{last:.4f} (frozen backbone) | "
+              f"min entropy frac {min_ent:.2f} ({'OK' if collapse_ok else 'COLLAPSE'})")
+        return loss_ok and collapse_ok
     loss_ok = last < first * 0.98              # ≥2% total-loss drop
     recon_ok = recon_last <= recon_first       # recon not worse
-    collapse_ok = min_ent >= model.collapse_entropy_frac
     print(f"[wm-validate] LEARNING: loss {first:.4f}→{last:.4f} ({'OK' if loss_ok else 'FAIL'}) | "
           f"recon {recon_first:.4f}→{recon_last:.4f} ({'OK' if recon_ok else 'FAIL'}) | "
           f"min entropy frac {min_ent:.2f} ({'OK' if collapse_ok else 'COLLAPSE'})")
@@ -311,10 +339,27 @@ def main(argv: List[str] | None = None) -> int:
         help="warm-start from an existing wm_step_*.pt (loads weights before training)",
     )
     p.add_argument(
+        "--cone-depth-weight",
+        type=float,
+        default=0.0,
+        help="extra loss on left/right cone order. 0 leaves the depth loss unchanged.",
+    )
+    p.add_argument(
         "--save-step",
         type=int,
         default=None,
         help="step number embedded in wm_step_<N>.pt (default: init_step+steps or steps)",
+    )
+    p.add_argument(
+        "--collision-head-only",
+        action="store_true",
+        help="freeze the backbone and train coll_head on the loaded latent",
+    )
+    p.add_argument(
+        "--head-lr",
+        type=float,
+        default=1e-4,
+        help="AdamW lr for --collision-head-only",
     )
     args = p.parse_args(argv)
 
@@ -350,6 +395,18 @@ def main(argv: List[str] | None = None) -> int:
             + (f", skipped={len(skipped)} tensors" if skipped else "")
             + "; optimizer reset)"
         )
+    model.cone_depth_weight = float(args.cone_depth_weight)
+    if model.cone_depth_weight > 0.0:
+        print(f"[wm-validate] cone_depth_weight={model.cone_depth_weight}")
+    if args.collision_head_only:
+        head_params = model.freeze_backbone_train_collision_head(
+            lr=float(args.head_lr), early_fwd_m=18.0,
+        )
+        n_param = sum(int(p.numel()) for p in head_params)
+        print(
+            f"[wm-validate] collision head only: {n_param} params, "
+            f"lr={float(args.head_lr):.1e}, early_fwd={model.coll_early_fwd_m}, backbone frozen"
+        )
     print(f"[wm-validate] model on {model.device} | latent_dim={model.latent_dim} "
           f"| image_size={wm_cfg['image_size']}")
 
@@ -369,7 +426,8 @@ def main(argv: List[str] | None = None) -> int:
              if args.allow_v0_desync else ""))
 
     learn_ok = _check_learning(
-        model, buf, args.steps, args.wm_batch, args.window, log_path=log_path
+        model, buf, args.steps, args.wm_batch, args.window, log_path=log_path,
+        head_only=bool(args.collision_head_only),
     )
     diverge_ok = _check_non_divergence(model, buf, args.window, args.horizon)
 

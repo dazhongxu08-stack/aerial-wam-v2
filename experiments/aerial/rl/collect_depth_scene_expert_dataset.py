@@ -277,6 +277,21 @@ def main() -> int:
         help="if >0, each --routes index must keep at least this many (hard-route coverage)",
     )
     p.add_argument(
+        "--require-all-requested-routes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "if True (default), refuse to start when geography drops any --routes "
+            "index — prevents gate_passed on a subset (e.g. only R1/R3)"
+        ),
+    )
+    p.add_argument(
+        "--max-ddyaw",
+        type=float,
+        default=0.12,
+        help="expert per-step |Δdyaw| cap (rad); 0 disables yaw low-pass",
+    )
+    p.add_argument(
         "--until-gate",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -338,6 +353,25 @@ def main() -> int:
         "chronic-intervention failure is a D̂ perception bug or a real obstacle. "
         "Forces per-step depth grab (slower).",
     )
+    p.add_argument(
+        "--force-peel-rem",
+        default=None,
+        help="Force open-side peel while rem_dist in [lo,hi] meters "
+        "(e.g. '45,70' for R1 ~57 m facade crash). Independent of d_fwd. "
+        "Empty/omit disables.",
+    )
+    p.add_argument(
+        "--force-peel-min-yaw-deg",
+        type=float,
+        default=75.0,
+        help="Min |body yaw| (deg) for force-peel candidate selection",
+    )
+    p.add_argument(
+        "--force-peel-side",
+        type=float,
+        default=0.0,
+        help="Force peel side: >0 left, <0 right, 0=auto (clearer cone / goal)",
+    )
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[depth-scene-expert] %(message)s")
@@ -378,6 +412,7 @@ def main() -> int:
 
     regions = load_regions(DEFAULT_REGIONS_PATH)
     filtered: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
+    dropped: List[Tuple[int, Dict[str, Any]]] = []
     for ri, ep in pool:
         ok, geo = _geo_ok(
             ep,
@@ -388,6 +423,7 @@ def main() -> int:
         )
         if not ok:
             logger.warning("route %d PRE-FILTER drop: %s", ri, geo.get("geo_reasons"))
+            dropped.append((ri, geo))
             continue
         filtered.append((ri, lift_episode_z(ep, min_spawn_z=float(args.min_spawn_z)), geo))
     if not filtered:
@@ -401,6 +437,20 @@ def main() -> int:
         args.min_spawn_inland_m,
         args.min_path_inland_m,
     )
+    if bool(args.require_all_requested_routes) and dropped:
+        for ri, geo in dropped:
+            logger.error(
+                "require-all-requested-routes: R%d dropped (%s)",
+                ri,
+                geo.get("geo_reasons"),
+            )
+        logger.error(
+            "refusing collect: %d/%d requested routes failed geography — "
+            "fix regions or pass --no-require-all-requested-routes",
+            len(dropped),
+            len(pool),
+        )
+        return 1
 
     env = _build_env(env_cfg)
     depth_pred = None
@@ -439,6 +489,7 @@ def main() -> int:
         cruise_speed=float(args.cruise_speed),
         step_m=float(args.cruise_speed) / float(args.step_hz),
         max_dyaw=float(args.max_dyaw),
+        max_ddyaw=float(args.max_ddyaw),
         d_clear=float(args.d_clear),
         d_danger=float(args.d_danger),
         descent_radius_m=float(args.descent_radius_m),
@@ -446,6 +497,41 @@ def main() -> int:
         w_jump=float(args.w_jump),
         stuck_escape_after_s=float(args.stuck_escape_after_s),
         stuck_escape_hold_s=float(args.stuck_escape_hold_s),
+    )
+    # Urban R0/R1: enable mid-course peel by default for this collect (opt-in
+    # field on SceneIntentPlanner stays 0 for non-collect callers / unit tests).
+    policy.intent.peel_fwd_m = 20.0
+    policy.intent.peel_side_advantage_m = 2.0
+    policy.intent.peel_min_rem_m = 20.0
+    policy.intent.peel_hold_s = 10.0
+    policy.intent.peel_climb_m = 5.0
+    policy.intent.peel_clear_margin_m = 2.0
+    force_rem = str(args.force_peel_rem or "").strip()
+    if force_rem:
+        parts = [p.strip() for p in force_rem.replace(":", ",").split(",") if p.strip()]
+        if len(parts) != 2:
+            raise SystemExit(
+                f"--force-peel-rem expects 'lo,hi' (got {force_rem!r})"
+            )
+        lo, hi = float(parts[0]), float(parts[1])
+        if not (hi > lo > 0.0):
+            raise SystemExit(f"--force-peel-rem needs 0 < lo < hi (got {lo},{hi})")
+        policy.intent.force_peel_rem_lo_m = lo
+        policy.intent.force_peel_rem_hi_m = hi
+        policy.intent.force_peel_min_yaw_deg = float(args.force_peel_min_yaw_deg)
+        policy.intent.force_peel_side = float(args.force_peel_side)
+        logger.info(
+            "FORCE open-side peel ON rem=[%.1f,%.1f] min_yaw=%.0f° side=%.0f",
+            lo,
+            hi,
+            float(args.force_peel_min_yaw_deg),
+            float(args.force_peel_side),
+        )
+    logger.info(
+        "midcourse peel ON fwd=%.1f hold=%.1fs climb=%.1fm",
+        policy.intent.peel_fwd_m,
+        policy.intent.peel_hold_s,
+        policy.intent.peel_climb_m,
     )
     buf = ReplayBuffer(capacity_episodes=max(8, len(filtered) * 4), seed=0)
     reward_cfg = RewardConfig(
@@ -505,6 +591,27 @@ def main() -> int:
     # chances to re-plan into the now-available escape, so it is deprioritised
     # below the faster-replan / stronger-turn variants that actually help.
     RETRY_GRID: List[Dict[str, Any]] = [
+        # Front-load mid-course peel / long clearance escape (R0~32m R1~57m
+        # choke; GT-depth 2026-09-23 ruled out D̂ as the main cause).
+        {
+            "label": "midcourse_peel",
+            "peel_fwd_m": 20.0,
+            "peel_side_advantage_m": 2.0,
+            "peel_hold_s": 10.0,
+            "peel_climb_m": 5.0,
+            "stuck_escape_after_s": 4.0,
+            "stuck_escape_hold_s": 10.0,
+        },
+        {
+            "label": "long_clearance_escape",
+            "stuck_escape_after_s": 4.0,
+            "stuck_escape_hold_s": 12.0,
+            "w_g": 0.35,
+            "peel_fwd_m": 20.0,
+            "peel_side_advantage_m": 2.0,
+            "peel_hold_s": 10.0,
+            "peel_climb_m": 5.0,
+        },
         {"label": "baseline"},
         {
             "label": "fast_replan_escape",
@@ -581,6 +688,11 @@ def main() -> int:
     base_retreat_dyaw = float(args.retreat_max_dyaw_rad)
     base_stuck_after = float(args.stuck_escape_after_s)
     base_stuck_hold = float(args.stuck_escape_hold_s)
+    base_w_g = float(policy.intent.w_g)
+    base_peel_fwd = float(getattr(policy.intent, "peel_fwd_m", 18.0))
+    base_peel_adv = float(getattr(policy.intent, "peel_side_advantage_m", 3.0))
+    base_peel_hold = float(getattr(policy.intent, "peel_hold_s", 8.0))
+    base_peel_climb = float(getattr(policy.intent, "peel_climb_m", 4.0))
 
     def _apply_retry_variant(round_i: int) -> Dict[str, Any]:
         variant = RETRY_GRID[round_i % len(RETRY_GRID)]
@@ -605,14 +717,25 @@ def main() -> int:
             variant.get("replan_period_s", base_replan_period)
         )
         policy.intent.w_jump = float(variant.get("w_jump", base_w_jump))
+        policy.intent.w_g = float(variant.get("w_g", base_w_g))
+        if hasattr(policy.intent, "peel_fwd_m"):
+            policy.intent.peel_fwd_m = float(variant.get("peel_fwd_m", base_peel_fwd))
+            policy.intent.peel_side_advantage_m = float(
+                variant.get("peel_side_advantage_m", base_peel_adv)
+            )
+            policy.intent.peel_hold_s = float(variant.get("peel_hold_s", base_peel_hold))
+            policy.intent.peel_climb_m = float(
+                variant.get("peel_climb_m", base_peel_climb)
+            )
         cruise = float(variant.get("cruise_speed", base_cruise))
         policy.intent.cruise_speed = cruise
         policy.step_m = cruise / float(args.step_hz)
         collector.max_steps = int(round(base_max_steps * float(variant.get("max_steps_mult", 1.0))))
         logger.info(
             "round %d retry-variant=%s r_m=%.1f d_clear=%.1f d_danger=%.1f cruise=%.1f "
-            "descent_radius=%.1f replan_period_s=%.1f w_jump=%.2f retreat_dyaw=%.2f "
-            "stuck_after_s=%.1f stuck_hold_s=%.1f max_steps=%d",
+            "descent_radius=%.1f replan_period_s=%.1f w_jump=%.2f w_g=%.2f retreat_dyaw=%.2f "
+            "stuck_after_s=%.1f stuck_hold_s=%.1f peel_fwd=%.1f peel_hold=%.1f peel_climb=%.1f "
+            "max_steps=%d",
             round_i,
             variant.get("label", "?"),
             policy.intent.r_m,
@@ -622,9 +745,13 @@ def main() -> int:
             policy.intent.descent_radius_m,
             policy.intent.replan_period_s,
             policy.intent.w_jump,
+            policy.intent.w_g,
             getattr(safety, "retreat_max_dyaw_rad", -1.0),
             policy.intent.stuck_escape_after_s,
             policy.intent.stuck_escape_hold_s,
+            float(getattr(policy.intent, "peel_fwd_m", -1.0)),
+            float(getattr(policy.intent, "peel_hold_s", -1.0)),
+            float(getattr(policy.intent, "peel_climb_m", -1.0)),
             collector.max_steps,
         )
         return variant
@@ -654,7 +781,8 @@ def main() -> int:
     max_rounds = int(args.max_rounds) if args.until_gate else 1
     gate = int(args.min_kept)
     min_per = int(args.min_kept_per_route)
-    required_routes = [ri for ri, _, _ in filtered]
+    # Coverage universe = CLI-requested routes (not a silent geography subset).
+    required_routes = [ri for ri, _ in pool]
 
     def _keep_by_route() -> Dict[int, int]:
         counts: Dict[int, int] = {ri: 0 for ri in required_routes}
@@ -855,18 +983,21 @@ def main() -> int:
     gate_ok = _gate_ok()
     summary = {
         "kind": "depth_scene_expert",
-        "n_requested_pool": len(filtered),
+        "n_requested_pool": len(pool),
+        "n_geo_kept": len(filtered),
         "n_written": kept,
         "n_arrived": n_arrived,
         "quality_kept": quality_kept,
         "min_kept_gate": gate,
         "min_kept_per_route": min_per,
+        "required_routes": list(required_routes),
         "keep_by_route": _keep_by_route(),
         "gate_passed": gate_ok,
         "rounds": round_i,
         "max_inflate": float(args.max_inflate),
         "require_arrived": bool(args.require_arrived),
         "require_interior": bool(args.require_interior),
+        "require_all_requested_routes": bool(args.require_all_requested_routes),
         "min_spawn_inland_m": float(args.min_spawn_inland_m),
         "min_path_inland_m": float(args.min_path_inland_m),
         "annotation": str(args.annotation),
@@ -874,7 +1005,7 @@ def main() -> int:
         "shield": "null" if args.no_shield else "three_zone_fwd",
         "note": (
             "urban-interior inland only; auto-review each ep; "
-            "until-gate keeps collecting until min_kept quality passes"
+            "until-gate requires min_kept AND per-route coverage on ALL requested routes"
         ),
     }
     out_dir.mkdir(parents=True, exist_ok=True)

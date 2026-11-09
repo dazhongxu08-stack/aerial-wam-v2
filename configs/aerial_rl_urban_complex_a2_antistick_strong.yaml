@@ -1,0 +1,17 @@
+# A2 · stronger spontaneous anti-stick (vs A1 / antistick_reward).
+reward:
+  w_press_wall: 3.5
+  w_clearance_center: 2.5
+  center_fwd_thresh_m: 10.0
+  center_progress_eps: 0.12
+  center_min_lat_adv_m: 2.0
+  center_yaw_scale: 1.0
+  w_curiosity: 0.0
+  w_progress: 1.2
+  w_away: 1.2
+
+planner:
+  enable: false
+
+safety:
+  kind: null

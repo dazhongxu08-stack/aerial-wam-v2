@@ -1,0 +1,17 @@
+[Unit]
+Description=aerial_finder semantic find-and-report task API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aerial_finder
+Environment=AERIAL_FINDER_HOME=/opt/aerial_finder
+Environment=AERIAL_DA3_FP16=1
+Environment=PYTHONPATH=/opt/aerial_finder
+ExecStart=/opt/aerial_finder/bin/aerial-finder serve --config /opt/aerial_finder/config.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

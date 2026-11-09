@@ -1,0 +1,1429 @@
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 1
+Simple but Stable, Fast and Safe: Achieve
+End-to-end Control by High-Fidelity Differentiable
+Simulation
+Fanxing Li*, Shengyang Wang*, Yuxiang Huang*, Fangyu Sun, Shuyu Wu, Yufei Yan, Danping Zou, Wenxian Yu
+Abstract—Obstacle avoidance is a fundamental vision-based
+task essential for enabling quadrotors to perform advanced
+applications. When planning the trajectory, existing approaches
+both on optimization and learning typically regard quadrotor
+as a point-mass model, giving path or velocity commands then
+tracking the commands by outer-loop controller. However, at
+high speeds, planned trajectories sometimes become dynamically
+infeasible in actual flight, which beyond the capacity of controller.
+Although direct taking low-level bodyrate commands as output
+can mitigate this issue, it gets much challenging to design such
+a low-level policy because the transition process is so complex
+and less smooth that the difficulty of training significantly
+increases. In this paper, we propose a novel end-to-end policy
+that directly maps depth images to low-level bodyrate commands
+by reinforcement learning via differentiable simulation. The
+high-fidelity simulation in training after parameter identification
+significantly reduces all the gaps between training, simulation
+and real world. Analytical process by differentiable simulation
+provides accurate gradient to ensure efficiently training the
+low-level policy without expert guidance. The policy employs
+a lightweight and the most simple inference pipeline that runs
+without explicit mapping, backbone networks, primitives, re-
+current structures, or backend controllers, nor curriculum or
+privileged guidance. By inferring low-level command directly to
+the hardware controller, the method enables full flight envelope
+control and avoids the dynamic-infeasible issue. Experimental
+results demonstrate that the proposed approach achieves the
+highest success rate and the lowest jerk among state-of-the-art
+baselines across multiple benchmarks. The policy also exhibits
+strong generalization, successfully deploying zero-shot in unseen,
+outdoor environments while reaching speeds of up to 7.5m/s as
+well as stably flying in the super-dense forest. Furthermore, we
+provide the first successful demonstration of backpropagating
+image information through high-fidelity differentiable simulation,
+validating the extensibility of first-order gradient methods to
+other complex robotic systems.
+Index Terms—Collision-free flight, Backpropagation-through-
+time, High-field differentiable simulation, End-to-End.
+I. INTRODUCTION
+Quadrotors have successfully perform various of high-risk
+application in real world like rescuing, searching, and deliver-
+ing. Collision-free is the fundamental function to ensure safety
+so that it could execute other high level tasks. Conventionally,
+a typical technical pipeline of obstacle avoidance is comprised
+of three components: perception&mapping, planning and con-
+trol. Multiple procedures lead to accumulated error as well
+Fanxing Li, Yuxiang Huang, Fangyu Sun, Yufei Yan are with Shanghai Jiao
+Tong University(li.fanxing, crosshill, sunfly cc, sawyer wu, yanyufei, dpzou,
+wxyusjtu.edu.cn). Shengyang Wang(sw592duke.edu) is with Kunshan Duke
+University.
+as excessive hardware overload [1]–[3]. Consequently, in real
+world with limited onboard computing resources, they usually
+fail in high-speed flight due to computation delay.
+Therefore, researchers employs neural networks to replace
+one or several time-consuming modules, which could signif-
+icantly accelerate the inference speed by omitting complex
+calculations like mapping and planning. Quadrotors could imi-
+tate expert planners with privileged knowledge [4]–[6] or learn
+from trial-and-error in reinforcement learning (RL) framework
+[7]. By reducing the inference delay, learning-based methods
+could achieve much faster speed than conventional methods [8]
+in outdoor environments. Exceptionally, there are also plenty
+of works that incorporate learning techniques like LSTM [7],
+[9] or backbone [8], [10] to enhance the inference capacity,
+which enable quadrotors to navigate in varying-density obsta-
+cle environments [7] as well as mazes [11] rather than cluttered
+forests.
+However, although learning-based methods could accelerate
+inference to give stable-frequency commands, it becomes
+challenging and still probably fails in high-speed flight because
+of dynamics-infeasibility. Specifically, most of current works
+on collision-free flight, [8], [12], use trajectory or velocity
+representatives as the output of actor network, with a following
+controller to transit it into low-level collective thrust and
+bodyrates (CTBR) command and send to hardware controller
+PX4 or BetaFlight. In training environment, such pipeline
+treats quadrotors as a point-mass kinematic model, which in-
+herently leads to the training-to-inferring gap. When deployed
+in the much complex high-fidelity 6 degree of freedom (DOF)
+environment, if the attitude of quadrotors gets much extreme
+at high-speed, it becomes difficult to track desired trajectories
+within tolerated error due to dynamic restraints. Although such
+dynamics-infeasibility could be mitigated by finetuning the
+trajectory using optimization techniques like time-reallocation
+[3], [13]. But if introducing another component, this excessive
+computation increases the inference duration, conflicting with
+the initial time-saving aim raised by learning-based methods.
+An alternative resolution is directly inferring the CTBR
+command with much better control response than position or
+velocity command. However, training such policies has two
+difficulties. On the one hand, if taking CTBR as command, it
+becomes challenging to estimate the long-time return in RL
+training, because the transition process gets much complicated
+by introducing the high-fidelity dynamics, thus it has to rely
+on external guidance [14] like imitation learning. On the other
+hand, movement direction control couples with orientation,
+arXiv:2604.10548v2  [cs.RO]  16 Apr 2026
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 2
+improving the difficulty to constantly keep perception aware
+as well as follow desired movement, or it probably crashes
+due to losing view of approaching obstacle.
+Recently, RL via differentiable physics emerges and exhibits
+improved convergence properties in quadrotor tasks [15], [16],
+as it could obtain analytical gradient through accumulative
+rewards from differentiable physics rather than using the critic
+to approximate it. It firstly achieves no-map high-speed flight
+in outdoor environment without expert guidance. Although
+currently research involving differentiable physics focus on
+point-mass model, the inherent differentiability of dynamics
+still shows promising extensibility that could be transferred
+onto high-fidelity robot system.
+Therefore, in this paper, we present the first end-to-end
+policy for high-speed collision-free flight with low-level con-
+trol commands. The low-level control avoids the dynamics-
+infeasibility by directly outputs CTBR. We leverage the high-
+fidelity simulation aligned with real-world robots, to train
+the policy with Back-Propagation-Through-Time (BPTT) via
+differentiable high-fidelity simulation, tackling the training
+efficiency training issue by introduced complex dynamics as
+well as adapting the altitude to achieve perception-aware.
+The analytical gradient provided by differentiable simulation
+enhances the learning efficiency, which makes even a 6-layer
+network capable to learn the policy, omitting the complex
+network architecture like LSTM and backbones. Meanwhile,
+direct inferring low-level command makes inference pipeline
+git rid of all the supportive controllers, makes the policy
+the simplest but efficient among current collision-avoidance
+research. To the best of our knowledge, it is the first example
+that backpropagates the image features upon the gradient graph
+of high-fidelitydynamicsrather than simplifiedkinematicsin
+previous works.
+On the premise that trained without any advanced architec-
+ture including recurrent network, backbone, action primitive,
+or external controller, or training tricks like privileged guid-
+ance or curriculum, our policy exhibits the smoothest trajec-
+tory as well as the highest success rate among all baselines
+in a series of simulated experiments with increasing obstacle
+density and desired velocity. We have zero-shot deployed the
+policy in both urban and wild unseen real-world scenarios,
+which shows strong generalization as well as safety. It reaches
+the speed of 7.5 m/s in dense forest, same as the state-of-the-
+art algorithms. Within sequential aggressive maneuvers and
+varying environment, it could automatically adjust the velocity
+according to dynamic limitation to ensure safety when flying
+in super-dense forest.
+Our contribution could be summarized as:
+•We propose the first end-to-end policy that directly
+outputs CTBR commands in high-speed obstacle avoid-
+ance task, theoretically tackling the dynamic-infeasible
+problem that the tracking controller fails to track given
+trajectory from policy in extreme cases.
+•We provide the simplest training and inferring pipelines in
+learning methods, which performs without any recurrent
+architecture, decoder-encoder, LSTM, backbone, action
+primitives or additional controllers.
+•We conduct a series of experiments in simulation and
+real world. The results show that, even with the simple
+pipeline, our policy still exhibits the highest success rate
+as well as the smoothest path.
+•We prove that, the image features are able to be back-
+propagated in limited horizon comprised of high-fidelity
+differentiable dynamics, even with much longer and com-
+plex gradient graph.
+II. RELATEDWORKS
+A. Collision-free Flight
+Safe flight has always been a primary concern in aerial
+robotics. Early research focused on developing robust and
+efficient control techniques for precise trajectory tracking.
+As control research matured and converged, collision-free
+flight was first decoupled into mapping, planning, and control
+modules, and this decomposition has since served as the
+standard classic workflow. In this pipeline, depth images or
+point clouds are converted into voxel grids or occupancy
+maps, collision-free trajectories are then planned based on
+the map, and finally, the planned trajectory is tracked us-
+ing a robust controller. Planning methods generally fall into
+three categories: search-based methods [17], sampling-based
+methods [13], [18], and optimization-based methods [2], [3].
+Among these, optimization-based methods have been widely
+adopted in recent years due to their efficiency and smoothness.
+They have successfully addressed the challenge of real-time
+planning in low-speed scenarios for both single- and multi-
+robot systems [19]. However, these methods still suffer from
+odometry drift and mapping uncertainty in high-speed sce-
+narios, which can lead to inevitable collisions. Furthermore,
+the multi-module pipeline introduces additional complexity
+and computational cost, making it difficult to deploy onboard
+small-scale aerial robots with limited computational resources.
+To reduce hardware overload and errors caused by tradi-
+tional pipelines, researchers have employed neural networks
+to replace one or several components within the pipeline
+using deep learning [4]–[6], [20]. The first category of poli-
+cies involves mimicking expert actions generated by manual
+guidance annotations [21]–[23], where professional algorithms
+have access to privileged observations [8], [14], [24]–[26].
+Hybrid policies [8], [26] demonstrate lower computational
+duration and higher success rates than traditional techniques.
+For instance, Agile [8] first eliminates mapping and planning
+modules by imitating actions provided by an expert with ac-
+cess to privileged information, thereby achieving autonomous
+flight at 10m/s in wild and human-made environments. Nev-
+ertheless, models trained through imitation learning often
+suffer from limited generalization due to their dependence on
+external guidance. Therefore, instead of providing predefined
+actions from finite datasets, unsupervised learning, including
+reinforcement learning (RL), has been leveraged to train
+quadrotors to learn autonomously. This approach addresses
+the generalization limitations of supervised learning while
+avoiding the extensive effort required for expert preparation.
+MA VRL [7] employs an LSTM and an autoencoder, enabling
+the agent to exhibit long-term planning ability and adapt its
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 3
+Fig. 1. This section provides an overview of the proposed method. The policy is trained using backpropagation-through-time (BPTT) within a differentiable
+simulation that is aligned with real-world control responses. The high-fidelity simulation incorporates a series of precise dynamic computations, enabling
+successful policy training through straightforward training and inference pipelines, as well as zero-shot deployment on real-world robots.
+velocity according to obstacle density. YOPOv2 [10] splits
+the field of view (FOV) into several patches, predicting the
+best trajectories within each patch along with their evaluated
+scores. Beyond the aforementioned works, several methods
+[9], [27], [28] directly map sensory inputs to control com-
+mands.
+However, these methods still face challenges with onboard
+computation due to the increasing complexity of neural net-
+works. The overall trend in collision-free algorithms is to in-
+troduce advanced learning techniques or backbones to improve
+performance, which inevitably increases the computational
+burden. Therefore, balancing performance and computation
+cost remains an open problem for collision-free flight. Fur-
+thermore, most vision-based agile flight methods adopt accel-
+eration [7], velocity [9], [12], or trajectory [2], [3], [8], [10],
+[28] as the command. Such approaches require an additional
+controller to track the command, which may fail to precisely
+follow the desired path during agile flight, as discussed in
+Section I.
+B. Reinforcement Learning via Differentiable Physics
+Reinforcement learning (RL) has shown great potential in
+solving aerial robot control tasks [29], [30], surpassing human
+performance in racing competitions. In typical RL frameworks,
+a critic estimates the long-term return, and an actor is trained
+to maximize the value output by the critic. Current RL
+methods can be categorized into model-free and model-based
+approaches. Model-free methods [31], [32] directly learn the
+policy from interactions with the environment, which usually
+requires large amounts of data and a time-consuming training
+process. Model-based methods not only learn the policy from
+interactions but also build a transition model to predict future
+states. This transition model can be used for resampling
+imagined trajectories to improve data efficiency [33], [34],
+serving as a fast-inferencing simulator to generate data for
+optimization [35], [36], or imagining future trajectories in a
+temporal latent space and then optimizing the policy through
+backpropagation [37]. However, the difficulty of learning an
+accurate transition model or relying on a standalone critic to
+evaluate long-term returns limits the performance of traditional
+RL. If the optimization objective cannot be precisely estimated
+by critic, it significantly degrades actor training as well.
+In robotics, the transition model is inherently fully differ-
+entiable according to Newtonian physics, which enables the
+computation of precise desired gradients rather than relying
+on approximations from a critic. By replacing the critic with
+an analytical optimization objective, the actor achieves faster
+and more optimal convergence through a rollout of trajec-
+tories using backpropagation-through-time. Researchers have
+proposed a series of variants [38]–[40] to improve stability and
+performance. Among them, the most recognized [39], SHAC,
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 4
+splits long rollouts into short segments to avoid vanishing
+or exploding gradients and adds a value at the end of each
+segment to compensate for long-term returns. However, such
+algorithms have been primarily studied in simulation bench-
+marks over the past decade. Recently, differentiable physics
+has been successfully applied to aerial robots. For instance, Li
+[41] released the first differentiable simulator for quadrotors
+and successfully deployed it on several quadrotor benchmark
+tasks [42]. Xing [43] leveraged the superior convergence
+ability of differentiable physics to optimize policies online
+in the real world, addressing the immeasurable sim-to-real
+gap. For vision-based tasks, Zhang [12] leverages thought of
+differentiable physics to train an obstacle-avoidance policy
+that enables a quadrotor to fly through dense forests at high
+speed without odometry. Although this work uses a point-mass
+model as the dynamics, it still demonstrates the potential of
+differentiable physics in vision-based agile flight.
+III. METHOD
+Previous works on collision avoidance have focused on
+simplifying or decoupling the overall problem—for exam-
+ple, by creating additional simplified environments special-
+ized for training [12] or by inferring trajectories for a
+controller to track. Such approaches sacrifice dynamics fi-
+delity for ease of training, thereby introducing an additional
+training-to-inferringgap beyond the sim-to-real gap. As a
+result, the learned policy must be validated in a high-fidelity
+simulator before real-world deployment, and it is nearly im-
+possible to achieve the same performance as observed in the
+training environment due to tracking quality.
+An overview of this research is shown in fig. 1. In this
+work, we first align the control response from the real world
+to the simulation dimension by dimension. We then formulate
+the training as a reinforcement learning problem, relying
+directly on high-fidelity differentiable simulation. This allows
+us to train the policy in the same environment, eliminating
+the need to create a separate training environment and thus
+removing the associated training-to-inferring gap. We address
+the sampling imbalance problem and local minima through
+distance-based optimization. All frameworks are implemented
+following the standard architectures in Stable-Baselines3 [44],
+making it easier for future research to build upon our work
+and to compare with other methods.
+A. RL preliminaries
+Reinforcement learning (RL) is a framework for sequential
+decision-making problems in which an agent learns to make
+decisions by interacting with an environment. It formulates the
+problem as a Markov Decision Process (MDP), defined by the
+tuple(s i, ai, ri, di, si+1), wheres i represents the state of the
+environment at time stepi,a i is the action taken by the agent,
+ri is the reward received after taking actiona i,d i is a binary
+indicator of whether the episode has terminated, ands i+1 is
+the next state. The most widely recognized architecture in
+RL is the actor–critic framework, which consists of two main
+components: the actorπ θ, responsible for selecting actions
+based on the current observation, and the criticQ ϕ, which
+evaluates the long-term return of the current state–action pair.
+In actor–critic methods, the actor is updated to maximize
+the value estimated by the critic. Depending on how the
+gradient of this objective is formed, gradient computation can
+be divided into policy-gradient and value-gradient methods.
+Assuming a stochastic policy and trajectories sampled from
+that policy,
+a∼π θ(·|s), τ∼π θ,(1)
+policy-gradient methods estimate∇ θJ(θ)from sampled tra-
+jectories using the likelihood-ratio (score-function) identity:
+∇θJ(θ) =Eτ∼πθ
+" TX
+t=0
+∇θ logπ θ(at|st), Aπθ (st, at)
+#
+,
+(2)
+whereτ= (s t, at, rt)t= 0 T denotes a rollout generated by
+πθ,Tis the rollout horizon (episode length), andA πθ (st, at)
+is the advantage function.
+In contrast, value-gradient methods update the actor by
+maximizing the critic’s output via the action-gradient of the
+critic and the chain rule. Specifically, the gradient can be
+expressed as
+∇θJ(θ) =Es∼ D! [∇θπθ(s),∇ aQϕ(s, a)],(3)
+whereDdenotes the empirical replay buffer used in off-policy
+training.
+Both policy-gradient and value-gradient methods rely on
+the quality of the criticQ ϕ to provide accurate estimates of
+the expected return; otherwise, the actor may be misled to
+update in suboptimal directions. However, in environments
+with complex action and reward spaces, learning an accurate
+critic is particularly challenging, leading to high variance in
+policy updates and suboptimal performance. To address this
+challenge, differentiable simulation offers a promising solution
+by providing analytical gradients through the environment dy-
+namics, thereby enabling faster and more stable convergence.
+B. Differentiable Physics and Backpropagation-Through-Time
+Unlike a learned critic that approximates long-term re-
+turns from sampled trajectories, differentiable physics pro-
+vides an analytical reward functionR(s t, at)together with
+a differentiable state-transition model. Consider trajectories
+τ= (s 0, a0, . . . , sT , aT , sT+1 )generated by rolling out a
+differentiable policyπ θ over a horizon of lengthT. The
+discounted cumulative reward to be optimized is
+J(θ) =E τ∼π θ
+" TX
+t=1
+γtR(st, at)
+#
+,(4)
+whereγ∈(0,1]is the discount factor. Under the standard
+pathwise (reparameterization) assumption for differentiable
+rollouts, the gradient can be written as
+∇θJ(θ) =E τ∼π θ
+" TX
+t=1
+γt dR(st, at)
+dθ
+#
+.(5)
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 5
+Fig. 2. Training and inference pipeline of a state-of-the-art learning-based algorithm for collision-free flight without mapping. Our algorithm achieves true
+end-to-end control by eliminating intermediate trajectory representations in the reference frame. Direct generation of CTBR commands yields the shortest and
+most efficient inference chain, thereby avoiding dynamics-infeasible issues while improving maneuverability and stability.
+The derivative dR(st,at)
+dθ can be decomposed into the sum of
+two terms:
+dR(st, at)
+dθ = ∂R(st, at)
+∂st
+∂st
+∂θ + ∂R(st, at)
+∂at
+∂at
+∂θ .(6)
+The partial derivatives∂R(s t, at)/∂st and∂R(s t, at)/∂at
+are easily derived, as they are defined in the reward intro-
+duction (section III-D). The action partial derivative∂a t/∂θ
+is directly related to the policy parameterθ. Considering that
+the current state evolves from the previous state and action,
+the state partial derivative∂s t/∂θinvolves the entire past
+trajectory and can be expressed recursively as:
+∂st
+∂θ =
+tX
+i=1
+
+
+
+
+tY
+j=i+1
+∂sj
+∂sj−1
+
+ ∂si
+∂ai−1
+∂ai−1
+∂θ
+
+ ,(7)
+where ∂sj
+∂sj−1
+and ∂si
+∂ai−1
+denote, respectively, the Jacobian of
+the dynamics and the Jacobian of the state transition with
+respect to the action, as will be introduced in section III-C.
+Substituting the decomposition into the gradient expression,
+the analytical gradient of the actor in eq. (5) can finally be
+written as:
+∇θJ(θ) =E τ∼π θ
+" TX
+t=1
+γt
+ 
+∂R(st, at)
+∂at
+∂at
+∂θ
++ ∂R(st, at)
+∂st
+tX
+i=1
+h tY
+j=i+1
+∂sj
+∂sj−1
+ ∂si
+∂ai−1
+∂ai−1
+∂θ
+i!#
+.
+(8)
+C. High-fidelity Dynamics of Quadrotors
+Previous work [12] leveraging differentiable physics only
+employs a simple point-mass kinematics model to replace
+the complex quadrotor dynamics, which significantly reduces
+training complexity. However, this simplification sacrifices
+policy fidelity, leading to atraining-to-inferring gapand
+limiting the quadrotor’s agilitydue to the use of high-
+level commands. A more detailed illustration of the difference
+between our high-fidelity dynamics and prior kinematics is
+shown in fig. 1.
+In this work, we incorporate high-fidelity quadrotor dynam-
+ics directly into the gradient graph to better leverage agility
+while mitigating the training-to-deployment gap. In a precise
+simulation, the states={p,q,v,Ω}of the quadrotor consists
+of position, orientation, linear velocity, and angular velocity.
+The CTBR actiona={Ω d, fd}comprises desired body rates
+and collective thrust. Assuming a dynamics functionF:
+˙s=F(s, a)(9)
+For actual code implementation, the quadrotor dynamics is
+usually formulated as atime-discrete system, thus transition-
+ing to the next state as:
+st+1 =F(s t, at)dt+s t (10)
+which makes it straightforward to obtain the partial derivatives
+∂st+1
+∂st
+and ∂st+1
+∂at
+for backpropagation-through-time (BPTT):
+∂st+1
+∂st
+= ∂F
+∂st
+dt+I
+∂st+1
+∂at
+= ∂F
+∂at
+dt
+(11)
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 6
+The functionFcan be defined using a widely adopted
+quadrotor autonomous ordinary differential equation:
+˙pW =v W
+˙vW = 1
+m RW B(f+d) +g
+˙q= 1
+2 q⊗Ω
+˙Ω=J −1 (η−Ω×JΩ)
+(12)
+whereRis the rotation matrix from the body frame to the
+world frame,ηis the torque applied to the quadrotor,dis the
+disturbance force in the world frame,mis the mass of the
+quadrotor,Jis the inertia matrix, andgis the gravity vector.
+The operator⊗denotes quaternion multiplication, andfis the
+motor thrust in the body frame. For quadrotors,fcan also be
+represented as[0,0, f] T , wherefis the collective thrust.
+Given the action, which includes desired body rates and
+collective thrust, we compute the desired torqueη d using a
+PD controller:
+η=K p(Ωd −Ω) +K d( ˙Ωd − ˙Ω)(13)
+whereK p andK d are the proportional and derivative gain
+matrices, respectively. The torque and collective thrust can
+be further mapped to individual motor thrusts using the
+quadrotor’s configuration matrix:
+
+
+f1
+f2
+f3
+f4
+
+ =
+
+
+1 1 1 1
+0l0−l
+−l0l0
+c−c c−c
+
+
+−1 
+
+f
+ηx
+ηy
+ηz
+
+ (14)
+wherelis the arm length from the motor to the center of
+mass, andcis the induced torque coefficient. The terms
+f1, f2, f3, f4 are the individual motor thrusts, andη x, ηy, ηz
+are the torque components along the body-fixedx,y, andz
+axes, respectively.
+We use a second-order model to simulate the motor thrust
+as a function of rotor speed:
+fi =k 2ω2
+i +k 1 ˙ωi +k 0 (15)
+wherek 2,k 1, andk 0 are thrust coefficients estimated on a
+static thrust stand, andω i is the rotor speed of motori. After
+obtaining the individual motor thrusts, the desired rotor speeds
+ωd
+i can be computed by inverting the second-order model:
+ωd
+i =
+r
+fi −k 1 ˙ωi −k 0
+k2
+(16)
+To account for motor lag, the actuator response is approxi-
+mated by a first-order inertial model:
+ωi =ω i + (ωd
+i −ω i)e −dt/τ (17)
+whereτis the motor time constant. Finally, the motor thrusts
+are recomputed using the actual rotor speeds via eq. (15), and
+the collective external force and torque applied to the quadro-
+tor are obtained inversely according to eqs. (14) and (15) for
+use in eq. (12) to compute the state derivatives.
+Additionally, we simulate communication delay by main-
+taining a buffer of previous motor commands and applying
+them after a fixed delay duration:
+at =a t−D (18)
+whereDis the number of time steps corresponding to the
+communication delay.
+Although incorporating the full quadrotor dynamics in-
+creases the complexity of the gradient graph, we find that
+it does not lead to gradient explosion or vanishing issues
+during BPTT within limited horizons. Despite the mathe-
+matical derivations being more complex, the implementation
+is straightforward and clear using automatic differentiation
+frameworks in PyTorch, as can be seen in our open-sourced
+code. Users need only override the reward function and the
+observation function when defining customized environment.
+D. Reward Function and Observation
+We design the reward function to encourage the quadrotor to
+fly safely while minimizing control effort and ensuring smooth
+flight. The reward function comprises five components:
+r=c vrv +c prp +c srs +c ara +c crc (19)
+where the components are defined as follows.
+A velocity tracking reward encourages the quadrotor to
+follow the desired velocityv d:
+rv = SmoothL1(∥v−v d∥,0)(20)
+whereSmoothL1is the Huber loss function, which tolerates
+limited velocity errors caused by maneuvering to avoid obsta-
+cles.
+A perception-aware reward is defined as the projection
+of the current velocity onto the camera viewing direction.
+Assuming the camera is rigidly mounted and aligned with the
+body frame’sx-axisx B, this reward aligns the quadrotor’s
+heading with its current velocity direction:
+rp = v·x B
+∥v∥∥xB∥ (21)
+A stability reward smooths the trajectory and penalizes
+aggressive maneuvers:
+rs =∥Ω∥+c s2∥ ˙v∥(22)
+A collision-avoidance penalty encourages the quadrotor to
+maintain a safe distance from obstacles:
+ra =−clip(d risk −d col −r uav,0) 2 ·detach(v appr)(23)
+whereclipbounds the value within a specified range,d risk
+is the distance threshold at which penalization begins,d col =
+p−p col is the distance to the nearest obstacle,r uav is the
+radius of the quadrotor, andv appr is the approaching velocity
+toward the obstacle. The functiondetachremoves the velocity
+from the gradient graph.
+A collision penalty strongly discourages actual collisions:
+rc =−32 ln
+
+e−7.5(dcol−ruav)
+
+(24)
+We have also tested an inverse power function as the collision
+penalty, and this type of reward also performs well.
+Note that only the positionpwithin the rollout is back-
+propagated through the differentiable simulator to compute
+gradients; all other states are treated as ordinary variables
+during backpropagation. In our experiments, we found that
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 7
+Fig. 3. Multimodal representation supervision. Geometrical representation of one scene supervises the trajectory inferred by graphical representation. The
+gradient chain of differentiable simulation backpropagates the regulatory effect of the collision-based analytical reward.
+for collision-free tasks, including velocity in the reward does
+not provide additional benefits.
+This approach of using a differentiable collision reward
+to train the policy can be viewed as a form of multi-modal
+supervision within a temporal sequence. As shown in fig. 3,
+a scene projects its depth features onto the camera image
+plane. The policy infers an action from the depth image,
+generating a temporal trajectory. This trajectory is supervised
+by another geometric representation of the same scene in the
+form of the collision reward. The safety regulation provided by
+this analytical reward is backpropagated through the rollout,
+enabling end-to-end policy training in a single step.
+The policy observes the current state, the desired velocity
+vd, and the depth image, then outputs CTBR commands. To
+reduce the observation space, we remap the desired velocity
+vd and the current velocityvinto the heading frame of the
+quadrotor:
+vH =R W Hv,v d
+H =R W Hvd (25)
+wherev H andv d
+H are the current and desired velocities in the
+heading frame, respectively, andR W His the transformation
+matrix from the world frame to the heading frame. The
+heading frame is obtained from the world frame by rotating
+only the yaw angle, soR W His defined as:
+RW H=
+
+
+cosψsinψ0
+−sinψcosψ0
+0 0 1
+
+ (26)
+The depth image is preprocessed by inverting the values and
+applying max-pooling to reduce it to a resolution of12×16,
+which reduces the observation dimension while focusing on
+the closest obstacles. The final observation consists of two
+parts: (1) a concatenation of the desired velocity in the heading
+framev d
+H, the current velocity in the heading framev H, the
+angular velocityΩ, and the orientationqas a quaternion; and
+(2) the preprocessed depth image.
+E. Gradient Field Reshaping
+When maximizing the reward, the nearest collision distance
+requires a gradient, consistent with previous optimization-
+based methods [19]. Consequently, this regulatory effect re-
+flected in the gradient field is equivalent to that of the
+Euclidean Signed Distance Field (ESDF), which represents the
+relative distance to the nearest obstacle at each point in space.
+However, such optimization methods naturally tend to get
+stuck in local minima during high-speed flight, leading to
+suboptimal policies. Specifically, as shown in fig. 4 (C.1),
+the ESDF gradient points in the direction opposite the nearest
+obstacle, biasing the trajectory to maintain a safe clearance.
+Yet, if the quadrotor’s velocity is directly opposite the ESDF
+gradient direction, the policy tends to brake rather than
+avoid, which is undesirable for collision-free flight. From the
+perspective of gradient fields, the tendency to brake rather
+than avoid is proportional to the incidence angle between
+the velocity vector and the gradient line. When the velocity
+vector is parallel to the gradient line, the policy is more likely
+to brake; when the velocity vector is perpendicular to the
+gradient line, the policy is more likely to avoid. This issue
+becomes more severe under two circumstances: (1) when the
+quadrotor is flying at high speed, it fails to sense probable
+collisions far enough in advance within the same limited
+duration, and (2) when the scene contains large obstacles rather
+than thin trees (as in fig. 4.C.2), the gradient field contains
+large contiguous regions with nearly uniform gradient lines,
+making it difficult for quadrotors to make avoidance decisions
+along the foreseeable trajectory, trapping them in this ”death
+zone”.
+To address this issue, we apply a transformation to the
+detected nearest obstacle point, shifting the optimization effect
+from braking to avoiding while preserving the desired velocity
+command. Specifically, as illustrated in fig. 4.A, the forward-
+pointing direction is shifted from forward to lateral by an angle
+that depends on the distance and the current incidence angle.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 8
+Fig. 4. A schematic diagram of ESDF map reshaping.(A): The shifting operation applied to the nearest obstacle point, which transforms the gradient direction
+from opposing the velocity to the lateral direction.(B): The shifting angle∆aas a function of distance to the nearest obstacledand incidence anglea.
+(C.1 and C.2): The ESDF gradient field for scenes containing one round obstacle and one rectangular obstacle, where the ”death zone” with nearly uniform
+gradient direction is highlighted in red.(C.3): An approximate visualization of the reshaped gradient field.(C.4)The gradient field after reshaping. Note that
+the gradient fields in(C)are not exact ESDFs; they are the same only without the shifting operation.
+This shifting operation transforms the gradient direction from
+opposing the velocity to the lateral direction, thereby training
+the policy to avoid rather than brake. The shifting angle∆a
+is defined as a function of the distance to the nearest obstacle
+dand the incidence anglea:
+˜d= clip(d, dmin, dmax), x=
+˜d−d min
+dmax −d min
+˜a= clip(a,0, amax)
+∆a= (a max −˜a)α
+
+1−exp(−3(1−x) 2)
+
+(27)
+whered min,d max, anda max represent the minimum-distance,
+maximum-distance, and maximum-angle thresholds for shift-
+ing, respectively, andαis the maximum shifting angle. fig. 4.B
+illustrates the additional shifting as a function of incidence
+angle and distance. The shifting angle increases as the obstacle
+approaches and the incidence angle rises, indicating higher
+risk and a stronger tendency to avoid. The incidence-angle
+thresholda max is set toπ/2, since shifting is unnecessary
+when the quadrotor is flying away from or past the obstacle.
+This transformation removes the ”death zone” from the gra-
+dient field: as shown in fig. 4.C.3, the gradient in front of
+the obstacle points laterally, thus optimizing the policy to fly
+around the obstacle.
+F . Training Settings
+1) Network Architecture:The actor and critic networks
+follow a feature-extractor–MLP design as in Stable-Baselines3
+[44]. The feature extractor consists of two branches: a three-
+layer CNN with channel sizes [32, 64, 128] for processing the
+depth image, and a two-layer MLP with hidden widths [512,
+512] for the concatenated state vector. The extracted features
+are concatenated and passed to separate two-layer MLP heads,
+each with [512, 512] units, for the actor and critic. The actor
+outputs four-dimensional CTBR commands in the final linear
+layer, while the critic outputs a scalar Q-value. All layers use
+LeakyReLU activations.
+To the best of our knowledge, this is the simplest archi-
+tecture that can achieve high-speed flight in dense obstacle
+environments. Its clear and simple structure benefits real-world
+deployment, as it avoids the temporal instability associated
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 9
+Fig. 5. Representative examples of the three groups of training scenes. The first group consists of boxes and pillars of varying shapes. The second group
+comprises short pillars. The third group contains tall pillars.
+with recurrent layers and respects the limited hardware re-
+sources on the quadrotor.
+2) Domain Randomization:To improve the robustness of
+the learned policy, we apply domain randomization during
+training. Because we have performed precise system identi-
+fication of the quadrotor, we only randomize the environment
+properties and difficultly-recognized parameters like aerody-
+namic coefficients. We define three groups of scenes, as shown
+in fig. 5, which include varying obstacle densities, shapes,
+and spatial distributions. Additionally, we randomize the initial
+state of the quadrotor and the desired velocity.
+In contrast to specialized training environment surrogates,
+high-fidelity simulation introduces a systematic sampling bias
+in reinforcement learning. Specifically, when the desired speed
+vd is sampled from a uniform distribution, slower trajectories
+persist longer in a finite rendered scene and thus contribute
+disproportionately more samples, skewing the dataset toward
+low-speed regimes. To mitigate this bias, we reshape the dis-
+tribution of desired velocities so that the effective distribution
+ofv d in the collected data matches a target density.
+Letp cmd(vd)denote the sampling density of the desired
+velocity andp data(vd)the effective density observed in the
+dataset. The desired velocity is randomized over[v min, vmax].
+If the collected data followed a uniform distribution over
+desired velocity, we would havep data(vd) = 1/(vmax −v min).
+Under the assumption that the number of samples collected
+from a trajectory is proportional to its duration, and that the
+durationtscales ast∝1/v d, the induced density satisfies
+pdata(vd)∝ 1
+vd pcmd(vd).(28)
+We therefore choose
+pcmd(vd)∝v d · 1
+vmax −v min
+.(29)
+After normalization, the sampling density of the desired ve-
+locity is given by
+pcmd(vd) = 2vd
+v2max −v 2
+min
+, v d ∈[v min, vmax].(30)
+In practical implementation, to sample the desired velocity, we
+drawu∼ U(0,1)and compute
+vd =
+q
+v2
+min +u(v 2max −v 2
+min),(31)
+which yields a uniform distribution ofv d in the collected data.
+Fig. 6. Normalized training curves of SHAC and PPO.
+IV. EXPERIMENTS
+We conduct extensive experiments to evaluate the perfor-
+mance of our proposed method against state-of-the-art al-
+gorithms in simulation. Based on the results, we provide a
+detailed comparison and analysis of the advantages of each
+method, along with the underlying reasons for their rela-
+tive performance. Subsequently, we implement the proposed
+method on a real-world robotic system and conduct experi-
+ments to verify its generalization capability in outdoor sce-
+narios. The experimental results demonstrate that our method
+achieves superior stability and agility compared to state-of-
+the-art approaches.
+A. Training Result
+We train the policy using SHAC [45]—a variant of
+backpropagation-through-time (BPTT)—and implement the
+algorithm ourselves. To verify the necessity of using SHAC,
+we compare its training results with those of the popular rein-
+forcement learning algorithm PPO [31]. The hyperparameters
+of both algorithms are carefully fine-tuned to achieve the best
+possible performance. The training results are shown in fig. 6.
+In contrast to [12], where PPO converged to a slightly lower
+performance than BPTT, PPO fails to train the policy in our
+environment due to the increased complexity of the transition
+function. This result demonstrates that analytical gradients
+benefit robot learning in domains with complex robot system.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 10
+B. Simulated Experiments
+1) Experimental Setup and Baselines:To compare all meth-
+ods under a common perceptual environment, we evaluate
+them in the same visually rendered scenes provided by VisFly
+[41]. The rendered geometry, obstacle layouts, and depth
+observations are therefore shared across methods. In prelim-
+inary experiments, we found that several baselines were not
+robust to changes in the simulation backend, controller stack,
+or dynamics environment, and their performance degraded
+substantially when deployed outside the setup used in their
+original implementations. To provide the fairest comparison,
+we therefore evaluate each baseline in its native simulation
+stack—the environment in which it was originally deployed
+and fine-tuned—while using VisFly solely to provide the same
+rendered scene and depth input across all methods.
+Our policy is evaluated directly within VisFly, which na-
+tively handles both the six-degree-of-freedom (6-DOF) rigid-
+body dynamics and the depth rendering pipeline in a unified
+simulator. For the baselines, VisFly serves only as the ren-
+dering engine, while each baseline’s native simulator remains
+responsible for dynamics propagation, state estimation, and
+low-level control. During evaluation, the baseline simulator
+continuously sends the quadrotor’s pose and odometry to
+VisFly via direct state assignment; VisFly then renders the
+corresponding depth image and returns it to the baseline
+algorithm.
+This setup allows every method to perceive the same scene
+while preserving the dynamics and controller stack under
+which each baseline achieves its best performance, as orig-
+inally reported in its respective paper.
+We compare our end-to-end policy against four representa-
+tive baselines: EGO-Planner [2], Agile [8], Newton [12], and
+YOPOv2 [10]. EGO-Planner is a modular sense–map–plan
+method. Agile is an imitation-learned policy distilled from
+expert behavior. Newton is a method leveraging a simpli-
+fied kinematics model. YOPOv2 is a one-stage perception-
+driven planner based on motion primitives that also leverages
+differentiable physics for trajectory optimization. Together,
+these baselines span modular planning, imitation learning, and
+differentiable-simulation-based control.
+2) Comparison in Large-scale Map:We evaluate all meth-
+ods in a large-scale forest environment with four obstacle
+densities (0.02, 0.04, 0.06, and 0.08 obstacles/m²) and four
+commanded velocities (3, 6, 9, and 12 m/s). For each density,
+we generate five scene instances and evaluate five different
+start positions, yielding 25 runs per configuration.
+Representative scenes are shown in Figure 7, and the quan-
+titative results are summarized in Table I. Figure 8 illustrates
+instances in which the baselines fail, providing insight into the
+underlying reasons for their performance degradation in such
+scenarios, as discussed in the following paragraph.
+EGO-Planner performs strongly at low speeds, achieving
+near-perfect success rates at 3m/s across all tested densities.
+Its performance, however, drops sharply as the commanded
+speed increases, particularly in dense scenes. This degradation
+is consistent with a fundamental limitation of its modular
+pipeline: obstacle avoidance depends on a finite planning
+and replanning cycle, and at high speeds the quadrotor can
+travel a substantial distance before a new plan is generated.
+Consequently, the controller is often forced to execute a plan
+that is already outdated relative to the current scene, reducing
+the available margin for safe avoidance. This effect becomes
+most severe at 9–12m/s in cluttered environments, where the
+success rate falls to as low as 0/25. These results indicate
+that, for EGO-Planner, the main bottleneck in aggressive flight
+is not the nominal command itself but rather the latency of
+the planning pipeline. Furthermore, in real-world deployments,
+EGO-Planner requires constructing precise maps during flight,
+which is highly sensitive to odometry drift due to system
+noise. Such drift can compound mapping errors and exacerbate
+latencies, further degrading overall system performance.
+Agile maintains moderate success at low speeds in sparse
+environments but degrades rapidly as both commanded speed
+and obstacle density increase. A likely reason is that its
+imitation-learned policy is closely tied to the state distribu-
+tion of the expert demonstrations; consequently, in aggressive
+flight, even small errors can push the quadrotor into states from
+which recovery is more difficult. In our rollouts, this limita-
+tion manifests as clear instability: the vehicle often exhibits
+winding flight patterns, and in dense scenes it makes frequent
+alternating left–right avoidance turns instead of committing to
+a stable maneuver. We also observe high temporal variance
+in the predicted trajectory, with the avoidance direction some-
+times changing abruptly between consecutive decisions. This
+directional inconsistency reduces effective forward velocity
+and leaves insufficient time for stable recovery near obstacles.
+Consistent with these observations, even when commanded to
+fly at 12m/s, Agile’s best average forward velocity remains
+below 7.7m/s, while its jerk reaches 239.12m/s³, the highest
+among all evaluated methods. Taken together, these results
+suggest that Agile’s primary limitation in this benchmark is
+the reduced robustness of its imitation-learned reactive policy
+under fast, cluttered flight.
+Among all baselines, YOPOv2 achieves the highest average
+forward velocity and maintains perfect or near-perfect success
+rates at low to moderate speeds. However, its performance
+degrades notably at 12m/s in denser environments, where
+success rates fall to 14/25 and 12/25 at obstacle densities of
+0.06 and 0.08, respectively. A likely reason is that YOPOv2
+predicts a reference trajectory rather than direct low-level
+commands, and the desired acceleration must still be exe-
+cuted by a downstream SO(3) tracking controller. In dense,
+high-speed scenes, the available free-space margin shrinks
+rapidly, so small changes in primitive scoring can lead to
+abrupt switches between neighboring avoidance directions. In
+our rollouts, YOPOv2 sometimes changes from one side to
+the other when the quadrotor is already close to obstacles,
+leaving insufficient time for the low-level tracking controller to
+follow the updated reference smoothly, or gives maneuvering
+trajectory at extreme state. Such urgent planning changes
+near obstacles raise dynamic-infeasibility issues, resulting in
+coupled instable movement such as winding flight patterns.
+These issues degrade flight safety and ultimately cause el-
+evated jerk and frequent failures in the hardest settings.
+Consequently, YOPOv2’s primary limitation is not low-speed
+planning quality but rather predicting difficult trajectory for
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 11
+Fig. 7. Large-scale forest environments at four obstacle densities: 0.02, 0.04, 0.06, and 0.08 obstacles/m 2. For each density, we generate five map instances
+and evaluate each instance from five different start positions as fig. 9.A, with the goal located on the opposite side of the forest.
+Fig. 8.(A)Trajectories of five test cases in one scene.(B)Trajectories of our policy.(C)Failure cases of baselines.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 12
+TABLE I
+KEYCHARACTERCOMPARISON OFBASELINES ACROSSALLVELOCITIES ANDDENSITIES.
+Method Dens. v = 3 m/s v = 6 m/s v = 9 m/s v = 12 m/s
+S/T Comp Vel Jerk S/T Comp Vel Jerk S/T Comp Vel Jerk S/T Comp Vel Jerk
+EGO-
+Planner
+0.02 25/25 1.0002.49 4.92 24/25 0.963 4.72 22.06 11/25 0.651 6.05 45.13 9/25 0.632 7.15 81.32
+0.04 24/25 0.963 2.48 9.23 18/25 0.863 4.64 26.08 8/25 0.601 5.79 50.78 4/25 0.570 7.07 79.58
+0.06 23/25 0.946 2.48 9.60 18/25 0.816 4.58 35.48 7/25 0.526 5.51 62.11 3/25 0.444 6.58 78.70
+0.08 25/25 1.0002.47 11.43 12/25 0.737 4.51 45.23 4/25 0.498 5.64 64.68 0/25 0.370 6.67 80.89
+Agile
+0.02 17/25 0.854 2.96 18.44 15/25 0.815 5.39 52.26 13/25 0.776 6.88 124.22 12/25 0.754 7.65 218.38
+0.04 9/25 0.654 2.88 25.21 9/25 0.717 5.16 60.99 9/25 0.695 6.40 128.31 5/25 0.603 6.78 239.12
+0.06 8/25 0.631 2.88 28.01 7/25 0.556 4.74 67.88 5/25 0.520 5.78 135.63 0/25 0.549 6.35 215.80
+0.08 5/25 0.558 2.89 29.48 3/25 0.542 4.93 72.55 4/25 0.527 5.96 144.25 2/25 0.454 5.46 197.79
+Newton
+0.02 25/25 1.0002.87 3.93 25/25 1.0005.30 12.66 25/25 1.0007.12 35.04 25/25 1.0007.56 97.82
+0.04 25/25 1.0002.86 6.24 25/25 1.0005.15 19.74 23/25 0.982 6.50 64.53 22/25 0.944 6.59 135.87
+0.06 25/25 1.0002.86 7.69 25/25 1.0005.07 23.09 22/25 0.980 6.30 74.12 23/25 0.9696.37 134.74
+0.08 25/25 1.0002.80 9.11 25/25 1.0004.86 29.69 23/25 0.9795.84 67.66 19/25 0.920 5.59 112.26
+YOPOv2
+0.02 25/25 1.0002.74 4.44 25/25 1.0005.26 11.43 23/25 0.927 7.27 36.06 23/25 0.9319.1464.57
+0.04 25/25 1.0002.70 4.38 25/25 1.0005.18 12.81 24/250.967 7.42 31.43 18/25 0.8358.7266.49
+0.06 25/25 1.0002.673.89 25/25 1.0005.11 14.24 23/250.9637.3730.02 14/25 0.714 7.87 74.96
+0.08 22/25 0.957 2.583.76 23/25 0.987 5.01 14.77 21/25 0.864 6.75 43.05 12/25 0.7508.4166.76
+Ours
+0.02 25/25 1.000 3.68 2.97 25/25 1.000 5.76 5.52 25/25 1.000 7.66 9.56 24/25 0.984 8.9715.72
+0.04 25/25 1.000 3.48 3.80 25/25 1.000 5.60 7.58 24/25 0.993 7.43 11.80 24/25 0.9738.7917.72
+0.06 25/25 1.000 3.454.04 25/25 1.000 5.40 9.29 23/25 0.9627.0814.80 22/25 0.9388.05 21.71
+0.08 25/25 1.000 3.434.56 25/25 1.000 5.14 10.87 25/25 1.000 6.84 15.80 23/25 0.9767.6123.19
+S/T: Success / Total Runs;Comp: Average Completion Rate;Vel: Average Velocity (m/s);Jerk: Average Jerk (m/s 3).
+All velocity metrics, including average velocity and maximum velocity, are measured as the effective forward velocity along the goal direction, so detours
+around obstacles reduce the reported speed instead of inflating it.
+backend controller to track at high speeds.
+Although the baselines described above differ in architec-
+ture, they share a common design pattern: each first generates
+an intermediate reference trajectory or command, which is
+then executed by a downstream low-level controller. This
+separation between high-level decision-making and low-level
+tracking performs well when flight speeds are moderate and
+sufficient correction margin is available. In dense, high-speed
+scenes, however, the control response becomes limited by
+the combined latency of perception, planning, and tracking.
+Consequently, the generated reference may already be outdated
+or difficult to track smoothly by the time it is executed.
+The resulting mismatch often leads to oscillatory corrections,
+elevated jerk, and eventual collisions. In contrast, Newton
+and our method adopt a differentiable end-to-end formulation
+that reduces the gap between decision and control, thereby
+improving consistency during aggressive flight.
+Among the baselines, Newton achieves the highest over-
+all success rate in the large-scale benchmark, with perfect
+performance in most sparse and moderate settings and 19
+out of 25 successes even in the hardest cases. This strong
+performance is primarily due to its planning-free design,
+which avoids the latency and error accumulation introduced
+by explicit trajectory generation and replanning. However, its
+remaining failures during aggressive flight in dense scenes
+appear to stem from two limitations. First, Newton’s policy
+predicts desired acceleration under a simplified point-mass
+kinematics model, and the predicted command is then executed
+by an outer-loop controller with yaw aligned to the target
+direction. While this abstraction simplifies training, it also
+weakens the perception–control coupling required for agile
+obstacle avoidance. In dense scenes, successful avoidance
+often demands coordinated changes in attitude and position,
+meanwhile heading to maintain both visibility and clearance.
+In our rollouts, Newton sometimes exhibits overly rapid pitch-
+up corrections for braking near obstacles, which abruptly twist
+the depth camera frame and destabilize the perception input.
+Once this instability persists for multiple steps, the resulting
+control response can become increasingly unreliable, eventu-
+ally causing the vehicle to lose attitude stability and collide.
+Second, Newton is trained under simplified point-mass kine-
+matics but evaluated with high-fidelity dynamics, introducing a
+training–inference gap. This gap becomes more severe as flight
+velocity increases, because the backend controller is then more
+challenged to execute the predicted acceleration commands
+accurately—similar to the execution difficulty observed in
+YOPOv2. In dense scenes, such mismatch is particularly
+harmful during rapid consecutive avoidance maneuvers. If
+the resulting unstable motion lasts for several consecutive
+steps, recurrent inference can become increasingly unreliable,
+further increasing the risk of failure. Newton thus remains
+highly robust overall, but its degradation in the hardest settings
+suggests that removing planning alone is insufficient without
+strong consistency between the learned commands and the
+execution during evaluation.
+Overall, our method achieves the best performance across
+the large-scale benchmark when success rate, completion, for-
+ward progress, and smoothness are considered jointly. Unlike
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 13
+Fig. 9.Top:Comparison of success rates under varying obstacle densities (0.02–0.08 obs/m 2) and commanded speeds (3–12 m/s). Our method maintains
+near-perfect reliability even in the most aggressive and dense environments.Bottom:Probability density distribution of average jerk across speeds. Our
+end-to-end policy executes the smoothest maneuvers with consistently lower overall jerk compared to all baselines.
+prior methods that first generate an intermediate reference and
+then rely on a downstream tracker, our policy directly maps
+perception to low-level CTBR commands. This design pro-
+duces smooth actions, enabling natural auto-acceleration and
+auto-deceleration during flight while avoiding the abrupt cor-
+rective behavior often observed in dense, high-speed scenes.
+Furthermore, the CTBR control interface provides a more
+direct perception-aware coupling between observation and
+agile maneuvering, allowing the quadrotor to fly agilely while
+maintaining stable and clear visual feedback. These advantages
+are reflected in the results: our method maintains consis-
+tently high success and completion rates across all settings
+while achieving the lowest overall jerk, which remains within
+2.97–23.19m/s³ even in the most aggressive regimes.
+3) Comparison in Super-dense Map:To further evaluate
+robustness under denser clutter, we increase the obstacle
+density to 0.16 and 0.25 obstacles/m², where the free space
+between obstacles becomes extremely limited. Because these
+scenarios are substantially more constrained, we evaluate the
+policies at commanded velocities of 2, 4, 6, and 8m/s. The
+results are reported in Table II. The central question in this
+benchmark is whether a method can retain both reliability
+and non-trivial forward progress once the free-space margin
+becomes very small.
+The super-dense benchmark reveals a substantially larger
+performance gap between methods. Agile fails in all
+tested configurations, indicating the limited robustness of its
+expert-distilled trajectory policy in extremely cluttered spaces.
+EGO-Planner also degrades rapidly as density increases; at
+a density of 0.25, it records zero successful runs once the
+commanded velocity reaches 6m/s. YOPOv2 retains partial
+completion in several cases, but its success rate becomes
+highly unstable and its jerk rises sharply, reaching 83.6m/s³
+at a density of 0.25 and a velocity of 8m/s.
+Newton remains highly robust in these super-dense scenes,
+achieving 5/5 successes in every evaluated configuration,
+Fig. 10. Panoramic views of the super-dense environments at two obstacle
+densities: 0.16 and 0.25 obstacles/m 2.
+which confirms the strength of differentiable-simulation train-
+ing in this regime. However, this robustness comes at the
+cost of reduced forward velocity. Because the free space is
+extremely limited in these super-dense environments, Newton
+often performs repeated braking for avoidance maneuvers in
+front of closely spaced obstacles, which severely limits its
+continuous forward progress. For example, at a density of 0.25
+and a commanded velocity of 8m/s, its average forward speed
+is only 3.15m/s, indicating increasingly conservative motion
+as the free-space margin narrows.
+Our method also achieves 5/5 successes across all
+super-dense settings while sustaining consistently higher for-
+ward velocity and lower jerk than Newton. At a density of
+0.25 and 8m/s, our policy attains an average forward speed
+of 4.39m/s compared to Newton’s 3.15m/s, while reducing
+jerk from 35.93 to 21.90m/s³. Similar gains appear in all
+other super-dense configurations. These results indicate that,
+in this benchmark, our method retains a larger margin between
+robustness and useful forward progress than Newton.
+C. Real World Experiments
+1) Hardware and Configuration:As illustrated in fig. 1, we
+employ a custom-built quadrotor platform for real-world ex-
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 14
+TABLE II
+KEYCHARACTERCOMPARISON OFBASELINES INSUPERDENSESCENES(DENSITY0.16AND0.25)
+Velocity EGO-Planner Agile Newton YOPOv2 Ours
+S/T Comp Vel Jerk S/T Comp Vel Jerk S/T Comp Vel Jerk S/T Comp Vel Jerk S/T Comp Vel Jerk
+Density: 0.16 obstacles/m 2
+2 m/s 5/5 1.0001.66 10.99 0/5 0.350 1.97 24.78 5/5 1.0002.00 7.68 3/5 0.827 1.794.03 5/5 1.000 2.395.16
+4 m/s 4/5 0.917 3.29 58.08 0/5 0.221 3.36 55.49 5/5 1.0003.46 14.07 2/5 0.756 3.31 11.45 5/5 1.000 3.54 9.69
+6 m/s 1/5 0.774 4.60 45.10 0/5 0.4384.8090.23 5/5 1.0004.15 28.90 2/5 0.609 4.48 31.54 5/5 1.0004.6415.16
+8 m/s 1/5 0.452 5.30 57.37 0/5 0.249 4.35 147.81 4/5 0.877 4.31 61.58 2/5 0.5435.8946.61 5/5 1.0005.2620.06
+Density: 0.25 obstacles/m 2
+2 m/s 5/5 1.0001.65 16.05 0/5 0.259 1.89 36.08 5/5 1.0001.75 8.66 2/5 0.728 1.753.57 5/5 1.000 2.246.25
+4 m/s 2/5 0.664 3.14 103.57 0/5 0.2193.2661.21 5/5 1.0002.68 19.51 1/5 0.485 3.03 12.70 5/5 1.0003.1110.31
+6 m/s 0/5 0.305 3.66 91.34 0/5 0.231 3.95 100.71 5/5 1.0003.23 30.70 0/5 0.4874.6321.45 5/5 1.0003.8716.92
+8 m/s 0/5 0.267 4.60 134.36 0/5 0.164 3.55 139.21 5/5 1.0003.15 35.93 0/5 0.5566.0368.55 5/5 1.0004.3921.90
+S/T: Success / Total Runs;Comp: Average Completion Rate;Vel: Average Velocity (m/s);Jerk: Average Jerk (m/s 3).
+All velocity metrics, including average velocity and maximum velocity, are measured as the effective forward velocity along the goal
+direction, so detours around obstacles reduce the reported speed instead of inflating it.
+periments. The platform is equipped with a high-performance
+onboard computer (Nvidia Jetson Orin NX), a stereo camera
+(Intel RealSense D435i), and a Betaflight flight controller.
+The drone is designed to be lightweight and agile, enabling
+high-speed navigation through complex environments. We
+further refine the component layout to align the center of
+gravity with the geometric center, thereby improving control
+performance. For safety considerations, the maximum thrust
+is limited to twice the drone’s weight. During flight, all
+computational tasks—including state estimation, control, and
+policy inference—are executed onboard to guarantee real-time
+responsiveness, without relying on any external computation
+or communication. The quadrotor obtains its state information
+from a visual-inertial odometry (VIO) module following [46].
+2) Outdoor Experiments:We conduct extensive outdoor
+experiments to evaluate the performance of our proposed
+policy in real-world scenarios. The experiments are designed
+to assess the drone’s ability to navigate diverse environments,
+including urban settings, natural landscapes, and complex
+obstacle courses.
+We first evaluate the policy in a regular forest with an
+obstacle density of0.1m −2, where the drone must navigate
+through trees. Given a target located90m ahead of the
+starting point and a maximum commanded velocity of10m/s,
+the quadrotor is required to traverse the forest safely under
+the trained policy. The reconstructed flight trajectory and the
+corresponding scene are presented in fig. 11.A. As shown in
+fig. 11.B and C, the drone successfully maneuvers through
+the trees at high speeds, demonstrating its ability to handle
+complex environments. The maximum speed attained in this
+test is approximately7.5m/s—comparable to state-of-the-art
+methods, despite the simplicity of our architecture. Unlike
+approaches that rely on precomputed trajectories and force a
+low-level controller to track them, our policy exhibits strong
+velocity adaptation in response to local obstacle density. This
+enables the drone to maintain safety while navigating at high
+speeds.
+To further assess the advantage of our end-to-end archi-
+tecture, we evaluate the policy in a super-dense forest with an
+approximate obstacle density of1m −2, as depicted in fig. 12.A
+and D. To the best of our knowledge, no existing work has
+been tested in such a challenging scenario. In relatively open
+areas, the quadrotor reaches a peak speed of approximately
+5m/s, whereas in the densest regions it autonomously reduces
+its average speed to around3m/s. Moreover, the policy
+exhibits a strong ability to maintain perception awareness
+while weaving through dense trees—a critical capability for
+collision-free navigation in such environments. As shown in
+fig. 12.E, the field of view (FOV) consistently remains oriented
+forward. In contrast, the real-world deployment of Newton
+exhibits severe vertical oscillations, which cause its FOV to
+periodically point toward the ground, lose sight of the target,
+and ultimately result in a crash.
+Moreover, to validate the generalization of the proposed
+policy, we conduct multiple experiments in diverse envi-
+ronments, including both wild and urban scenes, as shown
+in fig. 13. The results demonstrate that the policy adapts
+well to different scenarios and maintains robust performance,
+highlighting its potential for real-world deployment across a
+variety of settings.
+Unlike previous methods that rely on trajectory tracking
+under a point-mass model, our low-level control architecture
+enables full authority over the drone’s dynamics. This allows
+the drone to avoid collisions with only minimal adjustments,
+rather than requiring large, aggressive maneuvers—resulting
+in a safer and more efficient behavior. Such elegant, mini-
+mal intervention also benefits perception-aware requirements.
+Consequently, as illustrated in fig. 13, fig. 12.A, and fig. 11.A,
+the resulting flight trajectories are smooth and nearly straight.
+Although the drone may appear unresponsive to the environ-
+ment, it in fact performs only the subtle adjustments necessary
+to avoid obstacles.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 15
+Fig. 11. Real-world experiment in a regular forest environment with an obstacle density of 0.1 m −2.(A)Reconstructed scene and flight trajectory.(B)
+Velocity profile during flight.(C)Jerk profile during flight.(D)Real-world scene and flight trajectory.(E)First-person view of the drone at the time steps
+indicated in (A).
+V. DISCUSSION
+Our work achieves state-of-the-art overall performance in
+balancing safety, stability, and agility, despite using the sim-
+plest training and inference pipeline. It inherits the advantages
+of Newton while addressing its key drawbacks: loss of percep-
+tion due to urgent braking, instability caused by dynamics-
+infeasible commands, and the training-to-inference gap. By
+issuing low-level commands, our method fully leverages the
+drone’s control capacity, transforming aggressive maneuvering
+into subtle adjustments during collision avoidance. However,
+it shares a common limitation with mapping-free collision-
+avoidance baselines: a lack of planning ability in complex
+environments such as mazes. Consequently, such policies
+are best suited as basic safety controllers, complemented by
+an external front-end planner that provides high-level direc-
+tional commands. This work is released at https://github.com/
+Fanxing-LI/avoidance.
+VI. CONCLUSION
+In this paper, we train an end-to-end policy for collision-
+free flight using reinforcement learning via differentiable
+simulation. The policy directly maps depth images to low-
+level control commands, enabling full quadrotor control and
+avoiding dynamics-infeasible issues. Reinforcement learning
+with differentiable simulation provides highly precise analyti-
+cal gradients for optimizing the actor, thereby overcoming the
+difficulty of training end-to-end policies.
+We conduct extensive experiments to evaluate our method
+both in simulation and the real world. In simulation, our policy
+outperforms other methods in terms of safety, stability, and
+average velocity across various obstacle densities and scenes.
+In real-world experiments, despite the simplicity of its training
+and inference pipeline, our method achieves state-of-the-art
+performance, reaching a maximum velocity of 7.5 m/s in
+a regular forest. Furthermore, it stably attains a velocity of
+5.0 m/s in a super-dense forest while maintaining perception
+awareness.
+Our policy performs well without relying on any external
+modules—such as front-end or back-end controllers, map-
+ping, recurrent architectures, complex backbones, or action
+primitives—nor on training tricks like curriculum learning or
+privileged guidance. The simplicity of our pipeline, combined
+with the power of differentiable simulation, demonstrates that
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 16
+Fig. 12. Real-world experiment in a super-dense forest with an obstacle density of approximately1m −2.(A)Reconstructed three-dimensional scene and the
+actual flight trajectory.(B)Velocity profile recorded during the flight.(C)Jerk profile recorded during the flight.(D)Photograph of the real-world environment
+alongside the corresponding flight trajectory.(E)First-person view (FPV) captured at the time steps indicated in(A).
+Fig. 13. Multiple experiments for testing policy generalization in various environments including wild and urban scenes.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 17
+effective collision-free flight does not require increasingly
+complex modules or heuristics. Instead, directly optimizing
+a low-level control policy with analytical gradients offers a
+clean, efficient, and generalizable solution for agile aerial
+navigation.
+REFERENCES
+[1] D. Hanover, A. Loquercio, L. Bauersfeld, A. Romero, R. Penicka,
+Y . Song, G. Cioffi, E. Kaufmann, and D. Scaramuzza, “Autonomous
+Drone Racing: A Survey,” IEEE Transactions on Robotics, vol. 40, pp.
+3044–3067, 2024, conference Name: IEEE Transactions on Robotics.
+[Online]. Available: https://ieeexplore.ieee.org/document/10530312
+[2] X. Zhou, Z. Wang, H. Ye, C. Xu, and F. Gao, “EGO-planner: An
+ESDF-free gradient-based local planner for quadrotors,” vol. 6, no. 2,
+pp. 478–485. [Online]. Available: https://ieeexplore.ieee.org/abstract/
+document/9309347
+[3] B. Zhou, F. Gao, L. Wang, C. Liu, and S. Shen, “Robust and efficient
+quadrotor trajectory generation for fast autonomous flight,” vol. 4, no. 4,
+pp. 3529–3536.
+[4] S. Jung, S. Hwang, H. Shin, and D. H. Shim, “Perception, guidance, and
+navigation for indoor autonomous drone racing using deep learning,”
+IEEE Robotics and Automation Letters, vol. 3, no. 3, pp. 2539–2544,
+2018.
+[5] E. Kaufmann, M. Gehrig, P. Foehn, R. Ranftl, A. Dosovitskiy, V . Koltun,
+and D. Scaramuzza, “Beauty and the beast: Optimal methods meet
+learning for drone racing.” IEEE, 2019, pp. 690–696.
+[6] A. A. Cabrera-Ponce, L. O. Rojas-Perez, J. A. Carrasco-Ochoa, J. F.
+Martinez-Trinidad, and J. Martinez-Carranza, “Gate detection for micro
+aerial vehicles using a single shot detector,” IEEE Latin America
+Transactions, vol. 17, no. 12, pp. 2045–2052, 2019.
+[7] H. Yu, C. De Wagter, and G. C. de Croon, “MA VRL: Learn to fly in
+cluttered environments with varying speed.”
+[8] A. Loquercio, E. Kaufmann, R. Ranftl, M. M ¨uller, V . Koltun, and
+D. Scaramuzza, “Learning high-speed flight in the wild,” Science
+Robotics, vol. 6, no. 59, p. eabg5810, 2021.
+[9] A. Bhattacharya, N. Rao, D. Parikh, P. Kunapuli, Y . Wu, Y . Tao,
+N. Matni, and V . Kumar, “Vision transformers for end-to-end vision-
+based quadrotor obstacle avoidance,” in 2025 IEEE International
+Conference on Robotics and Automation (ICRA), pp. 1–8. [Online].
+Available: https://ieeexplore.ieee.org/abstract/document/11128042
+[10] J. Lu, Y . Hui, X. Zhang, W. Feng, H. Shen, Z. Li, and
+B. Tian, “YOPOv2-tracker: An end-to-end agile tracking and
+navigation framework from perception to action.” [Online]. Available:
+http://arxiv.org/abs/2505.06923
+[11] Z. Han, M. Tian, Z. Gongye, D. Xue, J. Xing, Q. Wang, Y . Gao,
+J. Wang, C. Xu, and F. Gao, “Hierarchically depicting vehicle
+trajectory with stability in complex environments,” publisher: American
+Association for the Advancement of Science. [Online]. Available:
+https://www.science.org/doi/10.1126/scirobotics.ads4551
+[12] Y . Zhang, Y . Hu, Y . Song, D. Zou, and W. Lin, “Back to newton’s
+laws: Learning vision-based agile flight via differentiable physics.”
+[Online]. Available: http://arxiv.org/abs/2407.10648
+[13] C. Richter, A. Bry, and N. Roy, “Polynomial trajectory planning for
+aggressive quadrotor flight in dense indoor environments.” Springer,
+pp. 649–666.
+[14] Y . Song, K. Shi, R. Penicka, and D. Scaramuzza, “Learning perception-
+aware agile flight in cluttered environments,” pp. 1989–1995.
+[15] F. Li, F. Sun, T. Zhang, and D. Zou, “ABPT: Amended Backpropagation
+through Time with Partially Differentiable Rewards,” May 2025,
+arXiv:2501.14513 [cs]. [Online]. Available: http://arxiv.org/abs/2501.
+14513
+[16] J. Heeg, Y . Song, and D. Scaramuzza, “Learning Quadrotor Control
+From Visual Features Using Differentiable Simulation,” Oct. 2024,
+arXiv:2410.15979. [Online]. Available: http://arxiv.org/abs/2410.15979
+[17] S. Liu, K. Mohta, N. Atanasov, and V . Kumar, “Search-based motion
+planning for aggressive flight in SE(3),” vol. 3, no. 3, pp. 2439–2446.
+[18] R. Allen and M. Pavone, “A real-time framework for kinodynamic
+planning with application to quadrotor obstacle avoidance,” p. 1374.
+[19] X. Zhou, J. Zhu, H. Zhou, C. Xu, and F. Gao, “EGO-swarm: A fully
+autonomous and decentralized quadrotor swarm system in cluttered
+environments,” in 2021 IEEE International Conference on Robotics
+and Automation (ICRA), pp. 4101–4107, ISSN: 2577-087X. [Online].
+Available: https://ieeexplore.ieee.org/abstract/document/9561902
+[20] A. Kouris and C.-S. Bouganis, “Learning to fly by myself: A self-
+supervised cnn-based approach for autonomous navigation.” IEEE,
+2018, pp. 1–9.
+[21] D. Gandhi, L. Pinto, and A. Gupta, “Learning to fly by crashing.” IEEE,
+2017, pp. 3948–3955.
+[22] A. Giusti, J. Guzzi, D. C. Cires ¸an, F.-L. He, J. P. Rodr´ıguez, F. Fontana,
+M. Faessler, C. Forster, J. Schmidhuber, and G. Di Caro, “A machine
+learning approach to visual perception of forest trails for mobile robots,”
+IEEE Robotics and Automation Letters, vol. 1, no. 2, pp. 661–667, 2015.
+[23] A. Loquercio, A. I. Maqueda, C. R. Del-Blanco, and D. Scaramuzza,
+“Dronet: Learning to fly by driving,” IEEE Robotics and Automation
+Letters, vol. 3, no. 2, pp. 1088–1095, 2018.
+[24] A. Loquercio, E. Kaufmann, R. Ranftl, A. Dosovitskiy, V . Koltun, and
+D. Scaramuzza, “Deep drone racing: From simulation to reality with
+domain randomization,” IEEE Transactions on Robotics, vol. 36, no. 1,
+pp. 1–14, 2019.
+[25] E. Kaufmann, A. Loquercio, R. Ranftl, A. Dosovitskiy, V . Koltun, and
+D. Scaramuzza, “Deep drone racing: Learning agile flight in dynamic
+environments.” PMLR, 2018, pp. 133–145.
+[26] R. Penicka, Y . Song, E. Kaufmann, and D. Scaramuzza, “Learning
+Minimum-Time Flight in Cluttered Environments,” IEEE Robotics and
+Automation Letters, vol. 7, no. 3, pp. 7209–7216, 2022.
+[27] M. Kulkarni and K. Alexis, “Reinforcement learning for collision-
+free flight exploiting deep collision encoding,” in 2024 IEEE
+International Conference on Robotics and Automation (ICRA), pp.
+15 781–15 788. [Online]. Available: https://ieeexplore.ieee.org/abstract/
+document/10610287
+[28] M. Kim, G. Bae, J. Lee, W. Shin, C. Kim, M.-Y . Choi, H. Shin, and
+H. Oh, “RAPID: Robust and agile planner using inverse reinforcement
+learning for vision-based drone navigation.” [Online]. Available:
+http://arxiv.org/abs/2502.02054
+[29] E. Kaufmann, L. Bauersfeld, A. Loquercio, M. M ¨uller, V . Koltun, and
+D. Scaramuzza, “Champion-level drone racing using deep reinforcement
+learning,” vol. 620, no. 7976, pp. 982–987.
+[30] Y . Song, A. Romero, M. M ¨uller, V . Koltun, and D. Scaramuzza, “Reach-
+ing the limit in autonomous racing: Optimal control versus reinforcement
+learning,” Science Robotics, vol. 8, no. 82, p. eadg1462, 2023.
+[31] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, “Prox-
+imal policy optimization algorithms,” arXiv preprint arXiv:1707.06347,
+2017.
+[32] T. Haarnoja, A. Zhou, K. Hartikainen, G. Tucker, S. Ha, J. Tan, V . Ku-
+mar, H. Zhu, A. Gupta, P. Abbeel et al., “Soft actor-critic algorithms
+and applications,” arXiv preprint arXiv:1812.05905, 2018.
+[33] R. S. Sutton, “Integrated architectures for learning, planning, and
+reacting based on approximating dynamic programming,” in Machine
+learning proceedings 1990. Elsevier, 1990, pp. 216–224.
+[34] M. Janner, J. Fu, M. Zhang, and S. Levine, “When to trust your model:
+Model-based policy optimization,” Advances in neural information
+processing systems, vol. 32, 2019.
+[35] K. Chua, R. Calandra, R. McAllister, and S. Levine, “Deep reinforce-
+ment learning in a handful of trials using probabilistic dynamics models,”
+Advances in neural information processing systems, vol. 31, 2018.
+[36] A. Nagabandi, G. Kahn, R. S. Fearing, and S. Levine, “Neural network
+dynamics for model-based deep reinforcement learning with model-free
+fine-tuning,” in 2018 IEEE international conference on robotics and
+automation (ICRA). IEEE, 2018, pp. 7559–7566.
+[37] D. Hafner, T. Lillicrap, J. Ba, and M. Norouzi, “Dream to control: Learn-
+ing behaviors by latent imagination,” arXiv preprint arXiv:1912.01603,
+2019.
+[38] S. Zhang, W. Jin, and Z. Wang, “Adaptive Barrier Smoothing
+for First-Order Policy Gradient with Contact Dynamics,” in
+Proceedings of the 40th International Conference on Machine Learning.
+PMLR, Jul. 2023, pp. 41 219–41 243, iSSN: 2640-3498. [Online].
+Available: https://proceedings.mlr.press/v202/zhang23s.html
+[39] H. J. Suh, M. Simchowitz, K. Zhang, and R. Tedrake,
+“Do Differentiable Simulators Give Better Policy Gradients?” in
+Proceedings of the 39th International Conference on Machine Learning.
+PMLR, Jun. 2022, pp. 20 668–20 696, iSSN: 2640-3498. [Online].
+Available: https://proceedings.mlr.press/v162/suh22b.html
+[40] M. A. Z. Mora, M. Peychev, S. Ha, M. Vechev, and S. Coros,
+“PODS: Policy Optimization via Differentiable Simulation,” in
+Proceedings of the 38th International Conference on Machine Learning.
+PMLR, Jul. 2021, pp. 7805–7817, iSSN: 2640-3498. [Online].
+Available: https://proceedings.mlr.press/v139/mora21a.html
+[41] F. Li, F. Sun, T. Zhang, and D. Zou, “VisFly: An Efficient and
+Versatile Simulator for Training Vision-based Flight,” Sep. 2024,
+arXiv:2407.14783. [Online]. Available: http://arxiv.org/abs/2407.14783
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021 18
+[42] ——, “Abpt: Amended backpropagation through time with partially
+differentiable rewards,” arXiv preprint arXiv:2501.14513, 2025.
+[43] J. Pan, J. Xing, R. Reiter, Y . Zhai, E. Aljalbout, and D. Scaramuzza,
+“Learning on the fly: Rapid policy adaptation via differentiable simula-
+tion,” IEEE Robotics and Automation Letters, 2026.
+[44] A. Raffin, A. Hill, A. Gleave, A. Kanervisto, M. Ernestus, and N. Dor-
+mann, “Stable-baselines3: Reliable reinforcement learning implementa-
+tions,” Journal of machine learning research, vol. 22, no. 268, pp. 1–8,
+2021.
+[45] J. Xu, V . Makoviychuk, Y . Narang, F. Ramos, W. Matusik,
+A. Garg, and M. Macklin, “Accelerated Policy Learning with Parallel
+Differentiable Simulation,” Apr. 2022, arXiv:2204.07137. [Online].
+Available: http://arxiv.org/abs/2204.07137
+[46] T. Qin, P. Li, and S. Shen, “Vins-mono: A robust and versatile monocular
+visual-inertial state estimator,” IEEE transactions on robotics, vol. 34,
+no. 4, pp. 1004–1020, 2018.

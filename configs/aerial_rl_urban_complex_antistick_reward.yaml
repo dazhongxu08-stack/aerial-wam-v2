@@ -1,0 +1,24 @@
+# Anti-stick reward overlay (主航道 · 关罩自学贴墙解法).
+#
+# Prior directional OA FT (--no-shield) already ran; clearance-centering /
+# press-wall terms existed in reward.py but were NEVER wired through
+# train_rl.build_from_config (always defaulted to 0). This overlay turns them on.
+#
+#   python -m experiments.aerial.rl.train_v4_ac \
+#     --config configs/aerial_rl_urban_complex_p2c.yaml \
+#     --config-overlay configs/aerial_rl_urban_complex_directional_oa.yaml \
+#     --config-overlay configs/aerial_rl_urban_complex_antistick_reward.yaml \
+#     --no-planner --no-shield ...
+#
+# Weights match experiments/aerial/rl/tests/test_directional_oa.py
+# test_clearance_centering_prefers_open_side_peel_over_press.
+
+reward:
+  # Tax +dx into near wall while progress stalled (imag has d_fwd_hat → works offline).
+  w_press_wall: 2.5
+  # Bonus yaw/strafe toward open side when L/R cones known (real path; imag if cones).
+  w_clearance_center: 1.5
+  center_fwd_thresh_m: 8.0
+  center_progress_eps: 0.15
+  center_min_lat_adv_m: 2.0
+  center_yaw_scale: 1.0

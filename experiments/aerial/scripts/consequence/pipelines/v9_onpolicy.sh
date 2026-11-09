@@ -1,0 +1,104 @@
+#!/bin/bash
+# On-policy failure + near-wall branching with the frozen v8 rule -> v9 ensemble -> gate -> train routes + east (dev) -> fresh if promoted.
+# Pre-declared promotion: (arrived - collisions) over train(2 seeds x 16) + east(3 seeds) must exceed v8's (train 12-12, east 31-6 = 25).
+cd /home/yao/aerial-wam-v2; export PYTHONPATH=$PWD; PY=$HOME/sim_verify/.venv/bin/python
+ART=experiments/aerial/rl/artifacts; DATA=$ART/consequence_data_20261004
+BRANCH=$ART/consequence_branch_train_20261004; ONP1=$ART/consequence_onpolicy_20261006
+LOW=$ART/consequence_lowclear_20261006; FAIL=$ART/consequence_fail_20261007; FAIL2=$ART/consequence_fail2_20261008
+V8=$ART/consequence_v8_20261007; V9=$ART/consequence_v9_20261008
+VAL=od_train_03,od_train_17,od_train_25,od_train_33,od_train_07,od_train_21
+CK8=$V8/m_full_s0/consequence_best.pt,$V8/m_full_s1/consequence_best.pt,$V8/m_full_s2/consequence_best.pt
+CK9=$V9/m_full_s0/consequence_best.pt,$V9/m_full_s1/consequence_best.pt,$V9/m_full_s2/consequence_best.pt
+TRAIN_ANN=experiments/aerial/phase3_unified/annotations/outdoor_complex_od_train.json
+TR=od_train_00,od_train_02,od_train_05,od_train_07,od_train_09,od_train_13,od_train_16,od_train_18,od_train_20,od_train_24,od_train_27,od_train_30,od_train_32,od_train_37,od_train_21,od_train_29
+FRESH_ANN=$ART/interior_od_fresh_20261007/fresh_holdout.json
+RULE="--policy model --alt-fix --alt-band --alt-band-return 0.0 --replan-every 1 --surv-min 0.95"
+TARGET=250
+mkdir -p $V9 $ART/logs; exec >>$V9/run.log 2>&1
+echo "V9 START $(date -Is)"
+rm -f /tmp/airsim_watchdog.stop
+pgrep -f "^bash /tmp/airsim_watchdog.sh" >/dev/null || (setsid nohup bash /tmp/airsim_watchdog.sh >/dev/null 2>&1 </dev/null &)
+n_states() { $PY -c "import json;print(len(json.load(open('$FAIL2/AUTO_REVIEW.json'))['probes']))" 2>/dev/null || echo 0; }
+n_eps() { $PY -c "import json;print(len(json.load(open('$1/MPC_EVAL.json'))['episodes']))" 2>/dev/null || echo 0; }
+wait_airsim() {
+  for i in $(seq 1 40); do
+    timeout 25 $PY -c "import airsim; c=airsim.MultirotorClient(); c.confirmConnection(); assert c.ping()" >/dev/null 2>&1 && return 0
+    sleep 30
+  done; echo "AirSim not healthy $(date -Is)"; return 1; }
+
+tries=0
+while [ "$(n_states)" -lt $TARGET ] && [ $tries -lt 15 ]; do
+  wait_airsim || { sleep 300; tries=$((tries + 1)); continue; }
+  timeout 36000 $PY -u -m experiments.aerial.rl.collect_onpolicy_branches --ckpts $CK8 --out-dir $FAIL2 --n-states $TARGET \
+    --branch-mode fail --alt-fix --alt-band --alt-band-return 0.0 --replan-every 1 --surv-min 0.95 --stuck-s 40 --max-steps 500 \
+    --lowclear-region any --lowclear-m 4.0 --fail-lowclear-n 2 --seed 61 \
+    >> $ART/logs/consequence_fail2_20261008.log 2>&1
+  echo "collect attempt $tries exit $? states=$(n_states) $(date -Is)"
+  tries=$((tries + 1))
+done
+N=$(n_states)
+echo "collect done states=$N target=$TARGET $(date -Is)"
+[ "$N" -lt $TARGET ] && echo "WARNING: states below target ($N < $TARGET); continuing with what was collected"
+$PY -c "
+import json, collections, numpy as np
+r=json.load(open('$FAIL2/AUTO_REVIEW.json')); p=r['probes']
+print('fail2 states', len(p), 'mixed', sum(0<sum(x['collided'])<len(x['collided']) for x in p),
+      'all_collide', sum(sum(x['collided'])==len(x['collided']) for x in p),
+      'cand_coll_rate %.2f' % np.mean([np.mean(x['collided']) for x in p]),
+      'flights', len(r['flights']), collections.Counter(f['end'] for f in r['flights']),
+      collections.Counter(x['why'].split('_')[0] for x in p))"
+for S in 0 1 2; do
+  $PY -u -m experiments.aerial.rl.train_consequence --data-dir $DATA --out-dir $V9/m_full_s$S \
+    --branch-dirs $BRANCH,$ONP1,$LOW,$FAIL,$FAIL2 --val-routes $VAL --input-depth da3 --seed $S \
+    --steps 10000 --eval-every 500 > $V9/train_full_s$S.log 2>&1
+  echo "train s$S exit $? $(date -Is)"
+done
+for P in old new; do
+  PD=$ART/consequence_probe_holdout_20261004; [ $P = new ] && PD=$ART/consequence_probe_holdout_corridor_20261005
+  F=""
+  for S in 0 1 2; do
+    $PY -u -m experiments.aerial.rl.eval_consequence_gate --probe-dir $PD --ckpt $V9/m_full_s$S/consequence_best.pt \
+      --select filter --surv-min 0.7 --out $V9/rows_east_${P}_s$S.json > /dev/null 2>&1
+    F="$F $V9/rows_east_${P}_s$S.json"
+  done
+  echo "== ENSEMBLE v9 east_$P"; $PY experiments/aerial/scripts/consequence/ens_gate.py $F
+done
+
+fly() {  # out_dir expected_n extra-args...
+  local D=$1 N=$2; shift 2; local t=0
+  while [ "$(n_eps $D)" -lt $N ] && [ $t -lt 6 ]; do
+    wait_airsim || { sleep 300; t=$((t + 1)); continue; }
+    $PY -u -m experiments.aerial.rl.mpc_consequence_eval --ckpts $CK9 --out-dir $D $RULE "$@" \
+      >> $ART/logs/consequence_mpc_v9_20261008.log 2>&1
+    echo "fly $(basename $D) attempt $t exit $? episodes=$(n_eps $D) $(date -Is)"; t=$((t + 1))
+  done
+}
+for S in 0 1; do fly $V9/train_seed$S 16 --tune-on-train --annotation $TRAIN_ANN --routes $TR --seed $S; done
+for S in 0 1 2; do fly $ART/consequence_mpc_v9_band_s${S}_20261008 18 --seed $S; done
+python3 experiments/aerial/scripts/consequence/mpc_repeat_summary.py \
+  "v9_band=consequence_mpc_v9_band_s0_20261008,consequence_mpc_v9_band_s1_20261008,consequence_mpc_v9_band_s2_20261008" \
+  "v8_band=consequence_mpc_v8_band_s0_20261007,consequence_mpc_v8_band_s1_20261007,consequence_mpc_v8_band_s2_20261007"
+PROMOTE=$($PY - <<EOF
+import json, glob
+def score(pat, skip=()):
+    eps = [e for d in sorted(glob.glob(pat)) for e in json.load(open(d + "/MPC_EVAL.json"))["episodes"]
+           if "arrived" in e and e["route_id"] not in skip]
+    return sum(e["arrived"] for e in eps), sum(e["severe_collision"] for e in eps), len(eps)
+skip = ("od_holdout_06", "od_holdout_13")
+t9 = score("$V9/train_seed?"); t8 = score("$ART/consequence_tune_band_20261007/ret0.0_seed?")
+e9 = score("$ART/consequence_mpc_v9_band_s?_20261008", skip); e8 = score("$ART/consequence_mpc_v8_band_s?_20261007", skip)
+print(f"TRAIN v9 arr/coll/n {t9}  v8 {t8}")
+print(f"EAST  v9 arr/coll/n {e9}  v8 {e8}")
+s9 = t9[0] - t9[1] + e9[0] - e9[1]; s8 = t8[0] - t8[1] + e8[0] - e8[1]
+print(f"SCORE v9 {s9} v8 {s8}")
+print("PROMOTE", "yes" if s9 > s8 else "no")
+EOF
+)
+echo "$PROMOTE"
+if echo "$PROMOTE" | grep -q "PROMOTE yes"; then
+  echo "v9 promoted -> fresh held-out (second use of this set) $(date -Is)"
+  for S in 0 1 2; do fly $ART/consequence_mpc_fresh_v9_s${S}_20261008 27 --annotation $FRESH_ANN --use-spawn-z --seed $S; done
+  echo "V9_FRESH_DONE $(date -Is)"
+fi
+touch /tmp/airsim_watchdog.stop
+echo "V9_END $(date -Is)"

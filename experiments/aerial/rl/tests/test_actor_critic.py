@@ -110,3 +110,40 @@ def test_update_bc_reduces_mae_toward_expert():
         assert np.isfinite(out["bc_loss"])
     after = _mae()
     assert after < before * 0.7, f"BC mae did not drop enough: {before=} {after=}"
+
+
+def test_yaw_log_std_floor_keeps_only_yaw_axis():
+    ac = LatentActorCritic(
+        config=ActorCriticConfig(latent_dim=8, device="cpu", yaw_log_std_min=0.4),
+    )
+    ac._log_std.data[:] = -0.5
+    ac.apply_yaw_log_std_floor()
+    vals = ac._log_std.detach().cpu().numpy()
+    assert np.allclose(vals[:3], -0.5)
+    assert float(vals[3]) == pytest.approx(0.4)
+
+
+def test_wider_yaw_std_samples_opposite_sign_when_mean_is_saturated():
+    import torch
+
+    class _SatYaw(torch.nn.Module):
+        def forward(self, x):
+            out = torch.zeros(x.shape[0], 4, device=x.device)
+            out[:, 3] = 1.89  # tanh(1.89) * 0.314 ≈ the +18° yaw limit
+            return out
+
+    def _neg_frac(log_std: float) -> float:
+        ac = LatentActorCritic(
+            config=ActorCriticConfig(latent_dim=8, device="cpu", step_hz=5.0),
+        )
+        ac._actor = _SatYaw()
+        ac._log_std.data[:] = -0.5
+        ac._log_std.data[-1] = log_std
+        z = np.zeros((400, 8), dtype=np.float64)
+        acts = np.stack([ac.act_latent(z[i]) for i in range(z.shape[0])], axis=0)
+        return float(np.mean(acts[:, 3] < -0.05))
+
+    narrow = _neg_frac(-0.5)
+    wide = _neg_frac(0.4)
+    assert narrow < 0.02
+    assert wide > 0.05

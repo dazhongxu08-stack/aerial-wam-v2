@@ -1,0 +1,847 @@
+IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED FEBRUARY , 2025 1
+NavRL: Learning Safe Flight in Dynamic
+Environments
+Zhefan Xu, Xinming Han, Haoyu Shen, Hanyu Jin, and Kenji Shimada
+Abstract—Safe flight in dynamic environments requires un-
+manned aerial vehicles (UA Vs) to make effective decisions when
+navigating cluttered spaces with moving obstacles. Traditional
+approaches often decompose decision-making into hierarchical
+modules for prediction and planning. Although these handcrafted
+systems can perform well in specific settings, they might fail
+if environmental conditions change and often require careful
+parameter tuning. Additionally, their solutions could be sub-
+optimal due to the use of inaccurate mathematical model as-
+sumptions and simplifications aimed at achieving computational
+efficiency. To overcome these limitations, this paper introduces
+the NavRL framework, a deep reinforcement learning-based
+navigation method built on the Proximal Policy Optimization
+(PPO) algorithm. NavRL utilizes our carefully designed state and
+action representations, allowing the learned policy to make safe
+decisions in the presence of both static and dynamic obstacles,
+with zero-shot transfer from simulation to real-world flight.
+Furthermore, the proposed method adopts a simple but effective
+safety shield for the trained policy, inspired by the concept of
+velocity obstacles, to mitigate potential failures associated with
+the black-box nature of neural networks. To accelerate the con-
+vergence, we implement the training pipeline using NVIDIA Isaac
+Sim, enabling parallel training with thousands of quadcopters.
+Simulation and physical experiments 1 show that our method
+ensures safe navigation in dynamic environments and results in
+the fewest collisions compared to benchmarks.
+Index Terms—Aerial Systems: Perception and Autonomy, Re-
+inforcement Learning, Collision Avoidance
+I. I NTRODUCTION
+A
+UTONOMOUS unmanned aerial vehicles (UA Vs) are
+widely used in applications like exploration [1], search
+and rescue [2], and inspection [3]. These tasks often occur in
+dynamic environments that require effective collision avoid-
+ance. Traditional methods rely on handcrafted algorithms and
+hierarchical modules, leading to overly complex systems with
+hard-to-tune parameters. In contrast, reinforcement learning
+(RL) allows UA Vs to learn decision-making through experi-
+ence, offering better adaptability and improved performance.
+Developing RL-based navigation methods is essential for
+enhancing UA V safety in dynamic environments.
+Developing an RL-based navigation method suitable for
+real-world deployment presents several challenges. First, since
+Manuscript received: September, 23, 2024; Revised January, 3, 2025;
+Accepted February, 11, 2025.
+This paper was recommended for publication by Editor Aleksandra Faust
+upon evaluation of the Associate Editor and Reviewers’ comments.
+Zhefan Xu, Xinming Han, Haoyu Shen, Hanyu Jin and Kenji Shi-
+mada are with the Department of Mechanical Engineering, Carnegie
+Mellon University, 5000 Forbes Ave, Pittsburgh, PA, 15213, USA.
+zhefanx@andrew.cmu.edu
+Digital Object Identifier (DOI): see top of this page.
+1Experiment video link: https://youtu.be/EbeJW8-YlvI
+Fig. 1. A customized quadcopter UA V navigating a dynamic environment
+using the proposed NavRL framework. The robot achieves safe navigation
+and effective collision avoidance with both static and dynamic obstacles.
+reinforcement learning involves training the robot through
+collision experiences, the learning process must occur in
+simulated environments. This creates a sim-to-real transfer
+issue due to the gap between simulated and real-world sensory
+information, particularly with camera images. Previous works
+have attempted to address this issue by developing methods
+to reduce the gap between simulated and real-world environ-
+ments [4][5][6] or by training the robot directly in real-world
+settings [7][8][9]. However, these approaches often require
+additional training steps and can be data-inefficient when
+trained in real-world scenarios. Second, even if the trained
+RL policy demonstrates satisfactory performance, ensuring
+safety remains challenging due to the black-box nature of
+neural networks, necessitating an effective safety mechanism
+to prevent severe failures [10][11] [12][13]. Lastly, training
+a reinforcement learning policy requires a substantial amount
+of robot experience, and some previous methods [14][15][16]
+that collect data using a single robot often result in slow
+convergence speeds due to limited data diversity and reduced
+parallel exploration opportunities.
+To address these issues, this paper proposes a deep
+reinforcement learning-based navigation framework, named
+NavRL, based on the Proximal Policy Optimization (PPO)
+algorithm [17]. The proposed framework employs state and
+action representations built on our perception module, specif-
+ically designed for collision avoidance in dynamic environ-
+ments, enabling zero-shot sim-to-real transfer capability. Ad-
+ditionally, to prevent severe failures, we leverage the concept
+of velocity obstacles (VO) [18] to create a simple but effec-
+tive safety shield using linear programming to optimize the
+RL policy network’s action outputs. To accelerate training
+convergence, we design a parallel training pipeline capable
+of simulating thousands of quadcopters simultaneously using
+NVIDIA Isaac Sim. We validate the proposed framework
+through extensive simulation and physical flight experiments
+arXiv:2409.15634v2  [cs.RO]  23 Feb 2025
+2 IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED FEBRUARY , 2025
+in various environments, demonstrating its ability to ensure
+safe navigation. Fig. 1 illustrates an example of our UA V
+navigating in a dynamic environment using the proposed
+NavRL framework. The main contributions of this work are:
+• The NavRL Navigation Framework: This work intro-
+duces a novel reinforcement learning-based UA V naviga-
+tion system to ensure safe autonomous flight in dynamic
+environments. The NavRL navigation framework is made
+available as an open-source package on GitHub 2.
+• Policy Action Safety Shield: Our method adopts a safety
+shield into the policy network’s action outputs to enhance
+safety based on the velocity obstacle concept.
+• Physical Flight Experiments: Real-world experiments
+in various environments are conducted to demonstrate
+the safe navigation capabilities and zero-shot sim-to-real
+transfer effectiveness of the proposed method.
+II. R ELATED WORK
+Research on UA V navigation in dynamic environments often
+relies on rule-based methods with handcrafted algorithms
+[19][20][21], which can be complex and require careful tuning
+as conditions change. In contrast, learning-based methods
+reduce complexity and adapt better to varying environments.
+This section mainly categorizes learning-based navigation into
+supervised and reinforcement learning-based methods, while
+acknowledging the existence of other approaches.
+Supervised learning-based methods: Methods in this cat-
+egory train networks using labeled datasets. Early approaches
+[8][22] deploy robots in real-world environments, collect im-
+ages, and manually label them with ground truth actions. Sim-
+ilarly, some methods [7][23] predict the safety of input images
+rather than outputting the decision and then use handcrafted
+algorithms to control the robot.
+The methods mentioned above require manually labeled
+real-world data and often suffer from limited generalization
+ability due to insufficient data. Loquercio et al. [24] train
+the network on an autonomous driving dataset to achieve
+navigation, benefiting from its extensive data volume. Jung et
+al. [25] use a learning-based detector to enable a drone to pass
+through gates in racing, while in [26], iterative learning control
+is applied to reduce tracking error in this context. Works on
+foundation models for visual navigation has been developed
+using real-world experience from various robots [27][28][29].
+Simon et al. [30] demonstrate collision avoidance capabilities
+for drones equipped with monocular cameras using a depth
+estimation method [31]. An imperative learning approach
+based on semantic images is proposed in [32] to achieve
+semantically-aware local navigation.
+Reinforcement learning-based methods: Compared to
+supervised learning-based methods, reinforcement learning-
+based approaches benefit from the abundant data in simula-
+tion. Some methods utilizing Q-learning [14][15][33] or value
+learning [34][35] have demonstrated successful navigation.
+However, these methods are constrained to discrete action
+spaces, which can lead to suboptimal performance.
+2Software available at: https://github.com/Zhefan-Xu/NavRL
+Policy gradient methods [16][36], using an actor-critic struc-
+ture, have gained popularity for enabling robot control in
+continuous action spaces. Kaufmann et al. [37] trained a policy
+in simulation to outperform human champions in drone racing,
+with other studies enhancing control performance [38][39].
+Song et al. [6] developed a vision-based network by distilling
+knowledge from a teacher policy with privileged information,
+while Xing et al. [40] applied contrastive learning to improve
+image encoding. In [41], a comprehensive reinforcement train-
+ing pipeline is presented for UA V-related tasks.
+To ensure safety, a recovery policy using a reach-avoid
+network is introduced in [42] to prevent failures. Similarly,
+Kochdumper et al. [13] utilize reachability analysis to project
+unsafe policy actions to safe regions. However, their approach
+requires a precomputed reachability set, with computation
+costs scaling exponentially with action dimensions.
+Most existing methods are designed for navigation and
+collision avoidance in static environments. Some methods,
+such as [36], demonstrate dynamic obstacle avoidance but do
+not address collision avoidance in complex static scenarios.
+The method in [42] can handle both static and dynamic
+obstacles but may perform suboptimally by treating dynamic
+obstacles as static. Recent safety-focused approaches are ei-
+ther computationally expensive or require extensive training.
+These challenges, combined with the difficulty of sim-to-real
+transfer, motivate us to propose a framework that ensures safe
+navigation while avoiding both static and dynamic obstacles.
+III. M ETHODOLOGY
+The proposed NavRL navigation framework is depicted in
+Fig. 2. The obstacle perception system processes RGB-D im-
+ages and robot states to generate representations for both static
+and dynamic obstacles (Sec. III-A). Section III-B details the
+conversion of these obstacle representations into network input
+states, along with the definitions of robot actions and training
+rewards. During training, we employ the PPO algorithm with
+an actor-critic network structure to train the policy and value
+networks, as explained in Sec. III-C. For deployment, a safety
+shield is applied to the RL policy network’s action outputs to
+ensure safety (Sec. III-D).
+A. Obstacle Perception System
+Static and dynamic obstacles are handled separately by
+our perception system due to their different properties, as
+illustrated in Fig. 2. Static obstacles, which can have arbitrary
+shapes and sizes, are represented more accurately using a
+discretized format, such as an occupancy voxel map. Con-
+versely, dynamic obstacles, typically modeled as rigid bodies,
+are represented using bounding boxes with estimated velocity
+information. The rationale for using different representations
+for static and dynamic obstacles lies in their distinct charac-
+teristics. Static obstacles sometimes have irregular geometries,
+making a discrete representation more suitable for accurate
+shape description. In contrast, dynamic obstacles, typically
+rigid bodies, require a representation that captures their states
+as a whole entity. Additionally, updating the occupancy map
+with dynamic obstacles can introduce noise and latency,
+XU et al.: NA VRL: LEARNING SAFE FLIGHT IN DYNAMIC ENVIRONMENTS 3
+Fig. 2. The proposed NavRL framework. The perception system processes RGB-D images along with the robot’s internal states to generate representations
+for both static and dynamic obstacles. These representations are then fed into two feature extractors, which produce state embeddings concatenated with the
+robot’s internal states. In the training phase, an actor-critic network structure is utilized to train robots in parallel within the NVIDIA Isaac Sim environment.
+During the deployment stage, the policy network generates actions that are further refined by a safety shield mechanism to ensure safe robot control.
+further justifying the need for separate representations. For
+the perception of static obstacles, we create a 3D occupancy
+voxel map with a fixed memory size, determined by the
+maximum number of voxels suitable for the environment. The
+occupancy data for each voxel is then stored in a pre-allocated
+array. This design enables us to access occupancy information
+with constant time complexity ( O(1)). At each time step,
+we recursively update the log probability of occupancy for
+each voxel based on the latest depth image and clear the
+occupancy data for dynamic obstacles by iterating through
+their detected bounding boxes. It is important to note that this
+static occupancy map can be generated on the fly without the
+need for any prebuilt data.
+Detecting 3D dynamic obstacles is challenging due to the
+noisy depth images from the lightweight UA V camera and the
+limited processing power of the onboard computer. To achieve
+accurate detection with minimal computational demand, we
+propose an ensemble method that combines two lightweight
+detectors built on [43]. The first, the U-depth detector [44],
+converts raw depth images into a U-depth map (similar to
+a top-down view) and uses a contiguous line grouping algo-
+rithm to detect 3D bounding boxes of obstacles. The second,
+named the DBSCAN detector, applies the DBSCAN clustering
+algorithm to point cloud data from depth images to identify
+obstacle centers and dimensions by analyzing boundary points
+within each cluster. Both detectors, however, can produce a
+significant number of false positives due to the noisy input
+data. Our proposed ensemble method addresses this by finding
+the mutual agreements from both detectors to identify consis-
+tent results. Furthermore, to differentiate between static and
+dynamic obstacles, we employ a lightweight YOLO detector
+to classify dynamic obstacles by examining the 2D bounding
+boxes that are re-projected onto the image plane from the 3D
+detections.
+The dynamic obstacle velocity is estimated by the tracking
+module, which operates in two stages: data association and
+state estimation. In the data association stage, the goal is to
+establish correspondences between detected obstacles across
+consecutive time steps. To minimize detection mismatches,
+we construct a feature vector for each obstacle that includes
+its position, bounding box dimensions, point cloud size, and
+point cloud standard deviation, and then determine matches
+based on the similarity scores between potential matching
+obstacles. In the state estimation stage, a Kalman filter is used
+to estimate obstacle velocities, with a constant acceleration
+model applied to account for changes in velocity over time.
+It is worth noting that while the perception system in this
+framework is based on a camera, other sensors can also be used
+if they provide a similar obstacle representation. The dynamic
+obstacle detection and tracking in the perception system is
+based on the approach presented in [43], where readers can
+find further details and implementation specifics.
+B. Reinforcement Learning Formulation
+The navigation task is formulated as a Markov Decision
+Process (MDP) defined by the tuple (S, A, P, R, γ), where S
+is the state space (robot’s internal and sensory data), A is
+the action space, the transition function P (st+1|st, at) models
+environment dynamics, and the reward function R(st, at) en-
+courages goal-reaching behaviors while penalizing collisions
+and inefficient actions. The goal is to learn an optimal policy
+π∗(at|st) that maximizes the expected cumulative reward:
+π∗ = arg max
+π
+E
+" TX
+t=0
+γtR(st, at)
+#
+, (1)
+where γ ∈ [0, 1] is the discount factor for future rewards. This
+formulation enables the use of reinforcement learning to train
+the robot for safe navigation in dynamic environments.
+State: As the input to the policy, the state must include all
+information relevant to navigation and collision avoidance. In
+our system framework shown in Fig. 2, the designed state is
+composed of three parts: the robot’s internal states, dynamic
+obstacles, and static obstacles. The robot’s internal states
+provide details about the robot’s direction and distance to the
+navigation goal with its current velocity defined as:
+Sint = [ P G
+g − P G
+r
+∥P Gg − P Gr ∥ , ∥P G
+g − P G
+r ∥, VG
+r ]T , (2)
+4 IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED FEBRUARY , 2025
+where Pr and Pg represent the robot position and goal
+position, respectively, and Vr is the robot current velocity. The
+superscript (·)G indicates that the vector is expressed in the
+“goal coordinate frame”, which is defined with its origin at the
+robot’s starting position. In this frame, the x-axis aligns with
+the vector pointing from the starting position, Ps, to the goal
+position, while the y-axis lies parallel to the ground plane.
+This goal coordinate transformation reduces dependency on
+the global coordinate system, improving overall RL training
+convergence speed, and will also be applied to the definition
+of obstacle state representations.
+The dynamic obstacles are represented using a 2D matrix:
+Sdyn = [D1, ...,DNd ]T , Sdyn ∈ RNd×M , Di ∈ RM . (3)
+In this formulation, Di denotes the state vector of the ith
+closest dynamic obstacle to the robot and is expressed as:
+Di = [ P G
+oi − P G
+r
+∥P Goi − P Gr ∥ , ∥P G
+oi − P G
+r ∥, VG
+oi , dim(oi)]T , (4)
+where Poi and Voi represent the center position and velocity
+of the dynamic obstacle, respectively, and dim (oi) indicates
+the height and width of the obstacle. The number of dynamic
+obstacles, Nd, is predefined, and if the actual number of
+detected obstacles is less than this predefined limit, the state
+vector values are set to zero. The relative position vectors for
+both internal states and obstacle states are split into a unit
+vector and its norm, as this method showed slightly faster
+convergence speed in our experiments.
+Compared to dynamic obstacles, static obstacles are rep-
+resented as map voxels, which cannot be directly input into
+neural networks. Therefore, we perform 3D ray casting from
+the robot’s position against the map. In Fig. 3a, rays are
+cast horizontally in all directions within a maximum range
+using a user-defined ray casting angle interval. Similarly, Fig.
+3b illustrates the same operation in the vertical plane. For
+each diagonal ray casting angle θi in the vertical plane, the
+lengths of all rays in the horizontal plane are recorded into a
+vector Rθi. Any ray exceeding the maximum range is assigned
+a length equal to the maximum range plus a small offset,
+allowing obstacle absence to be identified. The representation
+of static obstacles is constructed by stacking the ray length
+vectors for all diagonal ray angles in the vertical planes:
+Sstat = [Rθ0 , ..., RθNv ], Sstat ∈ RNh×Nv , Rθi ∈ RNh , (5)
+where Nv and Nh represent the number of rays in the vertical
+and horizontal planes, determined by the ray casting angle
+interval and the vertical field of view. Unlike using image data
+as state representation, the proposed RL state representation
+has minimal discrepancies between simulation and the real
+world, which is beneficial for sim-to-real transfer.
+Action: At each time step, the velocity control Vctrl ∈ R3
+is provided to the robot for navigation and collision avoidance.
+Velocity control is chosen because higher-level controls offer
+better transferability and generalization across different plat-
+forms, facilitating sim-to-real transfer. Additionally, velocity
+commands are more interpretable and easier for humans to
+supervise compared to lower-level controls. Instead of directly
+outputting velocity values from the RL policy, the policy is
+Fig. 3. Illustration of map ray casting. Only rays within the maximum range
+are shown. (a) A top-down view of horizontally cast rays with a 360-degree
+casting angle. (b) A side view displaying rays in the vertical planes.
+Fig. 4. Visualization of example RL policy actions from Beta distributions.
+designed to first infer a normalized velocity ˆV G
+ctrl with the
+final output velocity expressed as:
+V G
+ctrl = vlim · (2 · ˆV G
+ctrl − 1), ˆV G
+ctrl ∈ [0, 1], (6)
+where vlim is the user-defined maximum velocity. The final
+velocity is expressed in the goal coordinate frame, as described
+in the state formulation, requiring a coordinate transformation
+to be applied to the robot. This approach offers greater
+flexibility compared to other formulations where the RL policy
+must learn the action limits and cannot easily adjust the trained
+action range. To constrain the network output to the range
+[0, 1], the model is designed to produce parameters ( α, β)
+for a Beta distribution, as shown in Fig. 4. When the RL
+action space is constrained, a Beta distribution-based policy
+has been proven to be bias-free and achieve faster convergence
+compared to a Gaussian distribution-based policy [45]. During
+the training process, exploration is encouraged by sampling
+from the Beta distribution using the generated parameters. In
+deployment, we use the mean of the Beta distribution as the
+normalized velocity output.
+Reward: The designed RL reward function is computed at
+each time step consisting of multiple components:
+r = λ1rvel + λ2rss + λ3rds + λ4rsmooth + λ5rheight, (7)
+where r(·) represents one type of reward weighted by λi. Each
+reward will be explained in the following paragraphs.
+a) velocity reward rvel: The velocity reward encourages the
+robot to adopt velocities leading to the goal position:
+rvel = Pg − Pr
+∥Pg − Pr∥ · Vr, where Pg, Ps, Vr ∈ R3. (8)
+This formulation rewards velocities that align more closely
+with the position-to-goal direction with higher speeds.
+XU et al.: NA VRL: LEARNING SAFE FLIGHT IN DYNAMIC ENVIRONMENTS 5
+b) static safety reward rss: The static safety reward ensures
+that the robot keeps a safe distance from static obstacles. Given
+the static obstacle states in Eqn. 5, it is defined as:
+rss = 1
+NhNv
+NhX
+i=1
+NvX
+j=1
+log Sstat(i, j). (9)
+This formulation computes the average log distance to static
+obstacles using the ray distances. The reward is maximized
+when the robot maintains greater distances from obstacles.
+c) dynamic safety reward rds: Similar to the static safety
+reward, the dynamic safety reward encourages the robot to
+avoid dynamic obstacles and is expressed as:
+rds = 1
+Nd
+NdX
+i=1
+log∥Pr − Poi ∥. (10)
+d) smoothness reward rsmooth: The smoothness reward
+penalizes sudden changes in the control output, written as:
+rsmooth = −∥Vr(ti) − Vr(ti−1)∥, (11)
+where the L2 norm of the difference between the robot’s
+velocities at the current and previous time steps is computed.
+e) height reward rheight: The height reward is designed to
+prevent the robot from avoiding obstacles by flying excessively
+high. It can be written as the following:
+rheight = −(min(|Pr,z − Ps,z|, |Pr,z − Pg,z |))2, (12)
+which applies when the current height Pr,z falls outside the
+range defined by the start height Ps,z and goal height Pg,z.
+C. Network Design and Policy Training
+Given that our state representation consists of multiple
+components, a preprocessing step is necessary before inputting
+the data into the RL policy network. Both static and dynamic
+obstacles are represented as 2D matrices, so we utilize con-
+volutional neural networks (CNN) to extract their features
+and transform them into 1D feature embeddings, as illustrated
+in Fig. 2. These embeddings are then concatenated with the
+robot’s internal states to form the complete input feature for
+the policy and value networks. We employ the Proximal Policy
+Optimization (PPO) algorithm [17] to train the actor (policy)
+and critic (value) networks, both of which are implemented
+using multi-layer perceptron. The training process is conducted
+in NVIDIA Isaac Sim, where we implement parallel training
+by collecting data from thousands of quadcopters simultane-
+ously. The training environment features a forest-like setting
+with both static and dynamic obstacles. Each robot is spawned
+at a random location with a random goal and is reset either
+upon colliding with an obstacle or at the end of the episode.
+To improve learning efficiency, we adopt a curriculum learning
+strategy. The environment initially starts with a relatively low
+obstacle density, which is gradually increased as the success
+rate surpasses a specified threshold. Our experiments show
+that this approach allows the RL policy to achieve a higher
+navigation success rate in complicated environments.
+D. Policy Action Safety Shield
+Due to the black-box nature of the neural network, we
+designed a safety shield mechanism to prevent severe failures
+caused by the trained policy. Given that our policy outputs
+velocity commands for robot control, we incorporate the
+concept of velocity obstacles (VO) [18] to evaluate the safety
+of the policy’s actions and correct them if they could result
+in collisions. The velocity obstacle represents the set of robot
+velocities that would result in a collision within a specified
+future time horizon. In the scenario depicted in Fig. 5a, where
+the robot encounters obstacles, the corresponding velocity
+obstacle regions are visualized in Fig. 5b. In this example,
+there are two obstacles moving at different velocities, each
+associated with a velocity obstacle region based on their
+relative positions and velocities with respect to the robot. Each
+velocity obstacle region combines a circular area centered at
+C1 or C2, with a radius equal to the sum of the robot and
+obstacle sizes plus user-defined safe space, and a cone area
+extending from the origin, excluding the dotted lines. The
+relative velocities of the robot to Obstacle 1 and Obstacle
+2 (shown as red and green arrows) lie within the velocity
+obstacle regions, indicating future collisions. Inspired by [46],
+we adopt a similar approach to compute the minimum changes
+in velocity ( ∆V1 and ∆V2) required to exit velocity obstacle
+regions. The policy action produced by the network is defined
+as the velocity Vrl. If this action is not within any of the
+velocity obstacle regions, we set the safe action Vsaf eequal
+to the policy action. Otherwise, we formulate the following
+optimization to project the policy action into the safe region:
+min
+Vsaf e∈ R3
+Vsaf e− Vrl
+ , (13a)
+s.t. (Vsaf e− (Vrl − Voi + ∆Vi)) · ∆Vi ≥ 0,
+(13b)
+Vmin ≤ Vsaf e≤ Vmax, (13c)
+∀i ∈ {1, . . . , N}, (13d)
+where Eqn. 13b defines a hyperplane based on the required
+changes in velocity to ensure the safe action lies outside the
+velocity obstacle regions, and Eqn. 13c enforces the control
+limits on the safe action. The drawback of constraining the
+safe action to one side of the hyperplane can be overly
+conservative when many obstacles are present. However, since
+the policy action only fails occasionally, this conservatism
+does not significantly impact overall performance and, in most
+scenarios, helps ensure safety. For static obstacles, we use
+each cast ray to determine the obstacle’s center position and
+radius, setting their velocity to zero. For dynamic obstacles,
+we enclose them using one or multiple spheres.
+IV. R ESULT AND DISCUSSION
+To evaluate the proposed framework, we present our training
+results under different configurations and conduct simulation
+and physical flight tests in various environments. The policy
+was trained in NVIDIA Isaac Sim on a NVIDIA GeForce
+RTX 4090 GPU for around 10 hours. The maximum velocity
+6 IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED FEBRUARY , 2025
+Fig. 5. Illustration of determining the safe velocity region using the velocity
+obstacle-based method. (a) An example scenario where the robot encounters
+two obstacles. (b) The corresponding velocity obstacle plot with blue arrows
+showing the minimum velocity change required to exit the VO regions.
+of the robot is set to 2.0 m/s. The simulation experiments are
+conducted on the RTX 4090 desktop, while computations for
+the physical flights are performed on our quadcopter’s onboard
+computer (NVIDIA Jetson Orin NX). An Intel RealSense
+D435i camera is utilized for static and dynamic obstacle
+perception, and the LiDAR Inertial Odometry (LIO) algo-
+rithm [47] is adopted for accurate robot state estimation. The
+static and dynamic feature extractors use 3-layer convolutional
+neural networks, outputting embeddings of sizes 128 and 64,
+respectively. The policy network consists of a two-layer multi-
+layer perceptron with a PPO clip ratio of 0.1. The ADAM
+optimizer is used with a learning rate of 5 × 10−4. The reward
+discounting factor is set to 0.99.
+A. RL Training Results
+Our framework utilizes a curriculum learning strategy for
+our RL policy training, as illustrated by the initial and final
+training environments shown in Fig. 6. Static obstacles are
+shown in red with a color gradient indicating height, while
+dynamic obstacles are depicted in green. Based on our obser-
+vations, dynamic obstacles present a greater challenge during
+training than static obstacles. Therefore, we gradually increase
+the number of dynamic obstacles in the environment from 60
+to 120, in increments of 20, once the navigation success rate
+exceeds 80% (defined as safely navigating from the start to the
+goal without collisions). To demonstrate the effectiveness of
+curriculum learning, Table I compares the highest navigation
+success rates achieved with and without curriculum learning,
+keeping the total training time constant for both scenarios. The
+table shows that as the number of dynamic obstacles increases,
+the highest navigation success rate without curriculum learning
+decreases more sharply compared to training with curriculum
+learning, highlighting its effectiveness. We stopped policy
+training at 120 dynamic obstacles and saved the best model
+trained with 100 dynamic obstacles, as it achieved a relatively
+high success rate (80.96%) under challenging conditions.
+To show the importance of training with a larger number
+of robots, Fig. 8 compares the average RL training returns
+achieved with different numbers of robots deployed in training.
+The figure shows that training with more robots not only leads
+to faster convergence but also results in higher RL returns. Our
+experiments were conducted with 1024 robots, which utilized
+the maximum available GPU memory.
+Fig. 6. Visualization of robot training environments. The environment has a
+size of 50m×50m, and the number of dynamic obstacles is gradually increased
+during training. (a) The initial environment contains 60 dynamic obstacles.
+(b) The final environment contains 120 dynamic obstacles.
+TABLE I
+COMPARISON OF THE HIGHEST NAVIGATION SUCCESS RATES DURING
+TRAINING WITH AND WITHOUT USING CURRICULUM LEARNING .
+Number of Obstacles No Curr. Learning Curr. Learning
+static=350, dynamic=60 94.33% 94.33%
+static=350, dynamic=80 74.51% 82.71%
+static=350, dynamic=100 62.30% 80.96%
+static=350, dynamic=120 54.98% 68.65%
+B. Simulation Experiments
+We conducted simulation experiments in Gazebo to eval-
+uate the proposed framework and demonstrate its sim-to-sim
+transferability. Quantitative tests were performed in indoor-like
+dynamic environments resembling real-world scenarios where
+the robot navigates safely around humans. Fig. 7 shows an
+example of a safe trajectory. The results confirm that the robot
+successfully navigated without collisions.
+To quantitatively evaluate the performance, we generate
+environments with high obstacle density, mirroring the condi-
+tions of our training environments, where both static and dy-
+namic obstacles are randomly placed. Given the limited avail-
+ability of open-source RL-based navigation benchmark algo-
+rithms, we compare our method with the popular optimization-
+based static planner [48] and a vision-aided planner [20]
+designed for dynamic environments. Additionally, we evaluate
+the performance of our framework with and without the
+safety shield to verify its effectiveness. Specifically, we test
+in three types of environments: static, purely dynamic, and
+hybrid environments. Each algorithm is run 20 times in each
+environment, and the average number of collisions per run
+is calculated as shown in Table II. The percentage value
+in Table II indicates the average collision times relative to
+the baseline method [20]. It is important to note that these
+environments are designed to test the limits of the algorithms
+and are significantly more complex than real-world scenarios.
+Therefore, the occurrence of collisions does not necessarily
+indicate that the algorithm is unsafe. Overall, our NavRL
+demonstrates the lowest number of collisions in dynamic and
+hybrid environments, while maintaining a comparable collision
+rate to the EGO planner in static environments. The table
+shows N/A for the EGO planner in dynamic and hybrid
+environments because its inefficient map updates cause it to get
+stuck when handling excessive noise from dynamic obstacles.
+In the experiments, ViGO fails to provide sufficiently reactive
+trajectories for collision avoidance when obstacles are in close
+XU et al.: NA VRL: LEARNING SAFE FLIGHT IN DYNAMIC ENVIRONMENTS 7
+Fig. 7. Visualization of a safe navigation trajectory in a simulated corridor
+environment. The top image illustrates the environment in Gazebo, containing
+static obstacles and dynamic obstacles (pedestrians). The bottom image
+displays the environment map with the robot’s navigation trajectory.
+Fig. 8. Plot of the smoothed average training return curves. Training with a
+larger number of robots leads to faster convergence and higher returns.
+proximity to the robot. In contrast, our method can generate
+more reactive controls that help the robot avoid collisions more
+efficiently. Comparing our framework with and without the
+safety shield, we found the safety shield consistently reduced
+collisions, particularly in dynamic environments, where it
+mitigates errors caused by the neural network’s increased
+failure risk.
+TABLE II
+BENCHMARK OF THE AVERAGE NUMBER OF COLLISIONS EVALUATED
+FROM 20 SAMPLE RUNS IN DIFFERENT TYPES OF ENVIRONMENTS .
+Average Collision Times Measurement in a 20m ×40m Map
+Benchmarks Static Env. Dynamic Env. Hybrid Env.
+EGO [48] 0.45 (56.3%) N/A N/A
+ViGO [20] 0.80 ( 100%) 3.15 (100%) 4.40 (100%)
+Ours w/o Safe 0.95 (118.8%) 2.70 ( 85.7%) 4.60 (104.5%)
+Ours (NavRL) 0.65 (81.3%) 0.85 (27.0%) 2.10 (47.8%)
+C. Physical Flight Tests
+To demonstrate sim-to-real transfer and safe navigation, we
+conducted physical flight experiments in various settings, as
+shown in Fig. 9. Static obstacles were placed in the environ-
+ments, and several pedestrians were directed to walk toward
+the robot, requiring it to avoid collisions while reaching its
+goals. The results showed that the robot successfully avoided
+collisions and reached its destinations safely.
+During the simulation and real-world flight experiments,
+we measured the computation time for each module in the
+proposed framework, as detailed in Table III. The table shows
+the runtimes on both the NVIDIA GeForce RTX 4090 and
+the onboard NVIDIA Jetson Orin NX computer. The static
+Fig. 9. Examples of physical flight tests. Our framework enables the robot’s
+safe flight and navigation in the presence of static and dynamic obstacles.
+TABLE III
+THE RUNTIME OF EACH COMPONENT OF THE PROPOSED SYSTEM .
+System Modules GeForce RTX 4090 Jetson Orin NX
+Static Perception 8 ms 15 ms
+Dynamic Perception 11 ms 27 ms
+RL Policy Network 1 ms 7 ms
+Safety Shield 2 ms 16 ms
+perception module completes in 8 ms on the RTX 4090 and
+15 ms on the Orin NX, while the dynamic perception module
+takes 11 ms and 27 ms, respectively. The RL policy network
+runs in 1 ms on the RTX 4090 and 7 ms on the Orin NX,
+and the safety shield module operates in 2 ms and 16 ms.
+These measurements demonstrate that all modules are capable
+of real-time performance even on an onboard computer.
+V. C ONCLUSION AND FUTURE WORK
+This paper presents a novel deep reinforcement learning
+framework, NavRL, designed to achieve safe flight in dynamic
+environments based on the Proximal Policy Optimization
+(PPO) algorithm. The framework uses tailored state and action
+representations to enable safe navigation in both static and
+dynamic environments, supporting effective zero-shot sim-to-
+sim and sim-to-real transfer. Besides, A safety shield based on
+the velocity obstacle concept mitigates failures from the black-
+box nature of neural networks. Additionally, a parallel training
+pipeline with NVIDIA Isaac Sim accelerates the learning pro-
+cess. Results from simulation and physical experiments verify
+the effectiveness of our approach in achieving safe navigation
+within dynamic environments. Future work will focus on
+improving and adapting this framework for deployment across
+various robotic platforms.
+REFERENCES
+[1] B. Zhou, Y . Zhang, X. Chen, and S. Shen, “Fuel: Fast uav exploration
+using incremental frontier structure and hierarchical planning,” IEEE
+Robotics and Automation Letters , vol. 6, no. 2, pp. 779–786, 2021.
+[2] S. H. Alsamhi, A. V . Shvetsov, S. Kumar, S. V . Shvetsova, M. A.
+Alhartomi, A. Hawbani, N. S. Rajput, S. Srivastava, A. Saif, and
+V . O. Nyangaresi, “Uav computing-assisted search and rescue mission
+framework for disaster and harsh environment mitigation,” Drones,
+vol. 6, no. 7, p. 154, 2022.
+[3] Z. Xu, B. Chen, X. Zhan, Y . Xiu, C. Suzuki, and K. Shimada,
+“A vision-based autonomous uav inspection framework for unknown
+tunnel construction sites with dynamic obstacles,” IEEE Robotics and
+Automation Letters, vol. 8, no. 8, pp. 4983–4990, 2023.
+[4] M. Kulkarni and K. Alexis, “Task-driven compression for collision
+encoding based on depth images,” in International Symposium on Visual
+Computing. Springer, 2023, pp. 259–273.
+[5] D. Hoeller, L. Wellhausen, F. Farshidian, and M. Hutter, “Learning a
+state representation and navigation in cluttered and dynamic environ-
+ments,” IEEE Robotics and Automation Letters , vol. 6, no. 3, pp. 5081–
+5088, 2021.
+8 IEEE ROBOTICS AND AUTOMATION LETTERS. PREPRINT VERSION. ACCEPTED FEBRUARY , 2025
+[6] Y . Song, K. Shi, R. Penicka, and D. Scaramuzza, “Learning perception-
+aware agile flight in cluttered environments,” in 2023 IEEE International
+Conference on Robotics and Automation (ICRA) . IEEE, 2023, pp.
+1989–1995.
+[7] D. Gandhi, L. Pinto, and A. Gupta, “Learning to fly by crashing,” in 2017
+IEEE/RSJ International Conference on Intelligent Robots and Systems
+(IROS). IEEE, 2017, pp. 3948–3955.
+[8] N. Smolyanskiy, A. Kamenev, J. Smith, and S. Birchfield, “Toward low-
+flying autonomous mav trail navigation using deep neural networks for
+environmental awareness,” in 2017 IEEE/RSJ International Conference
+on Intelligent Robots and Systems (IROS). IEEE, 2017, pp. 4241–4247.
+[9] V . Tolani, S. Bansal, A. Faust, and C. Tomlin, “Visual navigation
+among humans with optimal control as a supervisor,” IEEE Robotics
+and Automation Letters , vol. 6, no. 2, pp. 2288–2295, 2021.
+[10] A. Ray, J. Achiam, and D. Amodei, “Benchmarking safe exploration in
+deep reinforcement learning,” arXiv preprint arXiv:1910.01708 , vol. 7,
+no. 1, p. 2, 2019.
+[11] B. Thananjeyan, A. Balakrishna, S. Nair, M. Luo, K. Srinivasan,
+M. Hwang, J. E. Gonzalez, J. Ibarz, C. Finn, and K. Goldberg, “Recovery
+rl: Safe reinforcement learning with learned recovery zones,” IEEE
+Robotics and Automation Letters , vol. 6, no. 3, pp. 4915–4922, 2021.
+[12] K.-C. Hsu, A. Z. Ren, D. P. Nguyen, A. Majumdar, and J. F. Fisac,
+“Sim-to-lab-to-real: Safe reinforcement learning with shielding and
+generalization guarantees,” Artificial Intelligence , vol. 314, p. 103811,
+2023.
+[13] N. Kochdumper, H. Krasowski, X. Wang, S. Bak, and M. Althoff, “Prov-
+ably safe reinforcement learning via action projection using reachability
+analysis and polynomial zonotopes,” IEEE Open Journal of Control
+Systems, vol. 2, pp. 79–92, 2023.
+[14] F. Sadeghi and S. Levine, “Cad2rl: Real single-image flight without a
+single real image,” arXiv preprint arXiv:1611.04201 , 2016.
+[15] L. Xie, S. Wang, A. Markham, and N. Trigoni, “Towards monocular
+vision based obstacle avoidance through deep reinforcement learning,”
+arXiv preprint arXiv:1706.09829 , 2017.
+[16] R. Brilli, M. Legittimo, F. Crocetti, M. Leomanni, M. L. Fravolini, and
+G. Costante, “Monocular reactive collision avoidance for mav teleop-
+eration with deep reinforcement learning,” in 2023 IEEE International
+Conference on Robotics and Automation (ICRA) . IEEE, 2023, pp.
+12 535–12 541.
+[17] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, “Prox-
+imal policy optimization algorithms,” arXiv preprint arXiv:1707.06347,
+2017.
+[18] P. Fiorini and Z. Shiller, “Motion planning in dynamic environments
+using velocity obstacles,” The international journal of robotics research,
+vol. 17, no. 7, pp. 760–772, 1998.
+[19] Y . Wang, J. Ji, Q. Wang, C. Xu, and F. Gao, “Autonomous flights
+in dynamic environments with onboard vision,” in 2021 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS) ,
+2021, pp. 1966–1973.
+[20] Z. Xu, Y . Xiu, X. Zhan, B. Chen, and K. Shimada, “Vision-aided
+uav navigation and dynamic obstacle avoidance using gradient-based b-
+spline trajectory optimization,” in 2023 IEEE International Conference
+on Robotics and Automation (ICRA) , 2023, pp. 1214–1220.
+[21] G. Chen, P. Peng, P. Zhang, and W. Dong, “Risk-aware trajectory
+sampling for quadrotor obstacle avoidance in dynamic environments,”
+IEEE Transactions on Industrial Electronics, vol. 70, no. 12, pp. 12 606–
+12 615, 2023.
+[22] L. Tai, S. Li, and M. Liu, “A deep-network solution towards model-
+less obstacle avoidance,” in 2016 IEEE/RSJ international conference on
+intelligent robots and systems (IROS) . IEEE, 2016, pp. 2759–2764.
+[23] R. P. Padhy, S. Verma, S. Ahmad, S. K. Choudhury, and P. K. Sa,
+“Deep neural network for autonomous uav navigation in indoor corridor
+environments,” Procedia computer science, vol. 133, pp. 643–650, 2018.
+[24] A. Loquercio, A. I. Maqueda, C. R. Del-Blanco, and D. Scaramuzza,
+“Dronet: Learning to fly by driving,” IEEE Robotics and Automation
+Letters, vol. 3, no. 2, pp. 1088–1095, 2018.
+[25] S. Jung, S. Hwang, H. Shin, and D. H. Shim, “Perception, guidance, and
+navigation for indoor autonomous drone racing using deep learning,”
+IEEE Robotics and Automation Letters , vol. 3, no. 3, pp. 2539–2544,
+2018.
+[26] S. Lv, Y . Gao, J. Che, and Q. Quan, “Autonomous drone racing: time-
+optimal spatial iterative learning control within a virtual tube,” in 2023
+IEEE International Conference on Robotics and Automation (ICRA) .
+IEEE, 2023, pp. 3197–3203.
+[27] D. Shah, A. Sridhar, N. Dashora, K. Stachowicz, K. Black, N. Hirose,
+and S. Levine, “Vint: A foundation model for visual navigation,” arXiv
+preprint arXiv:2306.14846, 2023.
+[28] D. Shah, A. Sridhar, A. Bhorkar, N. Hirose, and S. Levine, “Gnm: A
+general navigation model to drive any robot,” in2023 IEEE International
+Conference on Robotics and Automation (ICRA) . IEEE, 2023, pp.
+7226–7233.
+[29] A. Sridhar, D. Shah, C. Glossop, and S. Levine, “Nomad: Goal masked
+diffusion policies for navigation and exploration,” in 2024 IEEE Inter-
+national Conference on Robotics and Automation (ICRA) . IEEE, 2024,
+pp. 63–70.
+[30] N. Simon and A. Majumdar, “Mononav: Mav navigation via monocular
+depth estimation and reconstruction,” in International Symposium on
+Experimental Robotics. Springer, 2023, pp. 415–426.
+[31] S. F. Bhat, R. Birkl, D. Wofk, P. Wonka, and M. M ¨uller, “Zoedepth:
+Zero-shot transfer by combining relative and metric depth,” arXiv
+preprint arXiv:2302.12288, 2023.
+[32] P. Roth, J. Nubert, F. Yang, M. Mittal, and M. Hutter, “Viplanner:
+Visual semantic imperative learning for local navigation,” in 2024 IEEE
+International Conference on Robotics and Automation (ICRA) . IEEE,
+2024, pp. 5243–5249.
+[33] A. Singla, S. Padakandla, and S. Bhatnagar, “Memory-based deep
+reinforcement learning for obstacle avoidance in uav with limited en-
+vironment knowledge,” IEEE transactions on intelligent transportation
+systems, vol. 22, no. 1, pp. 107–118, 2019.
+[34] Y . F. Chen, M. Liu, M. Everett, and J. P. How, “Decentralized non-
+communicating multiagent collision avoidance with deep reinforcement
+learning,” in 2017 IEEE international conference on robotics and
+automation (ICRA). IEEE, 2017, pp. 285–292.
+[35] Y . F. Chen, M. Everett, M. Liu, and J. P. How, “Socially aware
+motion planning with deep reinforcement learning,” in 2017 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS) .
+IEEE, 2017, pp. 1343–1350.
+[36] M. Everett, Y . F. Chen, and J. P. How, “Motion planning among dynamic,
+decision-making agents with deep reinforcement learning,” in 2018
+IEEE/RSJ International Conference on Intelligent Robots and Systems
+(IROS). IEEE, 2018, pp. 3052–3059.
+[37] E. Kaufmann, L. Bauersfeld, A. Loquercio, M. M ¨uller, V . Koltun, and
+D. Scaramuzza, “Champion-level drone racing using deep reinforcement
+learning,” Nature, vol. 620, no. 7976, pp. 982–987, 2023.
+[38] L. Bauersfeld, E. Kaufmann, and D. Scaramuzza, “User-conditioned
+neural control policies for mobile robotics,” in 2023 IEEE International
+Conference on Robotics and Automation (ICRA) . IEEE, 2023, pp.
+1342–1348.
+[39] A. Romero, Y . Song, and D. Scaramuzza, “Actor-critic model predictive
+control,” in 2024 IEEE International Conference on Robotics and
+Automation (ICRA). IEEE, 2024, pp. 14 777–14 784.
+[40] J. Xing, L. Bauersfeld, Y . Song, C. Xing, and D. Scaramuzza, “Con-
+trastive learning for enhancing robust scene transfer in vision-based
+agile flight,” in 2024 IEEE International Conference on Robotics and
+Automation (ICRA), 2024, pp. 5330–5337.
+[41] B. Xu, F. Gao, C. Yu, R. Zhang, Y . Wu, and Y . Wang, “Omnidrones:
+An efficient and flexible platform for reinforcement learning in drone
+control,” IEEE Robotics and Automation Letters, vol. 9, no. 3, pp. 2838–
+2844, 2024.
+[42] T. He, C. Zhang, W. Xiao, G. He, C. Liu, and G. Shi, “Agile but safe:
+Learning collision-free high-speed legged locomotion,” in Robotics:
+Science and Systems (RSS) , 2024.
+[43] Z. Xu, X. Zhan, Y . Xiu, C. Suzuki, and K. Shimada, “Onboard dynamic-
+object detection and tracking for autonomous robot navigation with rgb-d
+camera,” IEEE Robotics and Automation Letters , vol. 9, no. 1, pp. 651–
+658, 2024.
+[44] H. Oleynikova, D. Honegger, and M. Pollefeys, “Reactive avoidance
+using embedded stereo vision for mav flight,” in 2015 IEEE Interna-
+tional Conference on Robotics and Automation (ICRA) . IEEE, 2015,
+pp. 50–56.
+[45] P.-W. Chou, D. Maturana, and S. Scherer, “Improving stochastic policy
+gradients in continuous control with deep reinforcement learning using
+the beta distribution,” in International conference on machine learning .
+PMLR, 2017, pp. 834–843.
+[46] J. Van Den Berg, S. J. Guy, M. Lin, and D. Manocha, “Reciprocal n-
+body collision avoidance,” in Robotics Research: The 14th International
+Symposium ISRR. Springer, 2011, pp. 3–19.
+[47] W. Xu, Y . Cai, D. He, J. Lin, and F. Zhang, “Fast-lio2: Fast direct lidar-
+inertial odometry,” IEEE Transactions on Robotics , vol. 38, no. 4, pp.
+2053–2073, 2022.
+[48] X. Zhou, Z. Wang, H. Ye, C. Xu, and F. Gao, “Ego-planner: An esdf-
+free gradient-based local planner for quadrotors,” IEEE Robotics and
+Automation Letters, vol. 6, no. 2, pp. 478–485, 2020.

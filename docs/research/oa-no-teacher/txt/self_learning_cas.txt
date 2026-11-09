@@ -1,0 +1,431 @@
+Thesis for Master’s Degree 
+Learning Through Experience: 
+A Self-Learning Collision Avoidance System 
+Hyunjun Han 
+School of Electrical Engineering and Computer Science 
+Gwangju Institute of Science and Technology 
+2018 
+ 
+ 
+ 
+ 
+ 
+Learning Through Experience:  
+A Self-Learning Collision Avoidance System 
+경험을 통한 학습: 
+자가학습 기반의 충돌 회피 시스템 
+ 
+Learning Through Experience :
+A Self-Leaming Collision Avoidance System
+Advisor : Professor Heung-No Lee
+By
+Hyunjun Han
+Graduate: School of Electrical Engineering and Computer Science
+Gwangju Institute of Science and Technology
+A  thesis  submitted  to  the  faculty  of the  Gwanalu  Institute  of  Science  and
+Technology in partial fulfillment of the requirements for the degree of Master of
+Science in the School of Electrical Engineering and Computer Science
+Gwangju, Republic of Korea
+2017.11.  30
+Committee Chair
+
+Learning Through Experience :
+A Self-Leaming Collision Avoidance System
+Hyunjun Ham
+Accepted in partial fulfillment of the requirements for the
+degree of Master of Science
+11.  30.  2017
+Committee Chair
+Committee Member
+Committee Member
+
+i
+ 
+Abstract 
+Collision avoidance, or obstacle avoidance, is a fundamental problem dealt in autonomous navigation that 
+allows unmanned vehicles , such as UA V s, to perform tasks in unknown environment s. In this paper, we 
+introduce simple and effective deep  learning based collision avoidance  that does not require any pre -acquired 
+training dataset for learning . We take a method based on experiencing adverse events, or events that must not be 
+repeated in the future. This is accompanied by an online, self -learning algorithm combining the concept of both 
+reinforcement learning and supervised learning  that allows UA V to gain experiences and learn by itself . 
+Through taking both learning mechanism approach, we make agent learn fast that does not require any human 
+efforts into gathering and labelling of training dataset. In the algorithm, two procedures are performed during its 
+training phase; data gathering procedure and learning procedure. We run simulation tests on its effectiveness in 
+its learning rates and its le arning performance. Simulation results show that our system can achieve minimum of 
+99.25% up to 100% accuracy in classifying collision event from all possible events, allowing UA V to freely fly 
+without collision in simulated unknown environments. 
+MS/EC 
+20161107 
+Hyunjun Han (한현준). Lea rning Thr ough Exp  erience: A Self-Learning Collision Avoidance 
+System (경험을 통한 학습: 자가학습 기반의 충돌 회피 시스템). School of Electrical 
+Engineering and Computer Science. 2018. 36p. Prof. Heung-No Lee 
+ii
+ⓒ2018
+Hyunjun Han 
+ALL RIGHTS RESERVED
+ iii 
+Contents 
+ 
+Abstract ................................................................................................................................................................... i 
+Contents ................................................................................................................................................................ iii 
+List of Figures ....................................................................................................................................................... iv 
+List of Tables ......................................................................................................................................................... v 
+1. Introduction ................................................................................................................................................... 1 
+1.1 Motivation .............................................................................................................................................. 1 
+1.2 Thesis Outline ........................................................................................................................................ 1 
+2. Prerequisite Knowledge ................................................................................................................................ 2 
+2.1 Machine Learning .................................................................................................................................. 2 
+2.2 Supervised Learning .............................................................................................................................. 4 
+2.3 Reinforcement Learning......................................................................................................................... 6 
+2.4 Deep Learning ........................................................................................................................................ 8 
+2.4.1 CNN ............................................................................................................................................... 9 
+2.4.2 DQN ............................................................................................................................................. 11 
+2.4.3 RNN ............................................................................................................................................. 14 
+3. Related Works ............................................................................................................................................. 17 
+3.1 Collision Avoidance using Supervised Learning ................................................................................. 17 
+3.2 Collision Avoidance using Reinforcement Learning ........................................................................... 18 
+4 Proposed Method ........................................................................................................................................ 19 
+4.1 Problem Description ............................................................................................................................ 19 
+4.2 Model Selection ................................................................................................................................... 19 
+4.3 Input and Output Data Processing ........................................................................................................ 19 
+4.4 Learning Procedure .............................................................................................................................. 21 
+5 Simulation and Results ................................................................................................................................ 24 
+5.1 Experimental Setups ............................................................................................................................ 24 
+5.2 Flight Environment Design .................................................................................................................. 24 
+5.3 UAV Setting ......................................................................................................................................... 24 
+5.4 Training ................................................................................................................................................ 25 
+5.5 Testing and Results .............................................................................................................................. 27 
+6. Conclusion .................................................................................................................................................. 32 
+6.1 Summary .............................................................................................................................................. 32 
+6.2 Future Works ....................................................................................................................................... 32 
+7. References ................................................................................................................................................... 33 
+8. Acknowledgements ..................................................................................................................................... 36 
+ iv 
+List of Figures 
+ 
+Figure 1     Machine learning and its types. ...................................................................................................... 2 
+Figure 2     Example of supervised learning: Facial recognition. ...................................................................... 4 
+Figure 3     Examples of linear and polynomial regre.ssion .............................................................................. 7 
+Figure 4     Architecture of LeNet-5. ................................................................................................................. 9 
+Figure 5     Visualization of AlexNet. ............................................................................................................. 11 
+Figure 6     Atari 2600 games for DQN testbed. ............................................................................................. 12 
+Figure 7     DQN architecture based on a convolutional neural network ........................................................ 14 
+Figure 8     RNN structure ............................................................................................................................... 15 
+Figure 9     LSTM memory block ................................................................................................................... 15 
+Figure 10    Example of a network for collision avoidance system using CNN............................................... 17 
+Figure 11    Deep reinforcement learning example of a collision avoidance system ....................................... 18 
+Figure 12    Interaction between agent and environment of proposed system ................................................. 20 
+Figure 13    Simulation process and its corresponding input to LSTM ............................................................ 21 
+Figure 14    Simulated flight environment ....................................................................................................... 24 
+Figure 15    Number of movements vs learning iterations ............................................................................... 26 
+Figure 16    Accumulated movement vs learning iterations ............................................................................. 26 
+Figure 17    Precision, recall, and accuracy vs learning iterations ................................................................... 28 
+Figure 18    Number of misclassifications vs learning iterations ..................................................................... 30 
+Figure 19    Flight environment for destination reaching application .............................................................. 33 
+Figure 20    Path travelled using trained model ................................................................................................ 33 
+ 
+  
+ v 
+List of Tables 
+ 
+Table 1     Algorithm 1. Q-learning. .................................................................................................................. 7 
+Table 2     Algorithm 2. Deep Q-learning with Experience Replay. ............................................................... 33 
+Table 3     Adverse event based learning procedure ........................................................................................ 23 
+Table 4     Accuracy result after 50 iterations. ................................................................................................ 29
+ 1 
+1. Introduction 
+1.1 Motivation 
+From military, commercial, to personal uses, Unmanned Aerial Vehicles (UAVs), with its growing 
+popularity, are proven to be extremely beneficial in accomplishing tasks within places unreachable by man. 
+Especially with the aid of rapidly growing deep learning te chniques, UAV related technologies are actively 
+being developed that increases its potential to be used as an effective tool. Among those is collision avoidance, 
+or obstacle avoidance, which is a fundamental system that ensures UAVs to autonomously fly wit hout user 
+controls and perform tasks in unknown environments.  
+In this paper, we propose a new deep learning based collision avoidance system that learns by itself  and 
+can adapt to any environments using a  single simulated depth sensor . We achieve this thr ough a learning 
+algorithm that combines advantages of both supervised learning  and reinforcement learning  that ultimately 
+allows agent to interact with its environment, gather data, and train throughout its learning procedure without 
+requiring any pre-acquired training dataset. As a result, we achieved high accuracy in avoiding collision within 
+simulated environments using an LSTM network. 
+ 
+ 
+1.2 Thesis Outline 
+The rest of the paper will be organized as follows:  
+In Chapter 2, prerequisite knowledges regarding the types of machine learning related to the proposed 
+system will be discussed to help readers better understand the context. Supervised learning, reinforcement 
+learning, and deep learning will be introduced along with some examples. Deep learning will be categorized 
+into three sub -sections, namely Convolutional Neural Network, Deep Q -learning Network, and Recurrent 
+Neural Network. 
+Chapter 3 will briefly discuss about related works regarding the proposed system with respect to two types 
+of machine learning approach; supervised learning and reinforcement learning.  
+In Chapter 4 and 5, the proposed collision avoidance system, simulatio n, and its result will be discussed in 
+detail. 
+In Chapter 6, we will conclude with summary and future work.  
+ 2 
+2. Prerequisite Knowledge 
+2.1  Machine Learning 
+Machine Learning  is “a field of study that gives computers the ability to learn without explicitly 
+programmed.” This definition was stated  by an American pioneer in the field of computer gaming and artificial 
+intelligence, Arthur Samuel, who coined the term “machine learning” in 1959 [1]. Tom M. Michell, a former 
+Chair of the Machine Learning Department at CMU, quoted that a computer program is said to learn from 
+experience E with respect to some task T and some performance measure P, if its performance on T, as 
+measured by P, improves with experience E [2]. As such, machine learning is a study that evolved from the 
+study of pattern recognition and computational learning theory in artificial intelligence that seeks constructions 
+of algorithms that can learn and make predictions on data [3].  
+ 
+Fig. 1. Machine learning and its types. 
+Machine learning in general can be divided into three types. First one is supervised, or predictive, learning . 
+In this approach, the goal is to map input x into output y in a given input pairs
+1{( , )} N
+i i iD x y  , where D is a 
+training set and N is the number of training examples. As a simple example, input xi in each training set is a 
+number of D -dimensional vector, and, say, it represents a man ’s height and weight. This is called features, 
+attributes, or covariates. However, in general, x i can be into a form of complicated structured instances, such an 
+
+ 3 
+image, a sentence, e -mail message, sequential data, or even graphs. Similarly, the output form  yi, or response 
+variable, theoretically can be in any format, but in most cases is limited to a set of categorical or nominal 
+variables such that 
+{ 1, , }iyC
+ . If yi is in the form of scalar or categorical variable, the problem is defined 
+to be classification or pattern recognition problem, where as it is considered as a regression problem if yi is in a 
+form of real numbers . As another variant form, ordinal regression is labelling given inputs into different ranks, 
+such as A through F, within the label space Y that has a natural ordering property. 
+Second type of machine learning is known as unsupervised, or descriptive, learning. In this approach, only 
+the input 
+1{} N
+iiDx  is given without any wanted outputs yi, and the goal is to discover “interesting patterns” 
+among the given input data. This can be referred as a knowledge discovery. Because the resulting pattern from 
+unsupervised learning is often unpredictable and cannot be predefined, this area is still in the progress of being 
+defined, and thus, no accurate  measurement, or metric, for error exists yet (Unlike supervised learning, 
+produced output y of given x cannot be mapped to predicted output to measure error). Unsupervised learning has 
+not been used in this research, and thus will not be further discussed in this paper. 
+The last type of machine learning is reinforcement learning. This approach uses a method of giving reward 
+or negative reward that is especially effective at making agent learn to take specific actions at its environment.  
+The biggest differe nce between supervised learning is that there exists no correct input and output pairs nor 
+corrections on sub-optimal actions that agent takes. The only attempt made in reinforcement learning is finding 
+a policy that can map the environment states to actions that learning agent should take in those states that 
+ultimately lead to maximization of future reward.  
+In the following sub -chapters, supervised learning, r einforcement learning, and deep learning will be 
+discussed in detail as a prerequisite knowledge to help readers understand the rest of the paper regarding the 
+main contribution of the paper, a self -learning approach in making agent learn to avoid collisio n using concept 
+from both supervised and reinforcement learning. 
+ 
+ 
+ 4 
+2.2  Supervised Learning 
+According to S.B. Kotsiantis [4], the goal of supervised learning is to build a concise model of the 
+distribution of class labels in terms of predictor features, where the term supervised means to have each 
+instances of training data be labelled in contrast to unsupervised learning where instances are not labelled. It is 
+the most common form of machine learning that is widely used and applied in many fields , and is divided into 
+two problems; classification and regression.  
+In classification problem of supervised learning, the goal is to map input x to output y, 
+{ 1, , }yC
+  
+where C indicates the number of classes. If C = 2, it is referred to as a binary classification problem, and often 
+denoted as 
+{0,1 }y . If C > 2, it is called multiclass classification, or multi -label classification if the labels 
+are mutually exclusive. The problem to classification is often approached using function approximation. For an 
+unknown function f, we assume y=f(x), and by using 
+ˆˆ ()y f x , the goal of learning is to predict f, a function 
+of training set that contains all labels, Thus, we want a generalization to an input that has not been seen in 
+training set through predictions on learnt training sets. 
+How is classification used in real li fe? Some of the applications to classification are categorizing 
+documents and email spam filtering, classification of dogs according to its different body size, color, and breed, 
+and recognition of hand written numbers, such as using MNIST (Modified Nation al Institute of Standards). 
+Recent advances in machine learning with the aid of deep learning techniques, which will be discuss in the 
+proceeding subchapters, has allowed facial recognition which is accurate as 97.35% on the Labeled Faces in the 
+Wild (LFW) dataset in 2014 [5].  
+ 
+Fig. 2. An example of supervised learning. Wolf et al. [5] achieved 97.35% accuracy in facial recognition in 
+2014 using deep learning. 
+
+ 5 
+Regression, the oth er part of supervised learning, is similar to classification other than the continuity of 
+response variable. Fig. 3 shows a diagram tha t shows a difference between different regressions where the input 
+of a single real number is 
+ix 
+ , and the response to a single real number is 
+iy 
+ . These simple 
+problems have multi-dimensional input, singular value, non -smooth response that can be expanded into various 
+forms.  
+ 
+Fig. 3. (a) Linear regression of a 1-D data. (b) Polynomial regression on the same data. 
+The followings are real regression problems that occur in real life. 
+ Estimation of future stock price given current stock price along with side information.  
+ Estimation of probability of economic growth given past data regarding financial information and 
+population. 
+ Estimation of average age of subscribed members of a specific Youtube channel given a portion of 
+user information. 
+ Estimation of temperature within a building given weather information  and number of people 
+inside. 
+Advantages and disadvantages of supervised learning can be as follows.  
+Advantages:  
+ Specific definition of classes, that is the pairs of input and output, results into clear decision 
+boundary that can distinguish different classes accurately after training process. 
+
+ 6 
+ Number of classes that can explicitly be determined by the user 
+Disadvantages: 
+ Overtraining that result into overfitting . Overfitting is the production of an analysis that 
+corresponds too closely or exactly to a particular set of data, and may therefore fail to fit 
+additional data or predict future observations reliably . 
+ High dependency on training set. Training set must carefully be selected that can generalize the 
+whole features of data including data that are not available in the training dataset, such as testset.  
+ Large amount of dataset required for training that must also be la belled. This makes creation of 
+training dataset a very time-consuming and laborious work. 
+ 
+2.3  Reinforcement Learning 
+Reinforcement learning is another type of learning in which the training information provided to the 
+learning system by the environment is in  the form of a scalar signal  (reinforcement signal)  that measures how 
+well the system operates through discovering actions that maximizes future reward without explicitly being told 
+which actions to take [4]. Simply, reinforcement learning allows agents to determine the ideal behavior by itself 
+within a specific context to maximize its performance through feedback from its interacting environment. This 
+environment is typically formulated as MDP, which also known as Markov Decision Process, which can be 
+described as a discrete time stochastic control process. In detail, MDP is a 5 -tuple process 
+( , , , , )S A r P  , and 
+at time t, the system is in state 
+tsS , the agent chooses an action 
+taA , resulting the system transfer to a 
+new state st+1, and a corresponding reward 
+( , )ttr s a  is given to the agent with new state st+1 randomized 
+according to a transition probability function, 
+( | , )ttP s a  [6]. Thus, the agen t’s goal is to maximize 
+cumulative reward 
+1
+0
+n
+t
+tt
+t
+Rr  
+
+ , where 
+(0,1]   is a discount factor , by choosing a policy 
+ , a 
+function that specifies the action 
+ (s) that the agent will choose during state s.  
+ 7 
+Q-learning is one of a model -free reinforcement learning that can be used for finding an MDP ’s optimum 
+policy, defined by,  
+11( , ) ( , ) [ max ( , ) ( , )]t t t t t t t t a
+Q S A Q S A R Q S a Q S A    
+. 
+In Q-learning, a Q function that predicts the expected reward result ing from taking an action at current state is 
+optimized thereby learning the optimal policy
+ , also known as action -value function denoted as 
+1
+0
+( , ) [ | , ] { | , } k
+t t t t k t t
+k
+Q s a E R s s a a E r s s a a 
+
+
+
+
+      
+. Table 1 shows an algorithm for Q -
+learning [7].  
+One advant age of this approach is that no model is required unlike utility learning, another type of 
+reinforcement learning that uses utility function and selects actions that maximize expected utility. However, 
+agent can only have shallow knowledge due to limited a ccess to future data and its restriction on its ability  to 
+learn, which is only through s.  
+ 
+TABLE I 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Algorithm 1 Q-learning. 
+Initialize Q(s,a,), 
+, ( )s S a A s   , arbitrarily, and Q(terminal-state,〮)=0 
+For each episode: 
+Initialize s 
+for each step of episode: 
+                   Choose action a from s using policy derived from Q 
+Take action a, observe r, 
+s  
+Q(s,a)  
+( , ) [ max ( , ) ( , )]aQ s a r Q s a Q s a      
+ss 
+ 
+          Until s is terminal 
+ 8 
+Reinforcement learning results into an automated procedure that allows a trial and error learning which 
+selects actions based on its past experiences as well as making new decisions, thus achieving both exploitation 
+and exploration throughout the learning process. One advantage over supervised learning is that learning 
+process does not require user’s involvement throughout learning process as opposed to supervised learning, and 
+therefore requires  less manual laborious work, such as gathering of training dat a and labelling work . 
+Reinforcement Learning combined with deep learning techniques has been one of the most promising 
+researches recently and will be discussed in the following chapter.  
+ 
+2.4  Deep Learning 
+Deep learning is a class of machine learning algorit hms and is based on learning data representations. Deep 
+learning can be defined with following characteristics [8]. 
+ Cascade of multiple layers of nonlinear processing units, which is used for feature extraction and 
+transformation, where each successive layer uses previous layer’s output as input. 
+ Can learn through supervised, unsupervised, and reinforcement learning methods.  
+ Learn multiple levels of representations that correspond to different levels of abstraction. 
+ Training done through loss functions, such as Stochastic Gradient Descent, for backpropagation 
+that calculates distance between ground truth and predicted value. 
+Deep learning architecture is a multilayer stack of simple modules which all constitute to learning and 
+computing non -linear input -output mappings. With a collection of multiple non -linear layers, a system can 
+implement extremely intricate functions from its inputs to distinguish even the extremely sensitive subjects [9].  
+Deep learning is unique in a way that it ’s performance depends on how a machine should change its 
+internal parameters in the discovery process of intricate structure in large dataset through back -propagation 
+process. Thus, layers of features are not designed by man, but learnt through general -purpose learning, or 
+feature learning, procedure.  
+ 9 
+Founding father of convolutional nets, Yann LeCun, in his paper [9] states that deep learning is a technique 
+that brought breakthroughs in processing image s, videos, speech and audio using deep convolutional nets, and 
+have shone light on sequential data such as text and speech using recurrent nets. In the following section s, 
+convolutional neural network, deep q-learning network, and recurrent neural network will briefly be explained. 
+2.4.1 CNN 
+Convolutional Neural Network (CNN) [10] is a network inspired by the natural visual perception 
+mechanism of t he living creatures [11] designed to effectively process high dimensional  data which can be 
+expressed in the form of multiple array such as 3 color channeled RGB images. It is  a multi -layer artificial 
+neural network that can obtain effective representations of the original image and recognize patterns within 
+directly via raw pixels through backpropagation algorithm [12]. Fig. 4 shows a typical example of a 
+Convolutional Neural Network, LeNet-5, one of the first of its kind that could classify handwritten digits [13].  
+ 
+Fig. 4 . Architecture of LeNet -5 proposed in 1998 by Yann LeCun , a Convolutional Neural 
+Network for handwritten digit classification.  
+As shown in the figure, CNN is composed of three types of layers; convolutional, pooling, and fully -
+connected layers, and through these layers, the network learns feature representations of its input data, which are 
+training sets , by repeatedly passing through convolution layer and pooling layer . The resulting feature maps 
+starts first with basics such as representation of edges, followed through by arrangements of edges, and the third 
+layer may assemble motifs into larger combinations that represent part of familiar objects. The point is those 
+subsequent layers show combinations of parts that have been learnt in the previous layers, and that these are not 
+engineered intentionally by human hands, but through input data ’s general -purpose learning [9]. AlexNet, 
+proposed by Krizhevsky et al. in 2012  [14], is  a simple structured CNN similar to that of LeNe t-5 but with 
+addition to using 2 GPUs, dropout technique, and ReLU . Their proposed architecture  achieved breakthrough in 
+
+ 10 
+the area of image classification at ImageNet Large -Scale Visual Recognition Challenge, ILSVRC-2012, with 
+accuracy of top-5 error rate of 15.3%, bringing spotlight to the power of deep learning and convolutional neural 
+network to the world. Fig. 5 is a visualization of AlexNet of each feature map after subsequent layers which are 
+designed by the network. Note that there exists strong grou ping within each feature map, greater invariance at 
+higher layers, and exaggeration of discriminative parts of the image [15].  
+Since then, outstanding achievements using Convolutional Neural Networks have been proposed, setting 
+new records ever y following ILSVRC challenge s. Some examples include ZFNet, VGGNet [16], GoogLeNet 
+[17], ResNet [18] that achieved performance of top -5 error rate of 11.7%, 7.3%, 6.7%, and 3.57% accordingly. 
+As such, CNN have been developed to deeper and more complicated network structures that succeeds human ’s 
+performance, approximated to be 5%, in 2015.  
+However, it must be noted that Convolutional Neural Networks have  thousands to millions of free 
+parameters to train and deep, complicated network structure. Therefore, it is necessary to have high -
+performance Graphical Processing Unit (GPU) to perform computation heavy training process and large training 
+data that can be accommodated to fully train is required, not to mention the long period of time it takes to fully 
+train them.  
+ 11 
+ 
+Fig. 5. Work of Matthew D. Zeiler et. al on visualization of feature maps of AlexNet. 
+ 
+2.4.2 DQN 
+Also known as Deep Q-Network (DQN), this new deep learning technique is a combination of Q-learning, 
+mentioned in Section 2.3, and Convolutional Neural Network , and was proposed in the 2013 by Minh, V ., et al 

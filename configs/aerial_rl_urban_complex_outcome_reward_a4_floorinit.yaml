@@ -1,0 +1,37 @@
+# A4 · 换设定再试结果奖励（2026-09-24）：不拧 p/c，换 INIT + 更温和 FT。
+# - INIT = 关罩下限 directional_oa 022358 best_sr2（非 hbclear）
+# - 奖励 = 温和 A′（p2/c2/s15），press/center/curiosity=0
+# - v4 lr 减半，减轻毁下限能力
+reward:
+  w_progress: 2.0
+  w_collision: 2.0
+  success_bonus: 15.0
+  success_dist_m: 3.0
+  w_maneuver: 0.01
+  w_intervention: 0.0
+  w_press_wall: 0.0
+  w_clearance_center: 0.0
+  w_curiosity: 0.0
+  w_straight: 0.0
+  w_idle_body: 0.0
+  w_away: 1.0
+  w_level_flight: 0.0
+  w_backward: 5.0
+  w_descent: 1.5
+  w_eff_strafe: 0.0
+  w_eff_heading: 0.0
+  w_eff_idle: 0.0
+  forbid_backward_motion: true
+  gate_progress_by_heading: true
+  use_learned_obstacle_cost: true
+  blend_clearance_risk: true
+
+v4:
+  actor_lr: 5.0e-5
+  critic_lr: 5.0e-5
+
+planner:
+  enable: false
+
+safety:
+  kind: null

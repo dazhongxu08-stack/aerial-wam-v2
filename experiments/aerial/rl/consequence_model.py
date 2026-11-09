@@ -103,7 +103,8 @@ class ConsequenceModel(nn.Module):
     def __init__(self, horizon: int = 10, hidden: int = 256, dropout: float = 0.0,
                  frame_offsets: Tuple[int, ...] = (0,), hist_actions: int = 0,
                  sem_channels: int = 0, env_dim: int = 0, env_hidden: int = 64,
-                 env_drop: float = 0.0) -> None:
+                 env_drop: float = 0.0, view_memory_dim: int = 0, view_span: int = 10,
+                 pose_scene_dim: int = 0, scene_pose_dim: int = 0) -> None:
         super().__init__()
         self.horizon = int(horizon)
         self.hidden = int(hidden)
@@ -113,6 +114,10 @@ class ConsequenceModel(nn.Module):
         self.env_dim = int(env_dim)
         self.env_hidden = int(env_hidden) if self.env_dim else 0
         self.env_drop = float(env_drop)
+        self.view_memory_dim = int(view_memory_dim)
+        self.view_span = int(view_span)
+        self.pose_scene_dim = int(pose_scene_dim)
+        self.scene_pose_dim = int(scene_pose_dim)
         self.enc = nn.Sequential(
             nn.Conv2d(len(self.frame_offsets) + self.sem_channels, 32, 5, 2, 2), nn.SiLU(),
             nn.Conv2d(32, 64, 3, 2, 1), nn.SiLU(),
@@ -126,8 +131,24 @@ class ConsequenceModel(nn.Module):
         if self.env_dim:
             self.env_proj = nn.Sequential(nn.LayerNorm(self.env_dim), nn.Dropout(float(dropout)),
                                           nn.Linear(self.env_dim, self.env_hidden), nn.SiLU())
+        if self.view_memory_dim:
+            from experiments.aerial.rl.view_memory import ViewMemory
+            self.view_memory = ViewMemory(self.view_memory_dim, self.view_span)
+        if self.pose_scene_dim:
+            # 32x32 body grid -> 4x4, then a bias-free read. An empty grid stays zero.
+            self.scene_enc = nn.Sequential(
+                nn.Conv2d(2, 16, 3, 2, 1, bias=False), nn.SiLU(),
+                nn.Conv2d(16, 32, 3, 2, 1, bias=False), nn.SiLU(),
+                nn.Conv2d(32, 32, 3, 2, 1, bias=False), nn.SiLU(),
+                nn.Flatten(),
+                nn.Linear(32 * 4 * 4, self.pose_scene_dim, bias=False),
+            )
+        if self.scene_pose_dim:
+            from experiments.aerial.rl.scene_pose import SceneHazard, ScenePoseMemory
+            self.scene_pose = ScenePoseMemory(self.scene_pose_dim, hidden)
+            self.scene_hazard = SceneHazard(hidden, self.scene_pose_dim)
         self.ctx = nn.Linear(hidden + 4 + 4 + 4 * self.hist_actions + (1 if self.sem_channels else 0)
-                             + self.env_hidden, hidden)
+                             + self.env_hidden + self.view_memory_dim + self.pose_scene_dim, hidden)
         self.act_in = nn.Linear(4, 64)
         self.gru = nn.GRU(64, hidden, batch_first=True)
         self.head = nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(),
@@ -143,6 +164,12 @@ class ConsequenceModel(nn.Module):
         sem: Optional[torch.Tensor] = None,
         keep_radius: Optional[torch.Tensor] = None,
         env: Optional[torch.Tensor] = None,
+        memory: Optional[torch.Tensor] = None,
+        scene: Optional[torch.Tensor] = None,
+        scene_depth: Optional[torch.Tensor] = None,
+        scene_state: Optional[torch.Tensor] = None,
+        body_state: Optional[torch.Tensor] = None,
+        scene_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """depth [B,56,56] or [B,K,56,56] (``depth_input``), goal [B,4], actions in limit units.
 
@@ -151,6 +178,22 @@ class ConsequenceModel(nn.Module):
         only by a ``sem_channels`` model; missing means no object / ``DEFAULT_KEEP_RADIUS_M``.
         ``env`` [B,env_dim] is the depth head's encoder scene vector (``da3_env_vector``),
         read only by an ``env_dim`` model; missing means the same as a dropped vector.
+        ``memory`` [B,view_memory_dim] is the recurrent view state. It is read only
+        by a ``view_memory_dim`` model, and only by survival. Missing means a zero
+        state, which leaves hazard / cones / dgoal unchanged while the new context
+        columns stay at zero.
+        ``scene`` [B,2,32,32] is the seen depth placed in the current body frame.
+        It is read only by a ``pose_scene_dim`` model, and only by survival.
+        Missing means an empty grid. While the new context columns stay at zero,
+        the grid does not change hazard / cones / dgoal.
+        ``scene_depth`` ``[B,T,56,56]`` and ``scene_state`` ``[B,T,7]`` are the
+        stored views and the poses they were taken from. ``body_state`` ``[B,7]``
+        is the current pose, used only to place those cameras in the body frame.
+        Read only by a ``scene_pose_dim`` model. A stored view that matches the
+        current depth from the same pose contributes nothing. The read changes
+        the hazard logit at each action step and leaves cones and dgoal unchanged.
+        Missing records leave the hazard unchanged. ``scene_mask`` ``[B,T]`` is
+        false on a padded slot; those slots are not read.
         """
         lim = torch.as_tensor(LIMITS, device=actions.device)
         x = depth.unsqueeze(1) if depth.dim() == 3 else depth
@@ -174,6 +217,49 @@ class ConsequenceModel(nn.Module):
                 if self.training and self.env_drop > 0:
                     e = e * (torch.rand(e.shape[0], 1, device=e.device) >= self.env_drop).to(e.dtype)
             ctx.append(e)
+        if self.view_memory_dim:
+            if memory is None:
+                mem = f.new_zeros((f.shape[0], self.view_memory_dim))
+            else:
+                mem = memory.to(f.dtype)
+                if mem.dim() == 1:
+                    mem = mem.unsqueeze(0)
+                if mem.shape[0] == 1 and f.shape[0] > 1:
+                    mem = mem.expand(f.shape[0], -1)
+            ctx.append(mem)
+        if self.pose_scene_dim:
+            if scene is None:
+                seen = f.new_zeros((f.shape[0], self.pose_scene_dim))
+            else:
+                grid = scene.to(f.dtype)
+                if grid.dim() == 3:
+                    grid = grid.unsqueeze(0)
+                if grid.shape[0] == 1 and f.shape[0] > 1:
+                    grid = grid.expand(f.shape[0], -1, -1, -1)
+                seen = self.scene_enc(grid)
+            ctx.append(seen)
+        posed = None
+        cur_depth = None
+        if self.scene_pose_dim:
+            cur_depth = (depth if depth.dim() == 3 else depth[:, 0]).to(dtype=f.dtype)
+            if scene_depth is None or scene_state is None or body_state is None:
+                posed = f.new_zeros((f.shape[0], self.scene_pose_dim))
+            else:
+                frames = scene_depth.to(f.dtype)
+                seen = scene_state.to(f.dtype)
+                now = body_state.to(f.dtype)
+                if frames.shape[0] == 1 and f.shape[0] > 1:
+                    frames = frames.expand(f.shape[0], -1, -1, -1)
+                    seen = seen.expand(f.shape[0], -1, -1)
+                    now = now.expand(f.shape[0], -1)
+                mask = None
+                if scene_mask is not None:
+                    mask = scene_mask.to(torch.bool)
+                    if mask.dim() == 1:
+                        mask = mask.unsqueeze(0)
+                    if mask.shape[0] == 1 and f.shape[0] > 1:
+                        mask = mask.expand(f.shape[0], -1)
+                posed = self.scene_pose(f, cur_depth, frames, seen, now, mask)
         h0 = torch.tanh(self.ctx(torch.cat(ctx, dim=-1)))
         out, _ = self.gru(F.silu(self.act_in(actions / lim)), h0.unsqueeze(0))
         y = self.head(out)
@@ -184,7 +270,20 @@ class ConsequenceModel(nn.Module):
         }
         if self.sem_channels:
             res["keepout_logit"] = y[..., 5]
+        if self.scene_pose_dim:
+            delta = self.scene_hazard(out, posed)
+            res["hazard_logit"] = res["hazard_logit"] + delta
+            res["scene_delta"] = delta
         return res
+
+    def remember(self, depth_seq: torch.Tensor) -> torch.Tensor:
+        """Recurrent view state after the newest frame. Depth is ``depth_input`` units.
+
+        ``depth_seq`` is [S,56,56] or [B,S,56,56]. The decoder is not run.
+        """
+        if not self.view_memory_dim:
+            raise RuntimeError("this checkpoint has no view memory")
+        return self.view_memory.encode_state(depth_seq)
 
 
 def altitude_allowed(
@@ -306,7 +405,7 @@ def mirror_batch(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
 
 
 def consequence_loss(out: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor],
-                     keepout_weight: float = 2.0) -> Tuple[torch.Tensor, Dict[str, float]]:
+                     keepout_weight: float = 2.0, hazard_pos_weight: float = 1.0) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Hazard / cones / dgoal, plus keep-out when the batch carries ``keepout_synth`` labels.
 
     Once a trajectory enters a synthetic keep-out zone the logged physics no
@@ -323,12 +422,15 @@ def consequence_loss(out: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor
         alive = alive * before
         valid = valid * before
         cone_valid = cone_valid * (1.0 - batch["ko_obj"])[:, None]
-    hz = F.binary_cross_entropy_with_logits(out["hazard_logit"], batch["hit"], reduction="none")
+    pos_weight = out["hazard_logit"].new_tensor(float(hazard_pos_weight))
+    hz = F.binary_cross_entropy_with_logits(
+        out["hazard_logit"], batch["hit"], reduction="none", pos_weight=pos_weight)
     hz = (hz * alive).sum() / alive.sum().clamp(min=1.0)
     cone = F.smooth_l1_loss(out["log_cones"], batch["log_cones"], reduction="none").mean(-1)
     cone = (cone * cone_valid).sum() / cone_valid.sum().clamp(min=1.0)
     dg = F.smooth_l1_loss(out["dgoal"] / DGOAL_SCALE_M, batch["dgoal"] / DGOAL_SCALE_M, reduction="none")
-    dg = (dg * valid).sum() / valid.sum().clamp(min=1.0)
+    dg_m = batch["dgoal_valid"] if "dgoal_valid" in batch else valid
+    dg = (dg * dg_m).sum() / dg_m.sum().clamp(min=1.0)
     total = 2.0 * hz + cone + dg
     parts = {"hazard": float(hz.detach()), "cones": float(cone.detach()), "dgoal": float(dg.detach())}
     if has_ko:
@@ -536,6 +638,9 @@ def save_checkpoint(path: Path, model: ConsequenceModel, extra: Optional[Dict[st
                 "arch": "dropout_v2", "frame_offsets": list(model.frame_offsets),
                 "hist_actions": model.hist_actions, "sem_channels": model.sem_channels,
                 "env_dim": model.env_dim, "env_hidden": model.env_hidden, "env_drop": model.env_drop,
+                "view_memory_dim": model.view_memory_dim, "view_span": model.view_span,
+                "pose_scene_dim": model.pose_scene_dim,
+                "scene_pose_dim": model.scene_pose_dim,
                 **(extra or {})}, str(path))
 
 
@@ -555,7 +660,11 @@ def load_checkpoint(path: Path, device: str = "cpu") -> ConsequenceModel:
                          sem_channels=int(p.get("sem_channels", 0)),
                          env_dim=int(p.get("env_dim", 0)),
                          env_hidden=int(p.get("env_hidden", 64) or 64),
-                         env_drop=float(p.get("env_drop", 0.0)))
+                         env_drop=float(p.get("env_drop", 0.0)),
+                         view_memory_dim=int(p.get("view_memory_dim", 0)),
+                         view_span=int(p.get("view_span", 10)),
+                         pose_scene_dim=int(p.get("pose_scene_dim", 0)),
+                         scene_pose_dim=int(p.get("scene_pose_dim", 0)))
     m.load_state_dict(_checkpoint_state(p))
     return m.to(device).eval()
 
@@ -601,4 +710,101 @@ def load_into_semantic(model: ConsequenceModel, path: Path) -> None:
             new[k] = t
         else:
             raise ValueError(f"cannot expand {k}: {tuple(v.shape)} -> {tuple(t.shape)}")
+    model.load_state_dict(new)
+
+
+def load_into_view_memory(model: ConsequenceModel, path: Path) -> None:
+    """Start a view-memory survival model from a frozen checkpoint that has none.
+
+    The new context columns are zero, so a missing memory state leaves hazard,
+    cones and dgoal unchanged. The recurrent encoder keeps its fresh init.
+    Progress checkpoints are not loaded here.
+    """
+    p = torch.load(str(path), map_location="cpu")
+    if int(p.get("view_memory_dim", 0)) == model.view_memory_dim and model.view_memory_dim:
+        model.load_state_dict(_checkpoint_state(p))
+        return
+    if int(p.get("view_memory_dim", 0)) or not model.view_memory_dim:
+        raise ValueError(f"view_memory_dim {p.get('view_memory_dim', 0)} -> {model.view_memory_dim}")
+    if (model.sem_channels != int(p.get("sem_channels", 0))
+            or model.env_dim != int(p.get("env_dim", 0))
+            or model.hist_actions != int(p.get("hist_actions", 0))
+            or tuple(model.frame_offsets) != tuple(p.get("frame_offsets", (0,)))):
+        raise ValueError("view memory is added on its own, onto the frozen survival checkpoint")
+    old = _checkpoint_state(p)
+    new = model.state_dict()
+    for k, v in old.items():
+        t = new[k]
+        if t.shape == v.shape:
+            new[k] = v
+        elif k == "ctx.weight" and t.shape[1] == v.shape[1] + model.view_memory_dim:
+            t = torch.zeros_like(t)
+            t[:, : v.shape[1]] = v
+            new[k] = t
+        else:
+            raise ValueError(f"cannot expand {k}: {tuple(v.shape)} -> {tuple(t.shape)}")
+    model.load_state_dict(new)
+
+
+def load_into_pose_scene(model: ConsequenceModel, path: Path) -> None:
+    """Start a pose-scene survival model from a frozen checkpoint that has none.
+
+    The new context columns are zero, so an empty body-frame grid leaves
+    hazard, cones and dgoal unchanged. The grid encoder keeps its fresh init.
+    Progress checkpoints are not loaded here.
+    """
+    p = torch.load(str(path), map_location="cpu")
+    if int(p.get("pose_scene_dim", 0)) == model.pose_scene_dim and model.pose_scene_dim:
+        model.load_state_dict(_checkpoint_state(p))
+        return
+    if int(p.get("pose_scene_dim", 0)) or not model.pose_scene_dim:
+        raise ValueError(f"pose_scene_dim {p.get('pose_scene_dim', 0)} -> {model.pose_scene_dim}")
+    if (model.view_memory_dim or int(p.get("view_memory_dim", 0)) or model.scene_pose_dim
+            or model.sem_channels != int(p.get("sem_channels", 0))
+            or model.env_dim != int(p.get("env_dim", 0))
+            or model.hist_actions != int(p.get("hist_actions", 0))
+            or tuple(model.frame_offsets) != tuple(p.get("frame_offsets", (0,)))):
+        raise ValueError("pose scene is added on its own, onto the frozen survival checkpoint")
+    old = _checkpoint_state(p)
+    new = model.state_dict()
+    for k, v in old.items():
+        t = new[k]
+        if t.shape == v.shape:
+            new[k] = v
+        elif k == "ctx.weight" and t.shape[1] == v.shape[1] + model.pose_scene_dim:
+            t = torch.zeros_like(t)
+            t[:, : v.shape[1]] = v
+            new[k] = t
+        else:
+            raise ValueError(f"cannot expand {k}: {tuple(v.shape)} -> {tuple(t.shape)}")
+    model.load_state_dict(new)
+
+
+def load_into_scene_pose(model: ConsequenceModel, path: Path) -> None:
+    """Start a scene-pose survival model from a frozen checkpoint that has none.
+
+    The frozen weights are copied as they are. The scene reader starts fresh,
+    and its hazard term is zero, so missing records leave hazard, cones and
+    dgoal unchanged. Progress checkpoints are not loaded here.
+    """
+    p = torch.load(str(path), map_location="cpu")
+    if int(p.get("scene_pose_dim", 0)) == model.scene_pose_dim and model.scene_pose_dim:
+        model.load_state_dict(_checkpoint_state(p))
+        return
+    if int(p.get("scene_pose_dim", 0)) or not model.scene_pose_dim:
+        raise ValueError(f"scene_pose_dim {p.get('scene_pose_dim', 0)} -> {model.scene_pose_dim}")
+    if (model.view_memory_dim or int(p.get("view_memory_dim", 0))
+            or model.pose_scene_dim or int(p.get("pose_scene_dim", 0))
+            or model.sem_channels != int(p.get("sem_channels", 0))
+            or model.env_dim != int(p.get("env_dim", 0))
+            or model.hist_actions != int(p.get("hist_actions", 0))
+            or tuple(model.frame_offsets) != tuple(p.get("frame_offsets", (0,)))):
+        raise ValueError("scene pose is added on its own, onto the frozen survival checkpoint")
+    old = _checkpoint_state(p)
+    new = model.state_dict()
+    for k, v in old.items():
+        t = new[k]
+        if t.shape != v.shape:
+            raise ValueError(f"cannot copy {k}: {tuple(v.shape)} -> {tuple(t.shape)}")
+        new[k] = v
     model.load_state_dict(new)

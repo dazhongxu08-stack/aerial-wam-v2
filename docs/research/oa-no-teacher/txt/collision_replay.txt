@@ -1,0 +1,1392 @@
+Collision Replay:
+What Does Bumping Into Things Tell You About Scene Geometry?
+Alexander Raistrick, Nilesh Kulkarni, David F. Fouhey
+University of Michigan
+https://araistrick.github.io/collisionreplay
+Abstract
+What does bumping into things in a scene tell you about
+scene geometry? In this paper, we investigate the idea of
+learning from collisions. At the heart of our approach is the
+idea of collision replay, where we use examples of a colli-
+sion to provide supervision for observations at a past time
+step. We use collision replay to train a model to predict
+a distribution over collision time from new observation by
+using supervision from bumps. We learn this distribution
+conditioned on visual data or echolocation responses. This
+distribution conveys information about the navigational af-
+fordances (e.g., corridors vs open spaces) and, as we show,
+can be converted into the distance function for the scene
+geometry. We analyze this approach with an agent that has
+noisy actuation in a photorealistic simulator.
+1. Introduction
+Suppose you bump into something. What does the colli-
+sion reveal? You know your current position is on the edge
+of occupied space, but it is not clear what is known about
+other locations. If you consider where you werek steps ear-
+lier, and replay this observation, there must be ak-step path
+to some obstacle, but this does not rule out a shorter path
+to another obstacle or noise. The goal of this paper is to
+use this strategy of replaying a collision ( Collision Replay)
+to convert the local collision signal to supervision for scene
+geometry for other modalities like vision or sound.
+Of course, considerable effort is usually spent in vision
+and robotics trying to avoid collisions. Approaches range
+from building detailed geometric maps [39, 15, 36], to us-
+ing these maps or other signals to learn depth estimation
+models [8, 46, 13], to learning full-ﬂedged navigation sys-
+tems [14, 45, 7] to everything in the middle. This is because
+a collision on its own is not particularly useful. Indeed, the
+most salient exception to the collision-avoidance trend [11]
+aims to collide only as a way to learn what not to do.
+While we agree that a single collision has limited use on
+its own, we believe that collisions have tremendous value
+Training Time – Collision Time Samples
+Test Time – Predict in Unseen Environments
+…
+…
+(A) Held-out 
+Environment
+(B) Predicted 
+Distribution at point
+(C) Predicted 
+Distance Function
+Figure 1. Our models learn from noisy samples of collisions (red
+crosses) in random walks. While a single collision is uninforma-
+tive, multiple collisions provide signal about scene structure. At
+test time, given an image from an unseen environment and a point
+on the ﬂoor (A), our model estimates a distribution around that
+point conditioned on the heading angle (B) which can be converted
+to a distance function (shown for all points on the ﬂoor in C).
+in larger numbers and when paired with other time-locked
+modalities [38]. The key to unlocking their value, and the
+core insight of our paper, is that one should model the dis-
+tribution of times to collision (often studied in stochastic
+processes [10]), conditioned on other signals. Each indi-
+vidual time to collision is merely a sample from some dis-
+tribution and often an over-estimate of the shortest path to
+an obstacle. However, there is tremendous information in
+the full distribution (e.g., an estimated distribution in Fig. 1
+conditioned on heading angle): the shortest plausible path
+is the distance to the nearest obstacle, and the layout of the
+scene geometry is visible in the distribution.
+We show how to operationalize this idea in Section 3.2.
+arXiv:2105.01061v1  [cs.CV]  3 May 2021
+Given a set of random walks in a simulator, our approach
+learns a heading-angle conditioned function from observa-
+tion features to the distribution over collision times. The
+approach only requires recognizing “collisions” (or prox-
+imity detection) and local computations over a buffer of ob-
+servations, and avoids building a full consistent map. We
+show generality of the idea by making predictions for mul-
+tiple settings and input modalities. We predict collision time
+distributions from images both for remote points and at the
+agent’s current location, and further generalize by making
+egocentric predictions from only sound spectrograms.
+We test the value of our approach via experiments in Sec-
+tion 4. We demonstrate our approach in simulated indoor
+environments with realistic actuation noise, using the Habi-
+tat simulator [25] with the Gibson [43] and Matterport [3]
+datasets. We primarily evaluate how well we can estimate
+the distance function of the scene, either projected to the
+ﬂoor as shown in Fig 1 or seen from an egocentric view.
+Our experiments show that modeling the full distribution
+outperforms alternate approaches across multiple settings,
+and despite sparse supervision, the performance is close to
+that of strongly supervised methods. We additionally show
+that image-conditioned estimates of the distribution capture
+human categories of spaces (e.g., corners, hallways).
+2. Related Work
+The goal of this paper is to take a single previously un-
+seen image and infer the distribution of steps to collision.
+We show that this distribution carries information about
+scene shape and local topography via its distance function.
+We demonstrate how we can learn this distribution from col-
+lisions of an agent executing a random walk.
+Estimating scene occupancy and distance to obstacles
+has long been a goal of vision and robotics. Collision re-
+play provides a principled method to derive sparse noisy
+training signal from random walks in any number of train-
+ing environments. Models resulting from collision replay
+are able to predict these quantities given only a single im-
+age observation of a previously unseen environment. This
+separates it from the large body of work that aims to build
+models of a speciﬁc environment over experience, e.g., via
+SLAM [39, 15, 9, 2] or bug algorithms [26] that use cheap
+sensors and loop closure. Instead, this puts our work closer
+to the literature in inferring the spatial layout [21, 47] of
+a new scene. In this area, the use of collisions separates
+it from work that predicts ﬂoor plans from strong supervi-
+sion like ground-truth ﬂoor plans [19, 37, 32] or RGB-D
+cameras [14, 5]. This lightweight supervision puts us most
+closely to work on self-supervised depth or 3D estimation,
+such as work using visual consistency [46, 13, 40, 42, 41].
+Bumps offer an alternate source of supervision that does
+not depend on 3D ray geometry and therefore can be used
+with a variety of different modalities (e.g., sound [12]). We
+show how our method can use echo-location responses in
+the scene to predict a distribution over to collision.
+Our supervisory signal, time to collision, requires a few
+sensors and no human expertise. This is part of a trend
+in autonomous systems, where learning-based systems are
+trained on large-scale and noisy datasets of robots perform-
+ing tasks often with a randomized policy. This has been
+successfully applied to learning to ﬂy [11], grasping [30],
+poking [1], identifying when humans will collide with the
+robot [24], understanding surfaces through bounce trajecto-
+ries [31] and understanding robot terrain [18]. Our work is
+inspired by this research and applies it by modeling the time
+to collision with the objects in the world (unlike [24], which
+modeled collision with a pedestrian). The most similar is to
+us is LFC [11], which predicts whether a drone will crash
+in the nextk steps from egocentric views. Our work differs
+in multiple ways: we use a random, not targeted, policy and
+output an angle- and location- conditioned distribution of
+steps to collision as opposed to a single probability of colli-
+sion in a ﬁxed time horizon. Our output can be directly de-
+coded to a distance function and is informative about scene
+topography. Finally, we estimate output for remote points
+in the scene, as opposed to just egocentric views.
+Throughout, we use implicit representation learning,
+which has become popular for 3D tasks [44, 27, 29, 35].
+We build upon the architecture in PIFu [35], but rather than
+condition on image features to predict occupancy and color,
+we condition on point location, image features (or option-
+ally features from spectrograms) and heading to predict a
+distribution over collision times
+3. Method
+The heart of our approach is modeling the distribution
+over time to collision conditioned on observations and head-
+ing angle. We start with an illustration of distributions of
+collision times in simpliﬁed scenes in (Section 3.1). These
+collision time distributions serve as learning targets for the
+estimators we introduce (Section 3.2). Having introduced
+the general case, we conclude by describing the particu-
+lar implementations for speciﬁc settings, namely estimating
+distributions in scenes and egocentric views (Section 3.3).
+3.1. Preliminaries
+We begin with an illustration of collision-times in a sim-
+pliﬁed, noiseless, discrete 2D grid world shown in Fig 2.
+In this world, the agent is at a position x and has heading
+α and can rotate in place left/right or take a single step for-
+ward. Let us assume the agent follows a random walk policy
+that uniformly selects one of forward, rotate left, or rotate
+right with probability (1
+3, 1
+3, 1
+3). Then, letT∈{ 0, 1,... } be
+a random variable for the number of forward steps the agent
+takes until it next bumps into part of the scene. The distri-
+bution over the number of forward steps until the next bump
+(A) Environment
+GT
+Map
+Mean
+Min
+28
+22
+(C) Results By Sample Count
+1
+3
+2
+4
+(B) Angle-Conditioned 
+Distributions at Points
+1 2
+3 4
+Figure 2. A simple overhead example . A grid-cell environment
+with free-space shown in black (A). We sample random walks at
+each grid cell for each headingα. The distribution of hitting-times
+(B, in log-scale) reﬂects the surrounding environment. With ﬁnite
+samples, estimates converge fast (C, showing one corner).
+is often known as the hitting time in the study of stochastic
+processes and Markov chains [10]. Our work aims to learn
+this distribution conditioned on location x and headingα.
+If we condition on location and angle, the probability
+mass function overT , orPT (t|x,α ), tells us the likelihood
+for the number of steps to a collision if we start at a location
+and heading angle. For instance, in Fig 2, point 1, the agent
+is in a hallway and likely to bump into the walls if it heads
+East or West (seen by the sharp colors on the right and left
+edges of the plot). If the agent sets out at point 3, going
+West will surely lead to a bump while going East will take
+longer.
+One can convert this distribution into other quantities of
+interest, including the distance function to non-navigable
+parts of the scene as well as a ﬂoor-plan. The distance func-
+tion at a location x is the ﬁrst time t which has support
+across any of the possible heading anglesα, or
+DF(x) = min
+t
+t s.t. max
+α
+PT (t|x,α )> 0, (1)
+where the maxα is not strictly necessary if the agent can
+freely rotate and rotation does not count towards steps. This
+distance can be converted to a ﬂoorplan by thresholding.
+Particular care is required for two modeling decisions:
+we assume the agent actually collides and follows a random
+# steps to 
+collision
+Egocentric
+Image
+Random Walk
+Loss
+Sampled Location and Heading
+Figure 3. Overview of training pipeline : Our approach takes a
+point, x, on a random walk and predicts the distribution of times
+to collision conditioned on features φ(x) and the heading angle
+α. The prediction is supervised by the labels generated for the
+sampled point using collision replay.
+policy at train time. In practice, one might replace collision
+with being close (e.g., < 10cm) to an obstacle, measured
+with a proximity sensor. This enables use in environments
+where real collisions are not safe, and results in a model
+that learns a distance-to-near-collision. Additionally, use-
+ful robots do things rather than randomly walk. We use
+random policies to show that our system does not depend
+on a specialized policy, and to tie our work with theory on
+random walks [10]. Different policies change PT instead
+of precluding learning: the prevalence of fairly short paths
+provides more signal, and these may be more likely with
+goal-directed policies rather than ones that can spin in place.
+Additionally, the use of a random policy at train time does
+not require one use a random policy at test time.
+3.2. Modeling Collision Times in Practice
+In practice, we would like to be able to infer distributions
+over hitting times in new scenes, and would like to learn
+this from noisy samples from training scenes. We therefore
+learn a function f (φ(x),α ) that characterizes PT (t|x,α ),
+for instance by giving the distribution. The ﬁrst input to f
+is image features of the location x (such as the output of
+a deep network) concatenated with the dπ(x), where dπ is
+the projected depth with respect to the cameraπ. We denote
+this concatenated feature asφ(x). The second input feature
+is the camera-relative heading angleα. At training time, we
+assume each step gives a sample from the true hitting time
+distribution at the given location.
+We frame the problem as predicting a multinomial dis-
+tribution over k + 1 categories: 0,...,k − 1 and ﬁnally
+k or more steps. In other words f (φ(x),α ) is a discrete
+distribution with with k + 1 entries. If f is learnable, one
+can train it to match the predictions of f to PT (t|x,α )
+by minimizing the expected negative-log-likelihood over
+the distribution, or Es∼PT (t|x,α) [− logf (φ(x),α )s]. Typi-
+cally, networks estimate a distribution with something like
+a softmax function that makes all values non-zero. Thus
+in practice, we modify Eqn. 1 to be ﬁrst time t where
+the cumulative probability exceeds a hyperparameter ϵ, or
+mint s.t. maxa(∑t
+i=0f (φ(x),α )i)≥ ϵ. An alternate ap-
+proach is predicting a scalar. For example, one could learn
+g(φ(x),α ) with a regression loss like the MSE, or minimize
+Es∼PT (t|x,α)[(s−g(φ(x),α ))2]. this loss is minimized by
+the expected time to collision.
+Conveniently, distributions like PT (t|x,α ) are well-
+studied: in 1D, our setting corresponds to the classic Gam-
+bler’s Ruin [10] problem for which many results are known.
+A full description appears in the supplement – the formulae
+are unwieldy and unintuitive. We summarize two salient re-
+sults here, generating concrete numbers under the following
+scenario: an agent starts at cell z = 20 in a 51 cell world
+enclosed by two walls, and moves left towards the wall with
+p=80% chance and right away from the wall with 1−p.
+First, the agent has an effectively 100% chance of reach-
+ing 0, but the expected time, 33, is always an overestimate
+of the distance. This overestimate depends on p: (p=90%
+gives 25;p=45% gives≈199). Thus, networks trained with
+the MSE should overestimate time to collision by a factor
+that depends on the speciﬁc policy being executed.
+Second, approximately short paths are surprisingly
+likely. It is true that the exact shortest path’s likelihood de-
+cays exponentially with distance: there is an≈1/84 chance
+of taking the shortest path at z=20. However, there is a
+≈1/20 chance of a path that is at-most two more steps and
+a≈1/8 chance of a path that is at-most four more steps
+than the shortest paths. This suggests that networks try-
+ing to match PT (t|x,α ) will frequently encounter samples
+that are close to the true shortest path. Moreover, while
+changing the policy changes the distribution, the estimate
+of the distance function is extremely off only if train time
+frequency is very small for fairly short paths.
+3.3. Learning to Predict Collision Times
+At training time, we have a random walk consisting of
+locations (x0, x1,..., xN ). If there is a collision at time i,
+xi is labeled as zero steps to collision,xi−1 as one step, etc.
+This yields tuples of locations and labels that are used as
+training samples in a setting-dependent fashion.
+Predicting Remote Locations: Our primary setting is pre-
+dicting the time to collision for a remote location on the
+ground-plane. This distribution can be converted into a dis-
+tance function or ﬂoorplan for the scene. We predict the dis-
+tribution using a PIFu [34]-like architecture shown in Fig. 3,
+in which a CNN predicts image features used to condition
+an implicit function for each camera ray. In our case, we
+condition on a heading angle α and projected depth rep-
+resented in the egocentric frame (instead of only projected
+depth as in [34]). Thus, φ(x) is the feature map vector pre-
+dicted at the location.
+At train time, collision replay unwinds the agent’s actua-
+tions to provide supervision at previous steps. In the case of
+predicting remote locations in the scene, we unwind twice
+to generate supervision. Suppose we consider three steps
+i,j,k withi < j < kand a collision at step k. We know
+thatj is (k−j) steps from a collision. Then, we can project
+stepj’s location into the image at step i and give it the la-
+bel (k−j). The reasoning and projection is done assum-
+ing (incorrectly in our simulator) that the intended egomo-
+tion was executed correctly. This approach enables labeling
+from multiple views and through occlusion, while also not
+requiring explicit reconstruction. While the labels are noisy,
+this noise is simply propagated to the estimated distribution.
+Predicting Current Locations: To show the generality of
+our method, we experiment with predicting the time-to-
+collision distribution for the agent’scurrent location, con-
+ditioned on the agent’s next action and current observation.
+This could be a small image in a low-cost robot, sound,
+[12] or another localized measurement like WiFi signals.
+We demonstrate this approach using input from two exam-
+ple sensors:ﬁrst, a low-resolution ( 32× 32) RGB image,
+designed to simulate the variety of possible impoverished
+stimuli found on low cost robots, and second, a binaural
+sound spectrogram, to simulate echolocation. We input the
+agent’s next action as it parallels the angle conditioning pro-
+vided to the remote prediction model.
+Implementation Details: Architectures: Both our remote
+location prediction and egocentric prediction network use a
+ResNet-18 [17] backbone followed by a series of fully con-
+nected layers. In the remote prediction case, we utilise the
+ResNet as a Feature Pyramid Network [23], before decod-
+ing each feature as an implicit function in a similar style to
+PIFu [34]. Full architectural details appear in the supple-
+ment. Training: We train all remote location networks for
+20 epochs. The models for egocentric prediction are trained
+for 5 epochs due to their smaller image size. All models are
+optimized with Adam [20], following a cosine learning rate
+schedule with a starting value of 2e-5, a maximum value
+of 2e-4 after 30% of training has elapsed, and a ﬁnal value
+of 1e-5. We apply random horizontal image ﬂips, as well
+as N (0, 10%) horizontal image shifts. In the remote set-
+ting, points are augmented with Gaussian (σ = 3cm) noise
+in the ﬂoor plane. Classiﬁcation setting: Throughout, we
+used a maximum label ofk = 10 steps for our classiﬁcation
+model. Labels above this value are clamped, so that a pre-
+diction of class 10 means the model predicted 10 or more
+steps to collision. We found this k sufﬁcient to capture the
+interesting parts of most scenes.
+0m
+4m
+Figure 4. Heading conditioned distance to collision: Visualizations of the estimated ﬁrst step with > ϵprobability of collision for grids
+of remote points with heading angles α shown as arrows. Shown in units of meters (where 1 step = 0.25m). Results are predicted by a
+classiﬁcation model trained with noisy walks. Points are missing if the method predicted them to be occupied.
+4. Experiments
+We now describe a series of experiments that aim to in-
+vestigate the effectiveness of the proposed approach. These
+experiments are conducted in a standard simulation envi-
+ronment, including results with actuation noise. After ex-
+plaining the setup (Section 4.1), we introduce a series of
+experiments. We ﬁrst evaluate predicting on remote points
+(Section 4.2) , comparing our approach to a variety of al-
+ternative architectures and upper bounds. We then analyze
+what the predicted time-to-collision distributions represent
+(Section 4.3). Finally, we demonstrate the generality of the
+idea by applying it to egocentric views(Section 4.4).
+4.1. Environment and Dataset
+All experiments use random walk data collected from the
+Habitat simulator [25]. We use the Gibson Database of 3D
+Spaces [43] for all experiments except one, the egocentric
+sound comparison in Table 3, which uses Matterport3D [3]
+in order to support sound simulation. We hold out entire en-
+vironments according to the splits provided by each dataset
+so that our training, validation and testing sets are entirely
+independent. In each environment, we perform 10 random
+walks of 500 steps each, starting at a random location for
+each walk. At each time-step, we collect the agent’s col-
+lision state, sensor data (egocentric images, or optionally
+sound spectrograms), and ego-motion.
+Agent and Action Space: We model the agent as a cylin-
+der with a radius of 18cm, a forwards facing camera 1.5
+meters above the ground plane, and a binary collision sen-
+sor. At each timestep, the agent selects one of four actions.
+We follow Active Neural Slam [4]: move forward (25cm),
+turn left (−10◦), turn right (10◦). We also give the agent
+a turn around (180◦) action for use after a collision. When
+noise is active, we use the noise model from [4], which is a
+set of Gaussian Mixture Models extracted from a LoCoBot
+[28] agent; we assume the turn around action is distributed
+like turn left but with a mean rotation of 180. When collect-
+ing data for egocentric prediction experiments, we increase
+the mean rotation of the turn left and turn right actions to
+−45◦ and +45◦ respectively. This means the network is
+not forced to make ﬁne-grained distinctions between angles
+given a small image while also ensuring the space of possi-
+ble turn angles covers the 90◦ ﬁeld of view of the camera.
+Policy: Our agent conducts a random walk by selecting an
+action from the set (move forward, turn left, turn right) with
+probabilities (60%, 20%, 20%) so long as it did not col-
+lide with an obstacle in the previous time step. Upon col-
+lision, the agent executes a turn around action to prevent
+getting stuck against obstacles and walls. As explained in
+3.1, this random walk policy is chosen for its simplicity, and
+the method does not depend on this policy.
+4.2. Predicting Remote Time-To-Collision
+Qualitative Results: In Fig. 4 we show the maps of colli-
+sion times for speciﬁc heading angles for all points within
+a 4 m x 4 m grid on the ﬂoor in front of the camera. We
+observe that the model correctly varies the time-to-collision
+such that lower values are predicted at points where the cur-
+rent heading valueα faces a nearby obstacle, and higher val-
+ues are predicted where the heading value faces into open
+areas. The model is able to infer some regions where the
+distance function is nonzero despite that the ﬂoor plane it-
+self is occluded by obstacles. In Fig. H we visualize the dis-
+tance function obtained from our angle conditioned outputs
+-90° +90
+°
+180°
+α = 0°
+1 2
+2
+3 41 2
+1
+3 4
+2
+3 4
+1
+0
+Figure 5. Remote prediction for selected points: Examples of
+P (t|α) for selected test set points. We plot the heading angle
+as the angle axis of a polar plot, while the radius is proportional
+to steps to collision. At point 3, a collision is likely soon going
+straight; at point 2, it is more likely going left or right.
+with both noisy and (for comparison) noise-free egomotion
+training. The model produces a distance function consider-
+ing the closest object in any direction to each point in the
+scene, rather than the distance in one direction of interest
+as in Fig. 4. The distance function attains high values in
+the middle of open spaces, and smaller values in enclosed
+hallways and near obstacles.
+Our model is capable on generating the distribution of
+steps to collision conditioned on the input heading angle
+α. In Fig. 5 we visualize this distribution for four points
+of interest by varying the heading angle. We show polar
+plots where the radius of the ring denotes the distance from
+the point, and the color denotes the probability. At point
+1 collisions are likely for all directions except reverse, and
+imminent directly ahead. Similarly at point3, the upcoming
+pillar appears as shown as high probability ahead.
+Comparisons: We compare against various approaches and
+ablations. For fairness, unless otherwise speciﬁed, we use
+an identical ResNet18 [17] and PIFu [34] backbone as
+described in Section 3.3, changing only the size of the out-
+puts to accommodate different targets. All outputs can be
+converted into a predicted ﬂoorplan and a scene distance
+function. Floorplans are with a distance transform.
+(Regression-L1/Regression-L2): We use smoothed L1 loss
+(or L2 loss) to regress a scalar steps to collision value for
+each point.
+(Free Space Classiﬁcation): We discretize outputs into col-
+liding and non-colliding points. We train a binary classi-
+ﬁcation model which directly predicts this outcome at each
+trajectory time-step, thereby learning a free-space predictor.
+(Supervised Encoder-Decoder): We predict ﬂoor plans us-
+ing strong supervision in the form of dense ground truth
+ﬂoor-plans collected from the environments. This base-
+line serves as an upper-bound for our method because our
+method uses sparser and weaker supervision.
+(Analytical Depthmap Projection): We use simulator depth
+to predict free-space for visible regions in the scene by an-
+alytically projecting the depth maps on the ﬂoor plane.
+Table 1. Quantitative results for distance functions and ﬂoorplans.
+Distance Function Floor
+Angle Noise MAE RMSE %≤δ IoU
+Classiﬁcation   0.16 0.31 0.77 0.49
+Regression-L1   0.25 0.38 0.66 0.47
+Regression-L2   0.25 0.38 0.66 0.47
+Classiﬁcation   0.11 0.21 0.83 0.47
+Regression-L1   0.13 0.24 0.79 0.45
+Regression-L2   0.14 0.24 0.79 0.47
+Free-Space   0.13 0.23 0.82 0.52
+Classiﬁcation   0.10 0.20 0.86 0.54
+Regression-L1   0.11 0.22 0.83 0.49
+Regression-L2   0.12 0.22 0.83 0.53
+Supervised -  0.08 0.19 0.90 0.66
+Depthmap -  0.09 0.20 0.87 0.57
+Metrics: We evaluate each timestep on a 64× 64 grid of
+points covering a 4m× 4m square in front of the agent.
+We compute both the distance to the navigation mesh and
+the whether the point is free space. We use these labels to
+compute multiple metrics. To evaluate distance functions,
+we compare the ground-truth yi and prediction ˆyi and re-
+port: mean absolute error (MAE), 1
+N
+∑
+i|yi− ˆyi|; root-
+mean squared error (RMSE),
+√
+1
+N
+∑
+i(yi− ˆyi)2; and per-
+cent within a threshold (δ) 1
+N
+∑
+i 1(|yi− ˆyi|<δ ). Through-
+out, we useδ = 0.25m, the average step distance. We eval-
+uate ﬂoorplans with Floorplan IoU, the intersection-over-
+union between predicted and ground truth ﬂoorplans.
+Quantitative Results: We report results in Table 1, with
+distance measured in meters. In each both noise-free and
+noisy settings, the approach of modeling with classiﬁcation
+produces better distance functions compared to regression
+approaches. L1 and L2 regression, which are equivalent to
+estimating the median or average time to collision respec-
+tively, under-perform classiﬁcation, and we ﬁnd analytically
+that they are usually an over-prediction. Floorplan IoU does
+not differentiate between distances higher than the thresh-
+old, and so most approaches do well on it. Unsurprisingly,
+training to predict free-space via collision replay outper-
+forms systems that obtain the ﬂoorplan estimate by indirect
+analysis of the distance function. Nonetheless, most meth-
+ods trained via collision replay produce results that are close
+to those obtained by the strongly supervised approach (us-
+ing RGB input) or the analytical depthmap projection (us-
+ing RGBD input). Beyond particular metrics in estimating
+ﬂoorplan distance functions, we see advantages to the rich
+representation of collision time distributions, and analyze
+them next.
+Ground Truth Noisy Train Noiseless Train Ground Truth Noisy Train Noiseless Train
+4m
+0m
+Figure 6. Extracted 2D distance functions: Examples of 2D scene distance functions extracted from (left) the simulator navigation-mesh;
+(middle) a model trained on noisy random walks; and (right) a model trained on noise-free random walks. The center the rooms are
+correctly predicted to have higher distances (marked by lighter coloring). As in Fig. 4, points are absent if they are predicted occupied.
+Query NN1 NN2 NN3 NN4
+Figure 7. Nearest neighbor lookup results: Examples of nearest neighbors using Eqn. 2 on predicted hitting time distributions, and
+selecting only one per-scene. Top: passing through a doorway; Middle: corner of a room; Bottom: center of room.
+4.3. Analysis of Learned Distributions
+Qualitatively, we ﬁnd that the angle-conditioned steps to
+collision distributions correlate with underlying scene ge-
+ometry: the distribution in a hallway is different compared
+to one in the center of the room. We thus analyze whether
+the distributions contain this information.
+Given a point in an image we aim to evaluate its sim-
+ilarity to other points in terms of it’s steps to collision
+distribution. We start with distributions P1(t|x1,α 1) and
+P2(t|x2,α 2) conditioned on two pointsx1 and x2 and com-
+pute dissimilarity using a function that also aligns the rela-
+tive angle between them, followed by the Jensen-Shannon
+divergence (JSD), or:
+min
+θ
+JSD(P1(t|x1,α ),P 2(t|x2, (α +θ mod 2π))). (2)
+Qualitative Results: We ﬁnd nearest neighbors for points
+using Eqn. 2. The top row of Fig 7, shows that a query point
+in a hallway returns nearest neighbors that are also door-
+ways or hallways with the similar distributions ofP (t|x,α ).
+Similarly, the second row, a query point in a corner yields
+the corners of other similarly large and open rooms.
+Quantitative Results: We quantify this trend by annotat-
+ing a subset of points in the test set with one of 5 classes:
+Open Space, Wall, Hallway, Concave Corner, or Crowded
+Space. Many points fall between or outside the categories,
+so we only evaluate on the examples in which 7 out of 9
+annotators agreed. This results in a dataset of 1149 points
+with strong consensus. We evaluate how well Eqn. 2 pre-
+dicts that two locations share the same class, measuring per-
+formance with AUROC ( 0.5 is chance performance). Our
+method obtains an AUROC of 0.72 distinguishing all 5 la-
+bels. Some pairs of labels are easier to distinguish than oth-
+ers: Open-vs-Crowded Space has an AUROC of 0.87 and
+Wall-vs-Corner has an AUROC of 0.55.
+-45° 0° 45°
+-45° 0° 45°-45° 0° 45°
+-45° 0° 45°
+Figure 8. Egocentric test predictions using 32x32 images: The
+center column is the distribution with no rotation; the left/right
+show the distribution for turning left/right by 45◦
+Table 2. Quantitative results for visual egocentric prediction
+Distance Function
+MAE RMSE %≤t
+Regression-L1 0.96 1.14 0.21
+Regression-L2 0.96 1.18 0.20
+Classiﬁcation 0.58 0.79 0.36
+4.4. Predicting Egocentric Time-To-Collision
+Finally, we use collision replay to provide supervision
+for egocentric observations. We further demonstrate gener-
+ality with two input modalities: small (32× 32) images, and
+binaural echolocation spectrograms. Given one such input,
+we predict collision time conditioned on what one does next
+(turn left, move forwards, turn right).
+Qualitative Results: We show qualitative results for the
+egocentric vision task in Fig. 8. Spectrogram results are in
+the supplement. The predicted steps-to-collision distribu-
+tion yields a rough depthmap: in Fig. 8(top-left), the distri-
+bution suggests that right side of the scene is further away
+than ahead or to the left. Additionally, the model predicts
+a bi-modal distribution in Fig. 8(bottom-left), revealing un-
+certainty about whether the random walk policy would go
+through the doorway or collide with it.
+Quantitative Results (Visual Input): We compare with
+regression approaches from the previous section in Ta-
+ble 4. Modeling the distribution with classiﬁcation out-
+performs regression, and regression systematically overes-
+timates (90% of cases compared to 60% for classiﬁcation).
+The learning task used in Learning to Fly by Crashing
+(LFC) [11] is a special case of our method since it models
+the probability that t < kfor a ﬁxed k as opposed to our
+full distribution overt. We note that comparisons are difﬁ-
+cult since LFC is aimed at producing a policy as opposed to
+scene structure, only applies in the egocentric setting, and
+also uses a specialized policy to collect data. If we compare
+Table 3. Quantitative results on [3] with different inputs (vision
+and sound) showing the generality of collision replay.
+Input Distance Function
+MAE RMSE %≤t
+32× 32 Image 0.64 0.86 0.33
+Binaural Spectrogram 0.58 0.79 0.36
+our approach on the LFC task, predicting the binary out-
+come “would the agent crash within k steps”, our approach
+outperforms LFC on F1 score for all discretizations (k = 8:
+0.66-vs-0.62 andk = 2: 0.86-vs-0.85), likely due to multi-
+task learning effects. When comparing on our task, there is
+not a principled way to convert LFC’s binary probability to
+a distance function, and results are highly dependent on the
+binarization threshold k: LFC can produce reasonable re-
+sults with largek (RMSE fork = 8 is 0.84) but small ones
+fare worse (RMSE fork = 2 is 1.46). Full experiments are
+in the supplement.
+Quantitative Results (Echolocation): In the echolocation
+setting we compare a model with sound input to the best
+egocentric vision model. We train both on Matterport3D
+[3], which is necessary in order to collect echo spectro-
+grams from Soundspaces [6], which does not currently sup-
+port Gibson. The vision model is identical to the classiﬁca-
+tion model in Table 4; the sound model only replaces the
+ResNet-18 backbone with an Audio-CNN provided by the
+Soundspaces baseline code. We compare the performance
+of these models in Table 3.
+Sound simulation relies on pre-computed Room Impulse
+Response (RIR) ﬁles, which are only provided for a grid
+of locations and orientations. We snap to the nearest ori-
+entation, then apply Gaussian RBF interpolation on com-
+puted spectrogram outputs based on the agent location. This
+yields an approximate echo response for a continuous agent
+pose, enabling the use of the same continuous agent policy,
+and outperformed other methods of interpolation we tried.
+Table 3 shows that echolocation outperforms the 32x32
+image input. We attribute this to the rich information in
+the audio spectrograms - the return time of emitted sound
+is closely related to the underlying depth map of the scene
+[12], so it provides more signal than coarse color data. Ad-
+ditionally, while the sound responses are directional, sound
+bounces encode information about space all around the
+agent, which is useful since the distance function may de-
+pend on objects not visible in the camera’s ﬁeld of view.
+5. Conclusions and Discussion
+This paper has introduced Collision Replay, which en-
+ables using bumps to learn to estimate scene geometry in
+new scenes. We showcase two applications of our method
+using sound and vision as input, but see potential in a vari-
+ety of other settings, ranging from manipulation in occluded
+regions to converting travel time to scene maps.
+Acknowledgments: This work was supported by the
+DARPA Machine Common Sense Program. NK was sup-
+ported by TRI. Toyota Research Institute (“TRI”) provided
+funds to assist the authors with their research but this article
+solely reﬂects the opinions and conclusions of its authors
+and not TRI or any other Toyota entity
+References
+[1] Pulkit Agrawal, Ashvin Nair, Pieter Abbeel, Jitendra Ma-
+lik, and Sergey Levine. Learning to poke by poking:
+Experiential learning of intuitive physics. arXiv preprint
+arXiv:1606.07419, 2016. 2
+[2] Cesar Cadena, Luca Carlone, Henry Carrillo, Yasir Latif,
+Davide Scaramuzza, Jos ´e Neira, Ian Reid, and John J
+Leonard. Past, present, and future of simultaneous localiza-
+tion and mapping: Toward the robust-perception age. IEEE
+Transactions on robotics, 32(6):1309–1332, 2016. 2
+[3] Angel Chang, Angela Dai, Thomas Funkhouser, Maciej Hal-
+ber, Matthias Niessner, Manolis Savva, Shuran Song, Andy
+Zeng, and Yinda Zhang. Matterport3d: Learning from rgb-
+d data in indoor environments. International Conference on
+3D Vision (3DV), 2017. 2, 5, 8
+[4] Devendra Singh Chaplot, Dhiraj Gandhi, Saurabh Gupta,
+Abhinav Gupta, and Ruslan Salakhutdinov. Learning to ex-
+plore using active neural slam. In International Conference
+on Learning Representations (ICLR), 2020. 5
+[5] Devendra Singh Chaplot, Emilio Parisotto, and Ruslan
+Salakhutdinov. Active neural localization. arXiv preprint
+arXiv:1801.08214, 2018. 2
+[6] Changan Chen, Unnat Jain, Carl Schissler, Sebastia Vi-
+cenc Amengual Gari, Ziad Al-Halah, Vamsi Krishna Ithapu,
+Philip Robinson, and Kristen Grauman. Soundspaces:
+Audio-visual navigaton in 3d environments. InECCV, 2020.
+8
+[7] Harm de Vries, Kurt Shuster, Dhruv Batra, Devi Parikh, Ja-
+son Weston, and Douwe Kiela. Talk the walk: Navigating
+new york city through grounded dialogue. arXiv preprint
+arXiv:1807.03367, 2018. 1
+[8] David Eigen and Rob Fergus. Predicting depth, surface nor-
+mals and semantic labels with a common multi-scale convo-
+lutional architecture. In ICCV, 2015. 1
+[9] Felix Endres, J ¨urgen Hess, J ¨urgen Sturm, Daniel Cremers,
+and Wolfram Burgard. 3-d mapping with an rgb-d camera.
+IEEE transactions on robotics, 30(1):177–187, 2013. 2
+[10] William Feller. An Introduction to Probability Theory and
+Its Applications. Wiley and Sons, New York, 1950. 1, 3, 4,
+13, 14
+[11] Dhiraj Gandhi, Lerrel Pinto, and Abhinav Gupta. Learning to
+ﬂy by crashing. In 2017 IEEE/RSJ International Conference
+on Intelligent Robots and Systems (IROS), pages 3948–3955.
+IEEE, 2017. 1, 2, 8, 12
+[12] Ruohan Gao, Changan Chen, Ziad Al-Halab, Carl Schissler,
+and Kristen Grauman. Visualechoes: Spatial image repre-
+sentation learning through echolocation. In ECCV, 2020. 2,
+4, 8
+[13] Cl ´ement Godard, Oisin Mac Aodha, and Gabriel J. Bros-
+tow. Unsupervised monocular depth estimation with left-
+right consistency. In CVPR, 2017. 1, 2
+[14] Saurabh Gupta, James Davidson, Sergey Levine, Rahul Suk-
+thankar, and Jitendra Malik. Cognitive mapping and plan-
+ning for visual navigation. In Proceedings of the IEEE Con-
+ference on Computer Vision and Pattern Recognition, pages
+2616–2625, 2017. 1, 2
+[15] R Hartley and A Zisserman. Multiple view geometry in com-
+puter vision, cambridge uni. Pr., Cambridge, UK, 2000. 1,
+2
+[16] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. arXiv preprint
+arXiv:1512.03385, 2015. 11
+[17] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In CVPR,
+2016. 4, 6
+[18] Gregory Kahn, Pieter Abbeel, and Sergey Levine. Badgr: An
+autonomous self-supervised learning-based navigation sys-
+tem. arXiv preprint arXiv:2002.05700, 2020. 2
+[19] Kapil Katyal, Katie Popek, Chris Paxton, Phil Burlina, and
+Gregory D Hager. Uncertainty-aware occupancy map pre-
+diction using generative networks for robot navigation. In
+2019 International Conference on Robotics and Automation
+(ICRA), pages 5453–5459. IEEE, 2019. 2
+[20] Diederik P. Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. In Yoshua Bengio and Yann LeCun,
+editors, ICLR, 2015. 4, 12
+[21] Chen-Yu Lee, Vijay Badrinarayanan, Tomasz Malisiewicz,
+and Andrew Rabinovich. Roomnet: End-to-end room layout
+estimation. In Proceedings of the IEEE International Con-
+ference on Computer Vision, pages 4865–4874, 2017. 2
+[22] T. Lin, P. Doll ´ar, R. Girshick, K. He, B. Hariharan, and S.
+Belongie. Feature pyramid networks for object detection.
+In 2017 IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 936–944, 2017. 11
+[23] Tsung-Yi Lin, Piotr Doll ´ar, Ross Girshick, Kaiming He,
+Bharath Hariharan, and Serge Belongie. Feature pyra-
+mid networks for object detection. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 2117–2125, 2017. 4
+[24] Aashi Manglik, Xinshuo Weng, Eshed Ohn-Bar, and Kris M
+Kitani. Forecasting time-to-collision from monocular
+video: Feasibility, dataset, and challenges. arXiv preprint
+arXiv:1903.09102, 2019. 2
+[25] Manolis Savva*, Abhishek Kadian*, Oleksandr
+Maksymets*, Yili Zhao, Erik Wijmans, Bhavana Jain,
+Julian Straub, Jia Liu, Vladlen Koltun, Jitendra Malik, Devi
+Parikh, and Dhruv Batra. Habitat: A Platform for Embodied
+AI Research. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV), 2019. 2, 5
+[26] Kimberly N McGuire, GCHE de Croon, and Karl Tuyls. A
+comparative study of bug algorithms for robot navigation.
+Robotics and Autonomous Systems, 121:103261, 2019. 2
+[27] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Se-
+bastian Nowozin, and Andreas Geiger. Occupancy networks:
+Learning 3d reconstruction in function space. In Proceed-
+ings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 4460–4470, 2019. 2
+[28] Adithyavairavan Murali, Tao Chen, Kalyan Vasudev Alwala,
+Dhiraj Gandhi, Lerrel Pinto, Saurabh Gupta, and Abhinav
+Gupta. Pyrobot: An open-source robotics framework for re-
+search and benchmarking. arXiv preprint arXiv:1906.08236,
+2019. 5
+[29] Jeong Joon Park, Peter Florence, Julian Straub, Richard
+Newcombe, and Steven Lovegrove. Deepsdf: Learning con-
+tinuous signed distance functions for shape representation.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 165–174, 2019. 2
+[30] Lerrel Pinto and Abhinav Gupta. Supersizing self-
+supervision: Learning to grasp from 50k tries and 700 robot
+hours. In 2016 IEEE international conference on robotics
+and automation (ICRA), pages 3406–3413. IEEE, 2016. 2
+[31] Senthil Purushwalkam, Abhinav Gupta, Danny M. Kaufman,
+and Bryan C. Russell. Bounce and learn: Modeling scene
+dynamics with real-world bounces. CoRR, abs/1904.06827,
+2019. 2
+[32] Santhosh K Ramakrishnan, Ziad Al-Halah, and Kristen
+Grauman. Occupancy anticipation for efﬁcient exploration
+and navigation. ECCV 2020, 2020. 2
+[33] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, San-
+jeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy,
+Aditya Khosla, Michael Bernstein, Alexander C. Berg, and
+Li Fei-Fei. ImageNet Large Scale Visual Recognition Chal-
+lenge. International Journal of Computer Vision (IJCV) ,
+115(3):211–252, 2015. 11
+[34] Shunsuke Saito, , Zeng Huang, Ryota Natsume, Shigeo Mor-
+ishima, Angjoo Kanazawa, and Hao Li. Pifu: Pixel-aligned
+implicit function for high-resolution clothed human digitiza-
+tion. arXiv preprint arXiv:1905.05172, 2019. 4, 6
+[35] Shunsuke Saito, Zeng Huang, Ryota Natsume, Shigeo Mor-
+ishima, Angjoo Kanazawa, and Hao Li. Pifu: Pixel-aligned
+implicit function for high-resolution clothed human digitiza-
+tion. In Proceedings of the IEEE International Conference
+on Computer Vision, pages 2304–2314, 2019. 2, 11
+[36] Daniel Scharstein and Richard Szeliski. A taxonomy and
+evaluation of dense two-frame stereo correspondence algo-
+rithms. IJCV, 47(1):7–42, 2002. 1
+[37] Rakesh Shrestha, Fei-Peng Tian, Wei Feng, Ping Tan, and
+Richard Vaughan. Learned map prediction for enhanced mo-
+bile robot exploration. In 2019 International Conference on
+Robotics and Automation (ICRA) , pages 1197–1204. IEEE,
+2019. 2
+[38] Linda Smith and Michael Gasser. The development of em-
+bodied cognition: Six lessons from babies. Artif. Life ,
+11(1–2):13–30, Jan. 2005. 1
+[39] Sebastian Thrun. Probabilistic robotics. Communications of
+the ACM, 45(3):52–57, 2002. 1, 2
+[40] Shubham Tulsiani, Tinghui Zhou, Alexei A. Efros, and Ji-
+tendra Malik. Multi-view supervision for single-view recon-
+struction via differentiable ray consistency. In Computer Vi-
+sion and Pattern Recognition (CVPR), 2017. 2
+[41] Hsiao-Yu Fish Tung, Hsiao-Wei Tung, Ersin Yumer, and Ka-
+terina Fragkiadaki. Self-supervised learning of motion cap-
+ture. arXiv preprint arXiv:1712.01337, 2017. 2
+[42] Jamie Watson, Michael Firman, Gabriel J Brostow, and
+Daniyar Turmukhambetov. Self-supervised monocular depth
+hints. In Proceedings of the IEEE/CVF International Con-
+ference on Computer Vision, pages 2162–2171, 2019. 2
+[43] Fei Xia, Amir R. Zamir, Zhi-Yang He, Alexander Sax, Jiten-
+dra Malik, and Silvio Savarese. Gibson env: real-world per-
+ception for embodied agents. In Computer Vision and Pat-
+tern Recognition (CVPR), 2018 IEEE Conference on. IEEE,
+2018. 2, 5
+[44] Qiangeng Xu, Weiyue Wang, Duygu Ceylan, Radomir
+Mech, and Ulrich Neumann. Disn: Deep implicit surface
+network for high-quality single-view 3d reconstruction. In
+Advances in Neural Information Processing Systems , pages
+492–502, 2019. 2
+[45] Wei Yang, Xiaolong Wang, Ali Farhadi, Abhinav Gupta, and
+Roozbeh Mottaghi. Visual semantic navigation using scene
+priors. arXiv preprint arXiv:1810.06543, 2018. 1
+[46] Tinghui Zhou, Matthew Brown, Noah Snavely, and David G.
+Lowe. Unsupervised learning of depth and ego-motion from
+video. In CVPR, 2017. 1, 2
+[47] Chuhang Zou, Alex Colburn, Qi Shan, and Derek Hoiem.
+Layoutnet: Reconstructing the 3d room layout from a sin-
+gle rgb image. In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition , pages 2051–
+2059, 2018. 2
+A. Remote Prediction Model Details
+All remote point prediction models follow a PIFu [35]
+style architecture composed of two components:
+1. an Image Encoder which predicts features used to con-
+dition implicit functions at each pixel.
+2. an Implicit Function Decoder that maps from the fea-
+ture map (plus auxiliary information) to an output that
+is target-dependent.
+Image Encoder: All remote point prediction models use
+the same image encoder, a feature-pyramid network [22]
+applied to a ResNet-18 CNN [16] pretrained on ImageNet
+[33]. Given a 256× 256× 3 input image, the encoder
+produces a pyramid of features with feature dimensions
+of 64, 64, 128, 256 and 512. Each of these features can
+be indexed with a (possibly fractional) coordinate corre-
+sponding the projected location of each query point. Frac-
+tional coordinates are accessed using bi-linear interpolation.
+The indexed features are then concatenated into a 1024-
+dimensional feature vector to condition the implicit function
+for each query point.
+Implicit Function Decoder: The implicit function decoder
+maps a feature vector sampled at a location to an output.
+Input: The decoder takes as input a feature vector that is
+bi-linearly sampled from the image encoder as described
+above. In all cases, we concatenate a scalar to this repre-
+senting the projected depth dπ(x), forming the feature de-
+noted φ(x) in the main paper. Methods that use the rela-
+tive heading angle as an input also have information about
+the angle concatenated to the feature; we encode angles us-
+ing a sine/cosine encoding of [sin(θ), cos(θ)]. Thus angle-
+agnostic methods have an input dimension of 1025 and
+angle-conditioned ones have an input dimension of 1027.
+Network: We decode the above concatenated feature vector
+with a multi-layer perceptron with hidden layer sizes 1024,
+512, and 256; each layer is followed by a Leaky ReLU non-
+linearity (with negative slope 0.01).
+Output and Loss Function: The output size and loss func-
+tion used depends on the model:
+• Classiﬁcation: In the main multi-class case, the net-
+work produces a 11-dimensional output corresponding
+to the logits for steps (0, 1,..., 10+). The resulting
+loss function is the cross-entropy between the softmax
+of these logits and a target value derived from collision
+replay.
+• Regression: In the regression case, the network pro-
+duces a 1-dimensional output corresponding to the
+log of the number of steps. The loss function is the
+Smoothed L1, or L2, loss between this and the log of
+the target number of steps.
+• Binary Freespace: In comparisons with freespace clas-
+siﬁcation, we produce a 1-dimensional output repre-
+senting the log-odds that the space is free. The loss
+function is the binary cross entropy between this and
+the target value.
+B. Distance Function Decoding Details
+Once the networks have made predictions, we need to
+decode these into distance functions.
+Classiﬁcation Minima Distance Function Decoding: As
+described in Section 3.2 in the main paper, when com-
+puting a distance function in the multi-class classiﬁcation
+case, we ﬁnd the minimum step value where the cumu-
+lative probability of collision exceeds a threshold ϵ (i.e.
+(∑
+j≤tP (j))≥ ϵ). Applied na ¨ıvely, this leads to discrete
+jumps between bins and always over-estimates the time to
+collision. We therefore linearly interpolate between the
+bins. This reduces over-prediction and leads to smoothly
+varying distance function predictions.
+Angle Minima Distance Function Decoding: In experi-
+ments considering the heading angle of each remote point,
+we must take the minimum over possible angles to produce
+a distance function for the scene. In the remote predic-
+tion case, we evaluate this by taking the minimum over 32
+evenly spaced sample angles between 0◦ and 360◦. In the
+egocentric case, we evaluate the minimum over the actions.
+C. Egocentric Prediction Model Details
+Backbone: In the egocentric setting, we apply a ResNet-18
+backbone to each input image, followed by average pooling
+and then a multi-layer perceptron with hidden layer sizes of
+512 and 256, using the same Leaky ReLU activation with
+a negative slope of 0.01. We then compute an output layer,
+with shape depending on whether we use classiﬁcation or
+regression as an objective following
+• Classiﬁcation: In the classiﬁcation case, we produce
+an output of shape 11× 3, which we interpret as a log-
+its for the conditional probability distribution P (t|α),
+where t is one of the discrete values (0, 1,..., 10+),
+andα is one of the three actions ( turn left, move for-
+wards, turn right). We do not consider the turn around
+action for egocentric training, as there is reduced in-
+formation in an egocentric view to predict whether the
+space behind the agent is occupied. At train time, we
+take examples of the form (image I, action A, steps to
+collision T), and apply a Cross Entropy loss between
+P (t|α =A) and the label T.
+• Regression: In the regression model, we mirror the
+classiﬁcation case as closely as possible by creating a
+3 dimensional output vector, where each element pre-
+dicts a steps to collision value conditioned on the agent
+taking a particular action. At train time, we super-
+vise the value from this vector corresponding to the
+action taken in a particular example. We use the same
+Smoothed L1, or L2, regression objective as in the re-
+mote prediction case.
+D. Data Collection Details
+We ﬁlter the points and images that are used for train-
+ing. For start with a dataset of 500 steps for each of 10
+episodes from 360 different environments (for our main
+Gibson dataset), for a total of 1.8M total images. We discard
+any training images in this dataset containing fewer than 1
+collision point or fewer than 5 non-collision points within
+the camera frustum. This yields a dataset of 800K images.
+E. Training Details
+Optimization: At train time, we use a batch size of 128
+images. In the remote point prediction setting, we randomly
+sample 150 trajectory points to query in each example. We
+train each remote prediction model for 20 epochs over the
+above 800K image dataset. We train egocentric models for
+5 epochs, which maximizes performance on the validation
+set. All models are optimized with Adam [20], following a
+cosine schedule with a starting value of 2e-5, a maximum
+value of 2e-4 after 30% of training has elapsed, and a ﬁnal
+value of 1e-5. Training a remote prediction model takes
+approximately 12 hours on two Nvidia 2080Ti GPUs.
+Data Augmentation: We apply augmentation in the form
+of random horizontal ﬂips, and random horizontal shifts
+with percentage shift distributed normally with σ = 10% .
+All image augmentations are equivalently applied to the
+camera matrices, so that trajectory points still correctly line
+up with image contents. In the remote prediction setting,
+we also apply 2D Gaussian noise with σ = 3 cm within
+the ﬂoor plane to the query points’ scene coordinates, to
+encourage smoothness and maximize the number of pixels
+being supervised across epochs.
+F. Comparison to Learning to Fly by Crashing
+Learning to Fly By Crashing (LFC) [11] is a prior work
+which uses real world drone trajectories to learn a model to
+predict whether a drone’s egocentric image is ’near’ or ’far’
+from colliding with the environment, which approximately
+translates to predicting whether the agent is within K steps
+of colliding, for K chosen at training time.
+To enable comparison, we created versions of our model
+which emulate LFC’s original binary training task. LFC is
+Table 4. Quantitative results for distance function decoding
+Distance Function
+MAE RMSE %≤t
+LFC (K=2) 1.30 1.46 0.101
+LFC (K=4) 0.95 1.17 0.22
+LFC (K=6) 0.73 0.96 0.294
+LFC (K=8) 0.61 0.841 0.335
+Regression 0.96 1.14 0.13
+Classiﬁcation 0.58 0.79 0.36
+Table 5. Quantitative results for threshold binary classiﬁcation
+F1 Score
+K=2 K=4 K=6 K=8
+LFC 0.85 0.77 0.72 0.62
+Ours 0.86 0.79 0.74 0.66
+most similar to egocentric setting, so we adopt the same
+prediction backbone and training methods as is described
+in Section C. We replace the usual regression or multi-class
+classiﬁcation output with a single scalar output. We then use
+a binary cross entropy loss, with labels specifying whether
+the steps-to-collision value is greater or less than a given K.
+We trained a version of this LFC-analogous model for K =
+2, 4, 6, 8 in order to cover the 0 to 10 step range modelled
+by our main method.
+Distance function are difﬁcult since LFC is aimed at pro-
+ducing a policy as opposed to scene structure or a distance
+function. Nonetheless, we compare on both our own task of
+producing a scene distance function, as well as LFC’s orig-
+inal training task of distinguishing whether the given image
+is within K steps of colliding. To evaluate LFC on our dis-
+tance function task we linearly re-scale it’s output proba-
+bility up to the same 0-4m range as our main method. To
+evaluate our multi-class classiﬁcation model on LFC’s task
+we produce a binary value by determining if the most likely
+step count (argmax) is greater or less than K.
+In Table 4 we observe that our method outperforms LFC
+in distance function prediction across all K as expected.
+Additionally, as seen in Table 5 our method outperforms
+LFC on its binary classiﬁcation task, likely due to multi-
+task learning effects.
+G. Theoretical Modeling
+Our setting can be connected with classic random walk
+problem settings such as the Gambler’s ruin. These settings,
+albeit in simpliﬁed worlds, enable us to derive analytical re-
+sults describing times to collisions. In turn, these analyti-
+cal results explain empirical behavior of our system and of
+baselines. More speciﬁcally, if can characterize how likely
+particular path lengths are, we can ask questions like: is it
+likely that we will see short paths during training? what
+5 10 15 20 25
+Location in Room (z)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0Probability
+Probability of reaching 0 from z
+ in timeframe (q=90%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+5 10 15 20 25
+Location in Room (z)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0Probability
+Probability of reaching 0 from z
+ in timeframe (q=80%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+5 10 15 20 25
+Location in Room (z)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0Probability
+Probability of reaching 0 from z
+ in timeframe (q=70%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+5 10 15 20 25
+Location in Room (z)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0Probability
+Probability of reaching 0 from z
+ in timeframe (q=60%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+5 10 15 20 25
+Location in Room (z)
+10 2
+10 1
+100
+Probability (log scale)
+Probability of reaching 0 from z
+ in timeframe (q=90%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+5 10 15 20 25
+Location in Room (z)
+10 3
+10 2
+10 1
+100
+Probability (log scale)
+Probability of reaching 0 from z
+ in timeframe (q=80%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+5 10 15 20 25
+Location in Room (z)
+10 4
+10 3
+10 2
+10 1
+100
+Probability (log scale)
+Probability of reaching 0 from z
+ in timeframe (q=70%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+5 10 15 20 25
+Location in Room (z)
+10 6
+10 5
+10 4
+10 3
+10 2
+10 1
+100
+Probability (log scale)
+Probability of reaching 0 from z
+ in timeframe (q=60%)
+P(t  z)
+P(t  z+2)
+P(t  z+4)
+P(t  z+10)
+Figure 9. Plots of the probability of seeing a fairly short path as a function of location inside the room. Each ﬁgure plots probability of
+taking the shortest path within a set of tolerances as a function of the location in the room. In other words, the P (t≤ z + 4) plot is the
+probability of having a path that is no more than 4 steps farther than the optimal path and is calculated via ∑z+4
+i=1 PT (t =i). The columns
+vary the probability of moving left q and the rows show linear (top) and logarithmic (bottom) scales. If the agent has a reasonably high
+chance of moving left (q = 90% ), then exactly short paths are surprisingly common. Even with a lower chance of moving left, nearly
+shortest paths are fairly common and well-represented in the training data.
+5 10 15 20 25
+Location in Room
+0
+20
+40
+60
+80
+100
+120Expected Time
+Expected Time as a Function of Location
+Actual Distance
+Expected time with q=90%
+Expected time with q=80%
+Expected time with q=70%
+Expected time with q=60%
+0.55 0.60 0.65 0.70 0.75 0.80 0.85 0.90 0.95
+Probability of going left (q)
+0
+25
+50
+75
+100
+125
+150
+175Expected time
+Expected time to collision at z=20
+as a function of p(left)
+Actual Distance
+Expected Time
+(a) (b)
+Figure 10. Expected time: (a) as a function of location for a set of
+q; (b) as a function ofq for a ﬁxed location.
+path length do we expect?
+Setting: Suppose an agent is in a 1D grid world where cells
+1,...,a − 1 are free and there are walls at cell 0 anda that
+trigger the collision sensors. The agent starts at a position
+z and moves to the right with probability p and to the left
+with probabilityq = 1−p. This corresponds precisely to the
+Gambler’s ruin (our results, and thus notation, follow Feller
+[10], Chapter 14), where a gambler and casino repeatedly
+play a ﬁxed game where the gambler wins dollar with prob-
+abilityp and the casino wins a dollar with probabilityq. The
+gambler starts withz dollars (an integer) and the casino with
+a−z dollars and both play until either the gambler has 0
+dollars (ruin) or winsa dollars (gain). Gambler’s ruin prob-
+lems focus on characterizing the number of rounds the gam-
+bler and casino play. While well studied in the stochastic
+processes area and readily simulated, closed form solutions
+to these problems resist casual solutions since the number
+of rounds is unknown in advance.
+There are a number of results that are of interest to our
+setting. All but the shortest path one appear in Feller [10].
+We will introduce them and then show how these are of use.
+SupposeT is the random variable representing the time to
+collision whose distribution depends on (p,a, andz). Given
+that our agents act with some direction, we are interested in
+games that are biased (or p̸= q). We will model this with
+p < 1
+2. This means the gambler is likely to have ruin or,
+in our setting, the agent is likely to hit the left wall; one
+can reverse the roles of gambler and casino to obtain results
+for hitting the right wall. We focus on the case of ruin (i.e.,
+hitting the left wall). The most most simple results are given
+for time to ruin, and ruin serves as a reasonable proxy for
+time to collision because ruin is virtually guaranteed forp<
+1
+2 and reasonably-sizeda).
+Probability of Ruin: We are generally concerned with set-
+tings where the agent moves forward with high probability.
+For a fair (p = q) game, the probability of hitting the left
+wall/ruin is 1−z/a. For an unfair game (p̸=q), the prob-
+ability is given by [10] as
+(q/p)a− (q/p)z
+(q−p)a− 1 , (3)
+which becomes extraordinarily likely high as z and a get
+bigger so long as there is some advantage for the house (i.e.,
+the agent is more likely to go left than right).
+Expected duration: the expected duration of the game
+(i.e., E[T ]) is important because the expected value of a
+distribution is the minimum for predicting samples for that
+distribution. Thus, a system that models time to collisions
+by minimizing the L2 error between samples from that dis-
+tribution and the prediction has a minimum at the expected
+value of the distribution. The expected value has a clean,
+closed form expression ofz(a−z) forp = 1
+2 and
+E[T ] = z
+q−p− a
+q−p· 1− (q/p)z
+1− (q/p)a (4)
+forp̸= 1
+2. In Fig. 10, we plot some plots of the expected
+time as (a) a function of location for a set of qs; and (b) a
+function ofq for a ﬁxed location.
+ThisE[T ] is important because a network trained to min-
+imize the L 2 distance / MSE between its predictions and
+samples fromT has its minimum on atE[T ]. Across all lo-
+cations and probabilities of moving towards the nearest wall
+q,E[T ]>z and is an overestimate by a factor that depends
+onq.
+Probability of seeing the shortest path to the wall: One
+might wonder how frequently we would sample a shortest
+path to the wall given that we observe a time to collision.
+Without loss of generality, assume thatz≤a/2: the short-
+est path to any wall goes to the left and takes z steps. The
+probability of seeing the shortest path given a sample is then
+given byqz. This can be seen by noting that one only has to
+look at the tree of possible paths after z steps have played
+out. If all steps go to the left, then there is a collision; oth-
+erwise the result is not a shortest path. The probability of
+seeing the shortest path is relatively small for large rooms.
+Distribution over probability of ruin in t steps. If the
+shortest path takest =z steps, we may be equally happy to
+reach the nearest surface int =z+2 ort =z+4 steps since
+these distinctions may be washed out in actuation noise.
+There are known results for the particular case where we
+are only concerned with time to arrival at the leftmost wall
+or ruin. This helps us characterize how frequently we might
+see nearly-optimal paths to the wall. This is given by the
+involved but analytical formula [10] (replacing Feller’s n
+with ourt)
+pT (t|ruin) =a−12tp(t−z)/2q(t+z)/2
+a−1∑
+v=1
+cost−1
+(πv
+a
+)
+sin
+(πv
+a
+)
+sin
+(πzv
+a
+)
+,
+(5)
+which gives (assuming ruin occurs), the probability of it oc-
+curring on the tth step. This is a pT (t|ruin) rather than
+pT (t), the overwhelming likelihood of ruin means this gives
+close agreement to empirical simulation results for termi-
+nation. This underestimates probabilities of getting a short
+path in the middle of rooms but otherwise gives good agree-
+ment.
+We plot distributions of PT in Fig. 9 for a large room
+a = 51: note that with a step size of 25cm, this room would
+be 12.5m across. The ﬁgure shows that if the agent has
+a reasonably high chance of moving towards the nearest
+wall (q = 90% ), then exactly short paths are surprisingly
+common. Even with a lower chance of moving towards
+the wall, nearly shortest paths are fairly common and well-
+represented in the training data. The only conditions under
+which one is unlikely to see fairly short paths is when the
+agent wanders (q small) or the room is enormous ( a very
+large). Wandering can be ﬁxed by picking a more forward-
+moving policy; the room can be ﬁxed by increasing the step
+size, which effectively reducesa.
+H. Qualitative Results Tables
+We show extended versions of Figures 4 and of the main
+paper in Figures 11 and 12 respectively. These examples
+are randomly selected from the same set of examples used
+for metric evaluation (examples with at least 10% of the 4m
+× 4m area infront of the agent being freespace).
+Figure 11. Randomly selected examples of the conditional probability P (t|α) for grids of scene points and a varying heading angle α as
+shown by markers in blue. Probabilities are obtained from a classiﬁcation model trained with noisy random walks.
+In Fig. 11, we show examples of the conditional probability P (t|α) for grids of scene points and a varying heading angle
+α. This visualizes the underlying representation used to produce distance functions. A distance function can be produced
+by taking the minimum prediction for each point across all visualized angles. Our method correctly predicts that points for
+which the heading angle faces a nearby obstacle or surface will have a low distance (shown in purple), whereas points where
+the heading angle leads to an open space have a higher distance (shown in yellow). In row 2, we see an example of the
+model’s reasoning for various heading angles around a doorway. In the ﬁrst column, the model recognizes that if the agent
+is below the doorway in the image it will likely continue into free space, but if the heading angle faces towards the doorway
+from above it in the image, it is unlikely that the random walk will successfully traverse through, so we see a low prediction.
+Ground Truth Noisy Train Noiseless Train
+Ground Truth Noisy Train Noiseless Train
+Ground Truth Noisy Train Noiseless Train
+Figure 12. Randomly selected examples of 2D scene distance functions extracted from (left) the simulator navigation-mesh; (middle) a
+model trained on noisy random walks; or (right) a model trained on noise-free random walks
+In Fig. 12, we show examples of the ﬁnal distance function output of a classiﬁcation model trained with either noisy or
+noiseless random walks, as compared to the ground truth. As in the main paper, the presence of points is used to indicate
+whether each method predicted the region to be freespace, so the results support that our model is generally accurate in
+predicting the visible regions of the scene that are traversable. The model produces lower values near obstacles, and high
+values in the middle of open spaces.
+Binaural Spectrogram Input Predicted 
+Distribution
+Egocentric 
+Reference Image
+0 steps
+10 steps
+Left Ear 0° +45°-45°Right Ear
+ (Not used by model)
+Figure 13. Selected examples of echolocation-based egocentric prediction distributions. Each row shows the model input (left), predicted
+P (t|α) distribution (middle) and a reference image (right) which was not provided as input to the model.
+In Fig. 13 we show examples of per-timestep egocentric predictions made by our egocentric sound-based model from
+Section 4.4. The two spectrogram images shown for each timestep are stacked to create a two channel image input to the
+model. As with the other egocentric images, the prediction takes the form of a distribution ofP (t|α), with angles represented
+by the turn angle of the action next taken next by the agent.

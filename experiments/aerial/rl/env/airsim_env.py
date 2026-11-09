@@ -26,7 +26,6 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from experiments.aerial.rl.scene_intent import annotation_yaw_rad
 from experiments.aerial.rl.env.action import (
     body_delta_limits,
     body_delta_to_velocity_ned,
@@ -42,6 +41,27 @@ try:  # pragma: no cover - import shim; exercised on the 4090 host
     from lib import sanity  # type: ignore
 except Exception:  # noqa: BLE001
     sanity = None  # type: ignore
+
+
+def annotation_yaw_rad(yaw: float) -> float:
+    """Street annotations store yaw in degrees. A value already inside ±π stays in radians."""
+    y = float(yaw)
+    if abs(y) > 2.0 * math.pi + 1e-3:
+        return math.radians(y)
+    return y
+
+
+def decode_scene_bgr(raw: np.ndarray) -> Optional[np.ndarray]:
+    """Decode a Scene JPEG. An empty grab returns None instead of raising."""
+    buf = np.asarray(raw)
+    if buf.size == 0:
+        return None
+    import cv2  # type: ignore
+
+    try:
+        return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    except cv2.error:
+        return None
 
 
 @dataclass
@@ -323,16 +343,18 @@ class AirSimDroneEnv:
 
     # -- capture helpers (lifted from the probes) -------------------------
     def _grab_scene_native(self, client: Any) -> np.ndarray:
-        import cv2  # type: ignore
-
         airsim = self._airsim
         rq = [airsim.ImageRequest(self.config.camera, airsim.ImageType.Scene, False, True)]
-        r = client.simGetImages(rq, **self._vk)[0]
-        raw = np.frombuffer(bytes(r.image_data_uint8), dtype=np.uint8)
-        img = cv2.imdecode(raw, cv2.IMREAD_COLOR)  # BGR
-        if img is None:
-            raise RuntimeError("empty/undecodable Scene buffer")
-        return np.ascontiguousarray(img[..., ::-1], dtype=np.uint8)  # RGB
+        last = "no frame"
+        for _ in range(5):
+            r = client.simGetImages(rq, **self._vk)[0]
+            raw = np.frombuffer(bytes(r.image_data_uint8), dtype=np.uint8)
+            img = decode_scene_bgr(raw)
+            if img is not None:
+                return np.ascontiguousarray(img[..., ::-1], dtype=np.uint8)  # RGB
+            last = "empty" if raw.size == 0 else "undecodable"
+            time.sleep(0.05)
+        raise RuntimeError(f"empty/undecodable Scene buffer ({last})")
 
     def _grab_scene(self, client: Any) -> np.ndarray:
         import cv2  # type: ignore

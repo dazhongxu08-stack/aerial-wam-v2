@@ -1,7 +1,7 @@
 {
   "map_id": "env_airsim_16",
-  "version": "urban_regions_v4_20260916",
-  "description": "v4: add water_west_north_r17 (R17 smoke spawn over open water); shrink interior_west_north to R09 block band.",
+  "version": "urban_regions_v5_20260923",
+  "description": "v5: expand interior_west_north y to 115 so inland hard routes R0/R4 (spawn y≈101) count as interior; still inland≫100m, not water.",
   "coordinate_system": "AirSim world XY (meters), same as annotation pos[0][:2]",
   "urban_regions": [
     {
@@ -48,12 +48,12 @@
   "urban_interior": [
     {
       "id": "interior_west_north",
-      "label": "West north street blocks (R09; east of R17 water)",
+      "label": "West north street blocks (R09 + inland R0/R4 band; east of R17 water)",
       "polygon_xy": [
         [-1200.0, -35.0],
         [-900.0, -35.0],
-        [-900.0, 80.0],
-        [-1200.0, 80.0]
+        [-900.0, 115.0],
+        [-1200.0, 115.0]
       ]
     },
     {

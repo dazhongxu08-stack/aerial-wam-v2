@@ -1,0 +1,65 @@
+# Depth-center finetune. Global symlog MSE is fit by a ~26 m field, so the
+# forward-view center never shows an obstacle that is really inside 18 m.
+# Collision terms are scaled to 0: this run only moves depth reconstruction.
+env:
+  backend: mock
+  host: 127.0.0.1
+  port: 41451
+  camera: front_custom
+  vehicle: drone_1
+  width: 224
+  height: 224
+  step_hz: 5.0
+  grab_depth: false
+  health_check: true
+  seed: 0
+buffer:
+  capacity_episodes: 1000
+  seed: 0
+reward:
+  w_progress: 1.0
+  w_collision: 10.0
+  w_maneuver: 0.01
+  success_bonus: 10.0
+  success_dist_m: 3.0
+dynamics:
+  kind: torch
+  latent_dim: 8
+  collide_radius_m: 2.0
+world_model:
+  recurrent_dim: 512
+  stoch_dim: 32
+  stoch_classes: 32
+  pred_transform: symlog
+  reward_head: two_hot
+  num_bins: 255
+  bin_lo: -20.0
+  bin_hi: 20.0
+  free_bits: 1.0
+  loss_scales:
+    pred: 1.0
+    dyn: 1.0
+    rep: 0.1
+    reward: 1.0
+    depth: 1.75
+  coll_pos_weight: 1.5
+  coll_near_depth_m: 8.0
+  coll_rank_hinge_weight: 0.0
+  coll_rank_hinge_margin: 0.25
+  coll_hinge_fwd_max_m: 6.0
+  coll_fwd_depth_aux_weight: 1.0
+  coll_loss_scale: 0.0
+  coll_early_fwd_m: 0.0
+  coll_early_yaw_hinge_weight: 0.0
+  coll_early_yaw_margin: 0.1
+  center_depth_weight: 2.0
+  reward_dt: 0.2
+  decoder:
+    train_only: true
+  lr: 3.0e-05
+  train_steps_per_update: 1
+  grad_clip: 1000.0
+  device: cuda
+  checkpoint_dir: experiments/aerial/rl/artifacts/wm_ckpt_center_depth_r5_20260929
+  depth_head:
+    center_frac: 0.5

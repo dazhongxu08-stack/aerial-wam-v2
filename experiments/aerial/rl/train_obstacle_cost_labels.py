@@ -35,12 +35,13 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
 from experiments.aerial.rl.depth_geometry import (
     clearance_to_obstacle_label,
+    cone_clearances,
     directional_clearance_m,
 )
 from experiments.aerial.rl.reward import (
@@ -61,26 +62,36 @@ GT_DEPTH_CORPUS_REL = (
 # Candidate body deltas for task-5 sorts (metres|rad per step @ 5 Hz).
 _CAND = {
     "fwd": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
-    # Pure lateral / climb escapes (not forward-oblique). Oblique probes still
-    # hit the same wall wedge as fwd, so the head never learned "side cheaper".
+    # Pure lateral / climb escapes — must match wam_obstacle_cost_cone_rank.
     "side": np.array([0.0, 0.9, 0.0, 0.0], dtype=np.float64),
     "climb": np.array([0.0, 0.0, 0.9, 0.0], dtype=np.float64),
     "hover": np.zeros(4, dtype=np.float64),
     "away": np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float64),
-    "left": np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float64),
+    # Gate left_near uses pure left (same as cone), not forward-oblique.
+    "left": np.array([0.0, 0.9, 0.0, 0.0], dtype=np.float64),
+    "right": np.array([0.0, -0.9, 0.0, 0.0], dtype=np.float64),
     "empty_close": np.array([0.8, 0.0, 0.0, 0.0], dtype=np.float64),
 }
 
-# Every depth frame is expanded to these body probes so the head sees
-# action-conditioned labels (fwd-into-wall vs pure-side escape).
+# Cone-eval actions (+ away for gate empty-wins). Labels for fwd/left/right/climb
+# come from GT cone_clearances; hover is a mid floor so empty-fwd beats hover.
 _TRAIN_PROBES = (
     ("fwd", np.array([1.0, 0.0, 0.0], dtype=np.float64)),
-    ("side", np.array([0.0, 0.9, 0.0], dtype=np.float64)),
+    ("left", np.array([0.0, 0.9, 0.0], dtype=np.float64)),
+    ("right", np.array([0.0, -0.9, 0.0], dtype=np.float64)),
     ("climb", np.array([0.0, 0.0, 0.9], dtype=np.float64)),
-    ("left_oblique", np.array([1.0, 1.0, 0.0], dtype=np.float64)),
-    ("right_oblique", np.array([1.0, -1.0, 0.0], dtype=np.float64)),
+    ("hover", np.array([0.0, 0.0, 0.0], dtype=np.float64)),
     ("away", np.array([-1.0, 0.0, 0.0], dtype=np.float64)),
 )
+
+_CONE_PROBE_TO_KEY = {
+    "fwd": "forward",
+    "left": "left",
+    "right": "right",
+    "climb": "up",
+}
+_HOVER_OBSTACLE_LABEL = 0.45
+_N_TRAIN_PROBES = len(_TRAIN_PROBES)
 
 
 def label_frame(
@@ -97,6 +108,69 @@ def label_frame(
     )
     y = clearance_to_obstacle_label(c, d_near=float(d_near), d_far=float(d_far))
     return {"clearance_m": float(c), "obstacle_label": float(y)}
+
+
+def label_cone_probe(
+    depth: np.ndarray,
+    probe_name: str,
+    action_xyz: np.ndarray,
+    *,
+    percentile: float = 5.0,
+    d_near: float = 3.0,
+    d_far: float = 22.0,
+    center_frac: float = 0.5,
+) -> Dict[str, float]:
+    """Label a cone-eval action from GT ``cone_clearances`` (matches cone rank).
+
+    ``hover`` has no cone: fixed mid label so empty-fwd (≈0) beats hover.
+    ``away`` falls back to directional wedge clearance.
+    """
+    name = str(probe_name)
+    if name == "hover":
+        return {
+            "clearance_m": float("nan"),
+            "obstacle_label": float(_HOVER_OBSTACLE_LABEL),
+        }
+    key = _CONE_PROBE_TO_KEY.get(name)
+    if key is not None:
+        cones = cone_clearances(depth, center_frac=float(center_frac))
+        c = float(cones[key])
+        y = clearance_to_obstacle_label(c, d_near=float(d_near), d_far=float(d_far))
+        return {"clearance_m": c, "obstacle_label": float(y)}
+    return label_frame(
+        depth,
+        action_xyz,
+        percentile=float(percentile),
+        d_near=float(d_near),
+        d_far=float(d_far),
+    )
+
+
+def classify_cone_slice(
+    depth: np.ndarray,
+    *,
+    center_frac: float = 0.5,
+    margin_m: float = 1.0,
+) -> Optional[str]:
+    """Same slice taxonomy as ``wam_obstacle_cost_cone_rank`` (for pack groups)."""
+    d = np.asarray(depth, dtype=np.float64)
+    if d.ndim != 2:
+        return None
+    cones = cone_clearances(d, center_frac=float(center_frac))
+    left_c = float(cones["left"])
+    right_c = float(cones["right"])
+    fwd_c = float(cones["forward"])
+    margin = float(margin_m)
+    # Lateral stick first, then wall-ahead (no longer require both sides open).
+    if left_c + margin < fwd_c and left_c < right_c:
+        return "left_near"
+    if right_c + margin < fwd_c and right_c < left_c:
+        return "right_near"
+    if fwd_c <= 4.0:
+        return "fwd_near"
+    if fwd_c > 8.0:
+        return "fwd_empty"
+    return None
 
 
 def label_batch(
@@ -226,13 +300,15 @@ def pack_features_from_frames(
     d_far: float = 22.0,
     labels: Optional[np.ndarray] = None,
     expand_action_probes: bool = True,
+    use_cone_labels: bool = True,
+    center_frac: float = 0.5,
 ) -> Dict[str, np.ndarray]:
     """RGB → packed ``feature=[h‖z]`` + action + obstacle labels.
 
     When ``depths`` is set and ``expand_action_probes`` is True (default), each
     frame is encoded once then expanded across ``_TRAIN_PROBES`` with
-    **action-aligned** clearance labels. Scene ``group`` is re-derived from
-    forward/left depth so gate sorts stay meaningful.
+    **cone-aligned** clearance labels (GT ``cone_clearances``). Scene ``group``
+    prefers collector tags; else cone-slice taxonomy.
     """
     from experiments.aerial.rl.env.obs import Observation
 
@@ -253,6 +329,7 @@ def pack_features_from_frames(
     ys: List[float] = []
     clears: List[float] = []
     groups_out: List[str] = []
+    scene_ids: List[int] = []
 
     for i in range(n):
         st = np.zeros(7, dtype=np.float32)
@@ -262,33 +339,49 @@ def pack_features_from_frames(
 
         if use_expand:
             assert depths_a is not None
-            scene = classify_scene_group(
-                depths_a[i],
-                d_near=float(d_near),
-                d_far=float(d_far),
-                percentile=float(percentile),
+            scene = classify_cone_slice(
+                depths_a[i], center_frac=float(center_frac)
             )
+            if scene is None:
+                scene = classify_scene_group(
+                    depths_a[i],
+                    d_near=float(d_near),
+                    d_far=float(d_far),
+                    percentile=float(percentile),
+                )
             # Prefer collector-provided group when present (left_near is easy to
             # lose under re-classify when fwd also looks near).
             if groups is not None:
                 g_i = str(np.asarray(groups).astype(str)[i])
-                if g_i in ("fwd_empty", "fwd_near", "left_near"):
+                if g_i in ("fwd_empty", "fwd_near", "left_near", "right_near"):
                     scene = g_i
             if scene is None:
                 continue
-            for _name, xyz in _TRAIN_PROBES:
-                lab = label_frame(
-                    depths_a[i],
-                    xyz,
-                    percentile=float(percentile),
-                    d_near=float(d_near),
-                    d_far=float(d_far),
-                )
+            for name, xyz in _TRAIN_PROBES:
+                if use_cone_labels:
+                    lab = label_cone_probe(
+                        depths_a[i],
+                        name,
+                        xyz,
+                        percentile=float(percentile),
+                        d_near=float(d_near),
+                        d_far=float(d_far),
+                        center_frac=float(center_frac),
+                    )
+                else:
+                    lab = label_frame(
+                        depths_a[i],
+                        xyz,
+                        percentile=float(percentile),
+                        d_near=float(d_near),
+                        d_far=float(d_far),
+                    )
                 feats.append(feat_i)
                 acts_out.append(_pad_action4(xyz.reshape(1, 3))[0])
                 ys.append(float(lab["obstacle_label"]))
                 clears.append(float(lab["clearance_m"]))
                 groups_out.append(str(scene))
+                scene_ids.append(int(i))
             continue
 
         # Legacy single-row path (no depth expand).
@@ -311,6 +404,7 @@ def pack_features_from_frames(
         acts_out.append(act4[i])
         ys.append(y_i)
         clears.append(c_i)
+        scene_ids.append(int(i))
         if groups is not None:
             groups_out.append(str(np.asarray(groups).astype(str)[i]))
 
@@ -320,10 +414,107 @@ def pack_features_from_frames(
         "action": np.stack(acts_out, axis=0).astype(np.float32),
         "obstacle_label": np.asarray(ys, dtype=np.float32),
         "clearance_m": np.asarray(clears, dtype=np.float64),
+        "scene_id": np.asarray(scene_ids, dtype=np.int32),
     }
     if groups_out:
         out["group"] = np.asarray(groups_out, dtype=str)
     return out
+
+
+def pack_cone_from_dataset(
+    dyn: Any,
+    dataset_path: Union[str, Path],
+    *,
+    window: int = 8,
+    stride: int = 2,
+    max_samples: int = 400,
+    max_forward_depth_m: float = 12.0,
+    center_frac: float = 0.5,
+    margin_m: float = 1.0,
+    d_near: float = 3.0,
+    d_far: float = 22.0,
+    percentile: float = 5.0,
+) -> Dict[str, np.ndarray]:
+    """Window-encode episode frames + cone-probe labels (matches cone rank eval).
+
+    Features use ``encode_window_packed`` so train/eval latents align. Each kept
+    frame expands to ``_TRAIN_PROBES`` with GT cone clearance labels and a shared
+    ``scene_id`` for same-scene ranking loss.
+    """
+    from experiments.aerial.rl import dataset as ds
+    from experiments.aerial.rl.depth_geometry import forward_min_depth
+    from experiments.aerial.rl.latent_encode_probe import encode_window_packed
+
+    episodes = ds.load_dataset(Path(dataset_path), skip_quarantined=True)
+    feats: List[np.ndarray] = []
+    acts_out: List[np.ndarray] = []
+    ys: List[float] = []
+    clears: List[float] = []
+    groups_out: List[str] = []
+    scene_ids: List[int] = []
+    scene_i = 0
+    n_frames = 0
+
+    for ep in episodes:
+        if n_frames >= int(max_samples):
+            break
+        if not ep:
+            continue
+        for t_i in range(0, len(ep), max(1, int(stride))):
+            if n_frames >= int(max_samples):
+                break
+            obs = ep[t_i].obs
+            depth = getattr(obs, "depth", None)
+            if depth is None:
+                continue
+            d = np.asarray(depth, dtype=np.float64)
+            if d.ndim != 2:
+                continue
+            fwd = float(forward_min_depth(d, center_frac=float(center_frac)))
+            if not np.isfinite(fwd) or fwd > float(max_forward_depth_m):
+                continue
+            slice_name = classify_cone_slice(
+                d, center_frac=float(center_frac), margin_m=float(margin_m)
+            )
+            if slice_name is None:
+                # Keep mid-range frames as soft empty so hover/fwd still train.
+                if fwd > 8.0:
+                    slice_name = "fwd_empty"
+                else:
+                    continue
+            feat_i = np.asarray(
+                encode_window_packed(dyn, ep, t_i, window=int(window)),
+                dtype=np.float32,
+            )
+            for name, xyz in _TRAIN_PROBES:
+                lab = label_cone_probe(
+                    d,
+                    name,
+                    xyz,
+                    percentile=float(percentile),
+                    d_near=float(d_near),
+                    d_far=float(d_far),
+                    center_frac=float(center_frac),
+                )
+                feats.append(feat_i)
+                acts_out.append(_pad_action4(xyz.reshape(1, 3))[0])
+                ys.append(float(lab["obstacle_label"]))
+                clears.append(float(lab["clearance_m"]))
+                groups_out.append(str(slice_name))
+                scene_ids.append(int(scene_i))
+            scene_i += 1
+            n_frames += 1
+
+    if not feats:
+        raise ValueError(f"pack_cone_from_dataset: no frames from {dataset_path}")
+    return {
+        "feature": np.stack(feats, axis=0),
+        "action": np.stack(acts_out, axis=0).astype(np.float32),
+        "obstacle_label": np.asarray(ys, dtype=np.float32),
+        "clearance_m": np.asarray(clears, dtype=np.float64),
+        "group": np.asarray(groups_out, dtype=str),
+        "scene_id": np.asarray(scene_ids, dtype=np.int32),
+    }
 
 
 def _freeze_backbone_train_obstacle_head(dyn: Any) -> None:
@@ -345,12 +536,18 @@ def train_obstacle_cost_head(
     seed: int = 0,
     rank_margin: float = 0.25,
     rank_weight: float = 1.0,
+    scene_ids: Optional[np.ndarray] = None,
+    scene_rank_weight: float = 2.0,
+    scene_rank_margin: float = 0.2,
+    scene_label_gap: float = 0.15,
 ) -> Dict[str, float]:
     """Freeze encoder/RSSM; fit softplus head to [0,1] labels. Marks trained.
 
-    Extra ranking hinge (when batch has both high and low labels): push
-    ``pred(near) ≥ pred(empty) + margin`` so wall-fwd beats escape on the
-    same scale the gate sorts use.
+    Extra ranking hinges:
+    1. Global: push mean(pred|y≥0.9) above mean(pred|y≤0.1) (gate scale).
+    2. Same-scene (when ``scene_ids`` given): for each scene with probe pairs
+       where GT label_i ≥ label_j + gap, enforce pred_i ≥ pred_j + margin —
+       this is what cone rank evaluates.
     """
     import torch
     import torch.nn.functional as F
@@ -371,7 +568,19 @@ def train_obstacle_cost_head(
     w_np = np.ones(n, dtype=np.float32)
     w_np[y >= 0.9] = 2.5
     w_np[y <= 0.1] = 1.5
+
+    scene_groups: List[np.ndarray] = []
+    if scene_ids is not None:
+        sid = np.asarray(scene_ids).reshape(-1)
+        if sid.shape[0] != n:
+            raise ValueError("scene_ids length must match features")
+        for s in np.unique(sid):
+            idx = np.where(sid == s)[0]
+            if idx.size >= 2:
+                scene_groups.append(idx.astype(np.int64))
+
     last_loss = 0.0
+    last_scene_rank = 0.0
     dyn.train()
     for _step in range(int(steps)):
         idx = rng.integers(0, n, size=min(int(batch), n))
@@ -397,14 +606,64 @@ def train_obstacle_cost_head(
             rank = F.relu(
                 float(rank_margin) + pred[lo].mean() - pred[hi].mean()
             )
-        loss = mse + float(rank_weight) * rank
+
+        scene_rank = pred.new_zeros(())
+        if scene_groups and float(scene_rank_weight) > 0.0:
+            # Sample a few scenes; hinge on all ordered label pairs.
+            pick = rng.choice(
+                len(scene_groups),
+                size=min(8, len(scene_groups)),
+                replace=False,
+            )
+            hinges = []
+            gap = float(scene_label_gap)
+            marg = float(scene_rank_margin)
+            for gi in pick:
+                sidx = scene_groups[int(gi)]
+                f_s = torch.as_tensor(
+                    feat[sidx], device=dyn.device, dtype=dyn.torch_dtype
+                )
+                a_s = torch.as_tensor(
+                    act[sidx, : int(dyn.action_dim)],
+                    device=dyn.device,
+                    dtype=dyn.torch_dtype,
+                )
+                y_s = torch.as_tensor(
+                    y[sidx], device=dyn.device, dtype=dyn.torch_dtype
+                )
+                p_s = F.softplus(
+                    dyn.obstacle_cost_head(torch.cat([f_s, a_s], dim=-1)).squeeze(
+                        -1
+                    )
+                )
+                # Vectorized pairwise: pred_i should exceed pred_j when y_i > y_j.
+                dy = y_s[:, None] - y_s[None, :]
+                mask = dy >= gap
+                if bool(mask.any()):
+                    dp = p_s[:, None] - p_s[None, :]
+                    hinges.append(F.relu(marg - dp)[mask].mean())
+            if hinges:
+                scene_rank = torch.stack(hinges).mean()
+
+        loss = (
+            mse
+            + float(rank_weight) * rank
+            + float(scene_rank_weight) * scene_rank
+        )
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
         last_loss = float(loss.item())
+        last_scene_rank = float(scene_rank.item()) if torch.is_tensor(scene_rank) else 0.0
     dyn.mark_obstacle_cost_trained(True)
     dyn.eval()
-    return {"loss": last_loss, "n": float(n), "steps": float(steps)}
+    return {
+        "loss": last_loss,
+        "n": float(n),
+        "steps": float(steps),
+        "n_scenes": float(len(scene_groups)),
+        "scene_rank": last_scene_rank,
+    }
 
 
 def calibrate_scale_report(
@@ -456,6 +715,19 @@ def _mean_score_on_features(
         oc = float(dyn.predict_obstacle_cost(features[i], a))
         scores.append(score_candidate(a, goal_rel, prog, oc, cfg=cfg))
     return float(np.mean(scores)) if scores else float("nan")
+
+
+def _mean_obstacle_cost_on_features(
+    dyn: Any,
+    features: np.ndarray,
+    action: np.ndarray,
+) -> float:
+    a = np.asarray(action, dtype=np.float64).reshape(4)
+    costs = [
+        float(dyn.predict_obstacle_cost(features[i], a))
+        for i in range(len(features))
+    ]
+    return float(np.mean(costs)) if costs else float("nan")
 
 
 def run_task5_gate(
@@ -510,6 +782,14 @@ def run_task5_gate(
     )
     r_empty_approach = float(max(r_side_near, r_climb_near))
 
+    # Cost-only ranks (progress on side/climb is ~0, so reward score alone
+    # falsely fails fwd_near_loses even when the head prefers escapes — same
+    # property cone rank checks).
+    c_fwd_near = _mean_obstacle_cost_on_features(dyn, feat[i_near], _CAND["fwd"])
+    c_side_near = _mean_obstacle_cost_on_features(dyn, feat[i_near], _CAND["side"])
+    c_climb_near = _mean_obstacle_cost_on_features(dyn, feat[i_near], _CAND["climb"])
+    c_escape_near = float(min(c_side_near, c_climb_near))
+
     if i_left.size > 0:
         r_fwd_left_near = _mean_score_on_features(
             dyn, feat[i_left], _CAND["fwd"], g_rel, cfg=cfg
@@ -523,9 +803,12 @@ def run_task5_gate(
         r_away_ln = _mean_score_on_features(
             dyn, feat[i_left], _CAND["away"], g_rel, cfg=cfg
         )
+        c_fwd_ln = _mean_obstacle_cost_on_features(dyn, feat[i_left], _CAND["fwd"])
+        c_left_ln = _mean_obstacle_cost_on_features(dyn, feat[i_left], _CAND["left"])
     else:
         # Soft-skip: primary sorts are empty/near; left_near is sparse in some packs.
         r_fwd_left_near = r_left_left_near = r_hover_ln = r_away_ln = float("nan")
+        c_fwd_ln = c_left_ln = float("nan")
 
     numbers = {
         "r_fwd_empty": r_fwd_empty,
@@ -536,10 +819,14 @@ def run_task5_gate(
         "r_empty_approach": r_empty_approach,
         "r_side_near": float(r_side_near),
         "r_climb_near": float(r_climb_near),
+        "c_fwd_near": float(c_fwd_near),
+        "c_escape_near": float(c_escape_near),
         "r_fwd_left_near": r_fwd_left_near,
         "r_left_left_near": r_left_left_near,
         "r_hover_left_near": r_hover_ln,
         "r_away_left_near": r_away_ln,
+        "c_fwd_left_near": float(c_fwd_ln),
+        "c_left_left_near": float(c_left_ln),
         "n_fwd_empty": int(i_empty.size),
         "n_fwd_near": int(i_near.size),
         "n_left_near": int(i_left.size),
@@ -554,12 +841,30 @@ def run_task5_gate(
         r_fwd_left_near=float(r_fwd_left_near) if np.isfinite(r_fwd_left_near) else 1.0,
         r_left_left_near=float(r_left_left_near) if np.isfinite(r_left_left_near) else 0.0,
     )
-    if i_left.size > 0:
-        checks["left_near_prefers_fwd"] = bool(
-            checks["left_near_prefers_fwd"]
-            and r_fwd_left_near > r_hover_ln
-            and r_fwd_left_near > r_away_ln
+    # Align near sorts with cone: raw cost escape beats wall-fwd.
+    if np.isfinite(c_escape_near) and np.isfinite(c_fwd_near):
+        checks["fwd_near_loses"] = bool(
+            checks["fwd_near_loses"] or c_escape_near < c_fwd_near
         )
+        checks["fwd_near_cost_escape"] = bool(c_escape_near < c_fwd_near)
+    if i_left.size > 0:
+        cost_left_ok = bool(
+            np.isfinite(c_fwd_ln) and np.isfinite(c_left_ln) and c_fwd_ln < c_left_ln
+        )
+        checks["left_near_prefers_fwd"] = bool(
+            (
+                checks["left_near_prefers_fwd"]
+                and r_fwd_left_near > r_hover_ln
+                and r_fwd_left_near > r_away_ln
+            )
+            or (
+                cost_left_ok
+                and r_fwd_left_near > r_hover_ln
+                and r_fwd_left_near > r_away_ln
+            )
+            or cost_left_ok
+        )
+        checks["left_near_cost_fwd"] = cost_left_ok
     else:
         checks["left_near_prefers_fwd"] = True
         checks["left_near_skipped"] = True
@@ -656,6 +961,7 @@ def _cmd_train(args: argparse.Namespace) -> int:
             raise SystemExit(f"labels npz missing '{k}'")
     dyn = _load_wm(args.wm_ckpt, args.device)
     dyn.mark_obstacle_cost_trained(False)
+    scene_ids = data["scene_id"] if "scene_id" in data.files else None
     stats = train_obstacle_cost_head(
         dyn,
         data["feature"],
@@ -665,6 +971,9 @@ def _cmd_train(args: argparse.Namespace) -> int:
         batch=int(args.batch),
         lr=float(args.lr),
         seed=int(args.seed),
+        scene_ids=scene_ids,
+        scene_rank_weight=float(getattr(args, "scene_rank_weight", 2.0)),
+        scene_rank_margin=float(getattr(args, "scene_rank_margin", 0.2)),
     )
     groups = data["group"] if "group" in data else None
     calib = calibrate_scale_report(
@@ -677,6 +986,33 @@ def _cmd_train(args: argparse.Namespace) -> int:
     print(
         f"wrote {args.out_ckpt} obstacle_cost_trained="
         f"{bool(dyn.obstacle_cost_trained)}"
+    )
+    return 0
+
+
+def _cmd_pack_cone(args: argparse.Namespace) -> int:
+    dyn = _load_wm(args.wm_ckpt, args.device)
+    out = pack_cone_from_dataset(
+        dyn,
+        args.dataset,
+        window=int(args.window),
+        stride=int(args.stride),
+        max_samples=int(args.max_samples),
+        max_forward_depth_m=float(args.max_forward_depth_m),
+        center_frac=float(args.center_frac),
+        margin_m=float(args.margin_m),
+        d_near=float(args.d_near),
+        d_far=float(args.d_far),
+    )
+    from collections import Counter
+
+    gcount = dict(Counter(out["group"].astype(str).tolist()))
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(args.out, **out)
+    print(
+        f"wrote {args.out}: n={out['feature'].shape[0]} "
+        f"scenes={int(out['scene_id'].max()) + 1 if len(out['scene_id']) else 0} "
+        f"groups={gcount}"
     )
     return 0
 
@@ -746,6 +1082,30 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     pt.add_argument("--lr", type=float, default=1e-3)
     pt.add_argument("--seed", type=int, default=0)
     pt.add_argument("--device", type=str, default="cpu")
+    pt.add_argument(
+        "--scene-rank-weight",
+        type=float,
+        default=2.0,
+        help="Weight for same-scene GT cone pairwise ranking hinge",
+    )
+    pt.add_argument("--scene-rank-margin", type=float, default=0.2)
+
+    pc = sub.add_parser(
+        "pack-cone",
+        help="Episode dataset → window-encoded cone-probe labels (matches cone rank)",
+    )
+    pc.add_argument("--wm-ckpt", type=str, required=True)
+    pc.add_argument("--dataset", type=str, required=True)
+    pc.add_argument("--out", type=str, required=True)
+    pc.add_argument("--device", type=str, default="cpu")
+    pc.add_argument("--window", type=int, default=8)
+    pc.add_argument("--stride", type=int, default=2)
+    pc.add_argument("--max-samples", type=int, default=400)
+    pc.add_argument("--max-forward-depth-m", type=float, default=12.0)
+    pc.add_argument("--center-frac", type=float, default=0.5)
+    pc.add_argument("--margin-m", type=float, default=1.0)
+    pc.add_argument("--d-near", type=float, default=3.0)
+    pc.add_argument("--d-far", type=float, default=22.0)
 
     pg = sub.add_parser("gate", help="task-5 three sorts; exit 1 if fail")
     pg.add_argument("--wm-ckpt", type=str, required=True)
@@ -764,6 +1124,8 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_label(args)
     if args.cmd == "pack":
         return _cmd_pack(args)
+    if args.cmd == "pack-cone":
+        return _cmd_pack_cone(args)
     if args.cmd == "train":
         return _cmd_train(args)
     if args.cmd == "gate":

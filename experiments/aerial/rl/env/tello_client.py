@@ -65,7 +65,12 @@ class TelloClient:
         self._ka_thread = threading.Thread(target=self._keepalive_loop, daemon=True)
         self._ka_thread.start()
 
-    def _keepalive_loop(self, interval: float = 5.0) -> None:
+    def _keepalive_loop(self, interval: float = 8.0) -> None:
+        """Keep the Tello SDK session alive without thrashing the command link.
+
+        Stock Tello APs can drop after long quiet periods. Prefer a low-rate
+        ``command``-only pulse; avoid flooding ``rc`` on the ground.
+        """
         while self._running:
             slept = 0.0
             while slept < interval:
@@ -111,7 +116,8 @@ class TelloClient:
         self, cmd: str, wait_response: bool = True, timeout: float = 5.0
     ) -> Optional[str]:
         with self._lock:
-            logger.info(">>> %s", cmd)
+            if not cmd.startswith("rc "):
+                logger.info(">>> %s", cmd)
             self._drain_stale()
             self._cmd.settimeout(timeout)
             try:
@@ -137,13 +143,14 @@ class TelloClient:
         return time.time() - self._last_state_ts
 
     def connect(self, retries: int = 4) -> bool:
+        # Weak Tello links often need several seconds for a reply.
         for _ in range(max(1, retries)):
-            if self.send("command", timeout=2.5) == "ok":
+            if self.send("command", timeout=8.0) == "ok":
                 return True
         return False
 
     def stream_on(self) -> bool:
-        return self.send("streamon", timeout=5.0) == "ok"
+        return self.send("streamon", timeout=12.0) == "ok"
 
     def stream_off(self) -> None:
         self.send("streamoff", timeout=3.0)

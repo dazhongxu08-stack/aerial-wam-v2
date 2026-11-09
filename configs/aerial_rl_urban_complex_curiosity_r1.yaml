@@ -1,0 +1,6 @@
+# Curiosity overlay for R1 open-side peel (daytime mainchannel)
+# Lateral clearance curiosity when nose is tight and progress stalls.
+reward:
+  w_curiosity: 0.4
+  curiosity_fwd_thresh_m: 5.0
+  curiosity_max_bonus: 1.5

@@ -1,0 +1,1002 @@
+World Models for Autonomous
+Navigation of Terrestrial Robots from
+LIDAR observations
+Journal of Intelligent & Fuzzy Systems
+XX(X):1–10
+©The Author(s) 2016
+Reprints and permission:
+sagepub.co.uk/journalsPermissions.nav
+DOI: 10.1177/ToBeAssigned
+www.sagepub.com/
+SAGE
+Raul Steinmetz 1, 2, Fabio Demo Rosa 1, Victor Augusto Kich 2, Jair Augusto Bottega 2,
+Ricardo Bedin Grando 3, 4 and Daniel Fernando Tello Gamarra 1
+Abstract
+Autonomous navigation of terrestrial robots using Reinforcement Learning (RL) from LIDAR observations remains
+challenging due to the high dimensionality of sensor data and the sample inefficiency of model-free approaches.
+Conventional policy networks struggle to process full-resolution LIDAR inputs, forcing prior works to rely on simplified
+observations that reduce spatial awareness and navigation robustness. This paper presents a novel model-based RL
+framework built on top of the DreamerV3 algorithm, integrating a Multi-Layer Perceptron Variational Autoencoder (MLP-
+VAE) within a world model to encode high-dimensional LIDAR readings into compact latent representations. These
+latent features, combined with a learned dynamics predictor, enable efficient imagination-based policy optimization.
+Experiments on simulated TurtleBot3 navigation tasks demonstrate that the proposed architecture achieves faster
+convergence and higher success rate compared to model-free baselines such as SAC, DDPG, and TD3. It is worth
+emphasizing that the DreamerV3-based agent attains a 100% success rate across all evaluated environments when
+using the full dataset of the Turtlebot3 LIDAR (360 readings), while model-free methods plateaued below 85%. These
+findings demonstrate that integrating predictive world models with learned latent representations enables more efficient
+and robust navigation from high-dimensional sensory data.
+Keywords
+Deep Reinforcement Learning, Autonomous Navigation, Terrestrial Mobile Robot, TurtleBot3, World Models
+Supplementary Material
+The code and data used in this study are publicly available
+at: https://github.com/raulsteinmetz/turtlebot-dreamerv3.
+Introduction
+Autonomous navigation of terrestrial robots has numerous
+practical applications, including space exploration 1, mining
+operations 2, agriculture 3, household tasks 4, and industrial
+environments5. Deep Reinforcement Learning (DRL) 6 has
+emerged as a powerful approach to enabling robots
+to autonomously learn complex behaviors, dynamically
+adapting to diverse environments through interactions and
+feedback 7. DRL algorithms have demonstrated significant
+potential, offering adaptive solutions to robot navigation
+problems.
+Distance sensors, especially Light Detection and Ranging
+(LIDAR), are widely employed in mapless DRL-based
+navigation tasks due to their reliability, computational
+simplicity, and consistency across simulation and real-world
+deployment. The TurtleBot3 8 robot is widely used as a
+benchmark platform for evaluating DRL methods in mobile
+navigation from LIDAR sensor observations. Prior work
+has applied discrete-action algorithms, such as Deep Q-
+Network (DQN)9, Double Deep Q-Network (DDQN)10, and
+State-Action-Reward-State-Action (SARSA) 11, as well as
+continuous-action algorithms like Soft Actor Critic (SAC)12,
+Deep Deterministic Policy Gradient (DDPG) 13, and Twin
+Delayed DDPG (TD3) 14.
+Model-free continuous-control algorithms such as SAC15,
+DDPG 16, and TD317 have achieved satisfactory performance
+in relatively simple environments. However, their depen-
+dence on direct interaction with the environment leads to
+prolonged training periods and inefficient sample utilization.
+Furthermore, these methods generally process LIDAR sen-
+sor readings directly within policy networks using linear
+layers, which works adequately for a limited number of
+sensor inputs (usually fewer than 20 readings 12–14). When
+handling extensive sensor arrays, such as the complete set
+of 360 readings from the LIDAR sensor of the TurtleBot3,
+this direct processing approach struggles due to increased
+representation complexity and sparse reward signals. These
+challenges complicate the extraction of meaningful features,
+hinder gradient informativeness, and degrade policy training,
+leading to higher failure rates even in basic scenarios.
+In contrast, model-based DRL approaches explicitly build
+an internal predictive model of the environment, anticipating
+future states and rewards18. This predictive capability signif-
+icantly enhances decision-making efficiency, requiring fewer
+1 Universidade Federal de Santa Maria, Brazil
+2 University of Tsukuba, Japan
+3 Universidade Federal de Rio Grande
+4 Universidad Tecnológica del Uruguay, Uruguay
+Corresponding author:
+Daniel Fernando Tello Gamarra
+Email: daniel.gamarra@ufsm.br
+Prepared usingsagej.cls[Version: 2017/01/17 v1.20]
+arXiv:2512.03429v1  [cs.RO]  3 Dec 2025
+2Journal of Intelligent & Fuzzy Systems XX(X)
+interactions with the actual environment and substantially
+improving sample efficiency and reducing training time 19.
+Additionally, recent studies indicate that encoding sensor
+observations into compact, lower-dimensional representa-
+tions using unsupervised learning can significantly enhance
+DRL performance compared to directly feeding raw data into
+policy networks 20. Such encodings allow efficient process-
+ing of richer sensor inputs and can lead to more robust and
+effective navigation policies.
+Although model-free reinforcement learning methods
+remain widely used, recent years have shown a strong shift
+of the state-of-the-art in reinforcement learning towards
+model-based approaches. Algorithms such as DreamerV3 21
+and TD-MPC2 22 have outperformed model-free baselines
+across a wide range of established benchmarks, achieving
+higher sample efficiency and robustness. This demonstrates
+a clear trend in the RL community, where predictive models
+and imagination-based rollouts provide many advantages
+over purely reactive policies. Despite this progress, the
+application of model-based reinforcement learning to mobile
+robot navigation from LIDAR observations has not yet been
+explored. This gap motivates the present study: to investigate
+whether the proven benefits of model-based reinforcement
+learning can be realized in LIDAR-based mapless terrestrial
+navigation tasks.
+At the same time, it is worth noting that research outside
+the DRL community continues to advance model-free
+control strategies in various continuous-control domains.
+For instance, smoothed functional algorithms have been
+employed to optimize Proportional–Integral–Derivative
+(PID) controllers for wind turbines 23, while norm-limited
+Simultaneous Perturbation Stochastic Approximation
+(SPSA) has been applied for active oscillation control
+in drivetrains with backlash nonlinearity 24. Other recent
+contributions include cost-based extremum-seeking methods
+for model-free stabilization 25 and fractional-order PID
+controller designs optimized through heuristic search
+techniques 26.
+Additionally, several optimization-based approaches have
+been proposed for robotic systems that share conceptual
+similarities with model-free control. For example, a Particle
+Swarm Optimization-based neural network PID controller
+has been developed for four-wheeled omnidirectional robots
+to enhance trajectory tracking 27, and a Bee Algorithm
+has been used to tune nonlinear PID variants for two-
+link robotic arms, achieving improved stability under load
+disturbances 28. More recently, the Pelican Optimization
+Algorithm has been applied to mobile robot trajectory
+planning, enabling collision-free navigation and reduced
+path error compared to classical methods 29. These works
+demonstrate the continued relevance of heuristic, model-
+free optimization techniques in robotics. However, such
+methods rely on explicit cost functions and lack predictive
+environmental modeling, distinguishing them fundamentally
+from the model-based DRL paradigm investigated in this
+study.
+Motivated by these insights, this paper proposes a
+novel model-based DRL architecture for terrestrial robot
+navigation using LIDAR data. Built on top of the
+DreamerV3 algorithm 21, our architecture employs a Multi-
+Layer Perceptron Variational Autoencoder 30 to encode
+extensive LIDAR readings along with positional and velocity
+data into a compact latent representation. This encoded
+representation is integrated into the world model’s dynamics
+predictor and controller, enabling efficient processing
+of large sensor arrays and enhancing decision-making
+capabilities. A diagram of the different elements of the
+architecture can be seen in Fig. 1.
+Figure 1.General diagram showing the different elements of
+the proposed agent architecture.
+The primary contributions of this study are:
+1. A model-based deep reinforcement learning frame-
+work for terrestrial robot navigation: Unlike prior
+model-free approaches that depend solely on reactive
+policy updates, the proposed world model explicitly
+learns environmental dynamics from LIDAR data.
+This predictive capability reduces the need for exten-
+sive environment interactions and improves learning
+efficiency and navigation success rates, addressing
+a long-standing limitation in mapless LIDAR-based
+navigation.
+2. An encoder architecture enabling scalable processing
+of full 360-readings LIDAR observations: By intro-
+ducing a Multi-Layer Perceptron Variational Autoen-
+coder to compress high-dimensional sensor data into
+compact latent representations, the method overcomes
+the input-size bottleneck that previously restricted
+DRL navigation to heavily reduced LIDAR subsets.
+This supports richer spatial perception.
+3. Empirical validation of model-based DRL under com-
+plex navigation tasks: Through systematic evaluation
+on the TurtleBot3 platform, the proposed architecture
+demonstrates superior convergence and stability com-
+pared to model-free baselines such as SAC, DDPG,
+and TD3. These results provide concrete experimen-
+tal evidence of the advantages of predictive world
+modeling and variational autoencoders for continuous-
+control navigation.
+4. An open implementation for research reproducibility:
+The complete codebase and simulation setup are
+provided to enable independent validation and further
+methodological development within the scientific
+community.
+The paper is structured as follows: Section 2 reviews
+relevant literature. Section 3 describes the theoretical
+background underlying our proposed algorithm. Section
+Prepared usingsagej.cls
+Steinmetz et al. 3
+4 details the proposed methodology. Section 5 presents
+and discusses the experimental results. Finally, Section 6
+concludes the paper with a discussion of the findings and
+suggestions for future research.
+Related Works
+This section reviews important prior work relevant to
+this paper. We focus specifically on research involving
+the TurtleBot3 navigation task, encoded representations in
+DRL, model-based DRL, World Models, and the Dreamer
+algorithm and its application in robotics.
+The TurtleBot3 Task
+The TurtleBot3 navigation task is a well-established
+benchmark for evaluating DRL algorithms on mobile
+navigation. In discrete control, Escobar-Naranjo et al. 9
+proposed a framework based on the Deep Q-Network (DQN)
+algorithm. Similarly, De Moraes et al. 10 compared DQN
+with the Double Deep Q-Network (DDQN) algorithm,
+finding that DDQN performs better in both simulated and
+real environments. Anas et al. 11 extended this comparison
+to include the State-Action-Reward-State-Action (SARSA)
+algorithm, further enriching insights into discrete-action
+methods for this task.
+Continuous-control methods have also been explored
+extensively. De Jesus et al. 12 introduced a DRL method
+based on Soft Actor Critic (SAC), demonstrating supe-
+rior performance for navigation tasks when using low-
+dimensional sensor data. Grando et al.13 conducted a detailed
+comparison between SAC and Deep Deterministic Policy
+Gradient (DDPG), analyzing various network architectures
+and their effects on learning efficiency. Additionally, Li et
+al. 14 explored the Twin Delayed Deep Deterministic Policy
+Gradient (TD3) algorithm and its enhanced variant using
+prioritized memory replay.
+However, these studies primarily rely on significantly
+reduced sets of LIDAR sensor readings to simplify the
+processing demands on the algorithms. While beneficial for
+computational simplicity, this reduction limits environmental
+perception, making it challenging to detect small or
+distant obstacles. Moreover, these algorithms employ
+model-free architectures, which do not leverage predictive
+dynamics models, potentially restricting their performance
+and extending training durations.
+Encoded Representations for Input
+Simplification
+Several studies have demonstrated that employing encoders
+to simplify input representations can substantially enhance
+the efficiency and performance of DRL algorithms. Zhang
+et al. 31 introduced latent representations to filter irrelevant
+information from observations, thereby focusing the policy’s
+attention on task-relevant features.
+Building upon this concept, Stooke et al. 32 demonstrated
+that separating representation learning from policy learning
+can outperform traditional end-to-end approaches, in which
+the same networks handle both observation processing and
+decision-making. By training encoders using unsupervised
+learning and independently optimizing policies on these
+latent representations, significant improvements in perfor-
+mance were observed across multiple benchmarks. Similarly,
+Prakash et al.33 showed that using autoencoders to compress
+high-dimensional data reduces computational demands and
+power consumption, particularly beneficial for embedded
+systems running DRL algorithms.
+Model-based DRL Approaches
+Model-based reinforcement learning has gained attention
+due to its sample efficiency and improved decision-making
+capabilities. Berkenkamp et al. 34 addressed safety concerns
+during exploration, showing how models could help avoid
+unsafe states, thereby collecting safer and more informative
+data. Kaiser et al.35 presented the Simulated Policy Learning
+algorithm, demonstrating that model-based methods can
+efficiently solve multiple Atari tasks with significantly fewer
+interactions compared to model-free counterparts.
+In the robotics domain, model-based DRL methods have
+been successfully applied in various contexts. Thuruthel et
+al. 36 used a predictive control algorithm for soft robotic
+manipulators, employing recurrent neural networks for
+dynamic modeling and trajectory optimization to guide
+policy decisions. Li et al. 37 enhanced the DDPG algorithm
+by integrating an ensemble of deep neural networks to model
+system dynamics, significantly improving sample efficiency
+and control performance for simulated robotic manipulation
+tasks.
+World Models
+Building upon model-based reinforcement learning, Ha and
+Schmidhuber 38 introduced the concept of World Models. In
+this approach, recurrent neural networks create compressed
+spatial and temporal representations of environments,
+enabling agents to achieve exceptional performance and
+efficiency. Hafner et al. 39 further developed this idea with
+the Dreamer algorithm, which leverages latent imagination
+to solve long-horizon tasks from image-based inputs.
+Dreamer was subsequently enhanced by Hafner et al.
+with the DreamerV2 algorithm 40, which operates within a
+compact latent space to achieve human-level performance on
+a wide array of Atari games. The framework was generalized
+further with DreamerV3 21, demonstrating versatility across
+numerous tasks with minimal hyperparameter tuning.
+Recently, Wu et al.41 successfully applied Dreamer methods
+to physical robots operating in real-world environments,
+achieving mastery of complex locomotion tasks with limited
+real-world interactions.
+To our knowledge, this paper is the first to apply a model-
+based DRL approach, specifically using the DreamerV3
+framework, to the TurtleBot3 navigation task. Additionally,
+this work is the first to introduce encoded representations for
+processing extensive environmental observations, enabling
+the effective utilization of full LIDAR datasets for navigation
+tasks.
+Theoretical Background
+This section describes the foundational theoretical concepts
+and methodologies underlying this research. We first review
+model-free algorithms previously applied to this task,
+Prepared usingsagej.cls
+4Journal of Intelligent & Fuzzy Systems XX(X)
+followed by explanations of model-based algorithms, world
+models, and the DreamerV3 framework.
+Reinforcement Learning Fundamentals
+Reinforcement Learning 6 is a machine learning paradigm in
+which an agent learns to make decisions by interacting with
+an environment to maximize cumulative rewards. The agent
+operates in discrete time steps. At each stept, it observes
+a states t, executes an actiona t, receives a rewardr t, and
+transitions to a subsequent states t+1. The objective is to
+learn a policyπ(a|s)that maximizes the expected cumulative
+discounted reward:
+E
+" TX
+t=0
+γtrt
+#
+6,
+whereγ∈[0,1]is the discount factor balancing immediate
+and long-term rewards.
+Model-Free Reinforcement Learning
+Model-free reinforcement learning algorithms directly learn
+optimal policies through interaction with the environment,
+without explicitly modeling environmental dynamics. In
+the context of continuous-action Turtlebot3 navigation, the
+algorithms previously used are Soft Actor-Critic (SAC) 15,
+Deep Deterministic Policy Gradient (DDPG) 16, and Twin
+Delayed DDPG (TD3) 17.
+SAC is an off-policy algorithm designed to maximize a
+trade-off between expected rewards and policy entropy, pro-
+moting exploration and preventing premature convergence to
+suboptimal policies. Its objective function is given by:
+J(π) =E π
+" TX
+t=0
+γt (rt +αH(π(·|s t)))
+#
+15,
+whereαcontrols the exploration-exploitation trade-off, and
+H(π(·|st))denotes the policy entropy. SAC updates its
+policy using a reparameterization trick and employs a soft
+Q-function incorporating entropy to enhance exploration.
+DDPG extends deterministic policy gradients to contin-
+uous action spaces using an actor-critic architecture. The
+actor networkµ(s|θ µ)generates actions from states, and the
+critic networkQ(s, a|θQ)evaluates action values. The policy
+gradient is computed as:
+∇θµ J≈E
+
+∇aQ(s, a|θQ)|a=µ(s)∇θµ µ(s|θµ)
+ 16.
+While DDPG effectively handles continuous actions, it
+suffers from overestimation bias and training instability.
+TD3 addresses DDPG’s limitations by employing clipped
+double-Q learning, delayed policy updates, and target
+policy smoothing. It utilizes two Q-networks, choosing
+the minimum estimate to mitigate overestimation. Policy
+updates occur less frequently to allow accurate value
+estimation, and noise is added to target policies to reduce
+variance. The TD3 target value is calculated as:
+y=r+γmin
+i=1,2
+Qθ′
+i
+(s′, πϕ′(s′)) 17,
+whereQ θ′
+i
+andπ ϕ′ represent target Q-networks and policy,
+respectively, improving stability and performance.
+Model-Based Reinforcement Learning
+Model-based Reinforcement Learning (MBRL) explicitly
+learns a predictive model of environmental dynamics,
+enhancing learning efficiency by simulating interactions
+internally. This approach significantly reduces real-world
+interactions, as simulations using the learned model are
+typically faster.
+In MBRL, neural networks predict subsequent states and
+rewards given current states and actions. Training the model
+typically involves minimizing mean squared error between
+predicted and actual outcomes. Once trained, simulated
+trajectories generated by the model facilitate efficient policy
+training and action selection.
+World Models
+World Models extend model-based RL by constructing
+generative neural network models that learn compressed
+spatial and temporal representations of the environment.
+These models consist of three primary components: the
+Vision (V) model, Memory (M) model, and Controller (C)
+model.
+The Vision model employs a Variational Autoencoder
+(V AE)30 to compress high-dimensional observationsxinto
+lower-dimensional latent vectorsz:
+z∼q(z|x) =N(µ, σ 2I) 30.
+The V AE optimizes the encoding to ensure accurate
+reconstruction of observations from the latent space.
+The Memory model integrates a Long Short-Term
+Memory (LSTM) network and a Mixture Density Network
+(MDN), predicting future latent vectorszt+1 from the current
+actiona t, latent vectorz t, and hidden stateh t:
+P(z t+1|at, zt, ht) =
+MX
+i=1
+πiN(µ i, σ2
+i ) 38.
+The LSTM captures temporal dynamics, while the MDN
+manages predictive uncertainty.
+The Controller model determines actions from latent
+vectors and hidden states through a linear mapping:
+at =W c[zt, ht] +b c
+38,
+whereW c andb c are model parameters. Training involves
+first optimizing the Vision and Memory models through
+random interactions, then training the Controller to
+maximize expected cumulative reward:
+R=E
+" TX
+t=0
+γtrt
+#
+6.
+This policy can be trained fully on the World Model’s
+understanding of the environment, and can be transferred to
+act on the actual environment after learning.
+DreamerV3
+DreamerV3 is a state-of-the-art RL algorithm that effectively
+generalizes across diverse tasks. It builds on world models,
+using a Recurrent State-Space Model (RSSM) that combines
+Prepared usingsagej.cls
+Steinmetz et al. 5
+an LSTM and V AE to encode observations and predict future
+states robustly.
+Key innovations of DreamerV3 include robust normaliza-
+tion via the symlog transformation:
+symlog(x) =sign(x)·log(1 +|x|) 21,
+which provides numerical stability across varying value
+scales. It also applies return normalization, facilitating
+consistent reward scales for stable learning.
+DreamerV3 trains policies through imagined rollouts
+generated by the world model, significantly enhancing
+sample efficiency. Additional improvements include discrete
+regression in the critic network, enhancing learning in
+sparse reward environments, and entropy regularization
+to promote exploration and avoid premature convergence.
+DreamerV3’s scalability further reduces hyperparameter
+sensitivity, allowing consistent high performance across
+diverse tasks.
+Methodology
+This section describes the methodology employed in our
+research, including the framework for the TurtleBot3
+environment and details of our proposed DRL architecture.
+The TurtleBot3 Framework
+The TurtleBot3 navigation task is formulated as a point-to-
+point challenge, where the robot navigates from a starting
+position to a randomly placed goal, avoiding collisions with
+obstacles. Each episode ends successfully if the robot reaches
+the target location, or unsuccessfully if it collides with an
+obstacle or exceeds the maximum step count.
+Our simulation framework builds upon the approach of de
+Jesus et al.12, utilizing the Burger model of TurtleBot3. Their
+original ROS Noetic implementation was updated to ROS2,
+which offers enhanced performance, active community
+support, and long-term maintenance 42.
+We also introduced an essential improvement in the
+reinforcement learning loop by controlling the rate of steps
+per second, which was previously unregulated. Lack of
+control in step frequency leads to several issues:
+1.Hardware Dependence:Algorithms trained on one
+type of hardware may perform poorly on different
+hardware due to variations in processing speed,
+notably impacting robots using low-power hardware.
+2.Evaluation Consistency:Inconsistent step rates
+between training (slower due to learning computa-
+tions) and evaluation (faster due to no learning over-
+head) can negatively affect performance assessments.
+3.Algorithm Comparability:Different algorithms
+inherently have varied computation times, leading
+to unequal step rates and unfair performance
+comparisons.
+To mitigate these issues and simulate realistic operational
+conditions, we standardized the step rate at 6.67 steps per
+second (0.15 seconds per step). This frequency balances
+algorithmic computational needs, actuator responsiveness,
+and practical step limits for efficient navigation.
+Figure 2.10 (blue) and 360 (red) distance readings description
+comparison.
+Figure 3.Environment setups used for algorithm comparison.
+We tested two sensor configurations: the standard
+configuration with 10 equally spaced LIDAR readings every
+36 degrees 12 , and the full sensor array of 360 readings (see
+Fig. 2). While the reduced set offers computational efficiency
+and the possibility to process the data within small policy
+networks that learn on the reward signal, the complete set
+significantly improves environmental awareness, capturing
+smaller and distant objects that may otherwise be missed. In
+addition to LIDAR data, the input state includes the robot’s
+relative position to the target (distance and angle) and its
+previous action (linear and angular velocities).
+The environments used for training and evaluation are
+illustrated in Fig. 3. Stages 1–3 replicate setups from
+previous studies, while stages 4–6 introduce increasing
+complexity with more obstacles and larger navigation paths.
+Stage 4 is a dense 5x5 meter environment, stage 5 expands to
+7.5x7.5 meters to test medium-distance navigation, and stage
+6 further increases the challenge with a 7.5x14 meter space,
+testing long-distance navigation under sparse rewards.
+The reward functionr(s), dependent on time stept, step
+limitT, LIDAR readingsD, robot position(x, y), and target
+position(x ′, y′), is defined as:
+r(s) =
+(
+100,if
+p
+(x−x ′)2 + (y−y ′)2 <0.4m,
+−10,ifmin(D)<0.2m ort=T.
+While alternative reward structures were considered, this
+sparse reward consistently yielded stable learning outcomes,
+aligning with prior findings in previous work10,12.
+Algorithm 1 describes the reinforcement learning formu-
+lation for the TurtleBot3 navigation task. The robot observes
+Prepared usingsagej.cls
+6Journal of Intelligent & Fuzzy Systems XX(X)
+Figure 4.Vision model learning process diagram.
+Figure 5.Memory model learning process diagram.
+its environment through LIDAR sensors, relative target posi-
+tion, and its own velocity. At each timestep, a policy network
+outputs continuous actions controlling the robot’s linear and
+angular velocities. Episodes terminate successfully when the
+robot reaches the goal (reward+100), or unsuccessfully
+upon collision or timeout (reward−10). The control loop
+operates at6.67Hz (0.15seconds per step) to ensure con-
+sistent training and deployment across different hardware
+platforms.
+Our proposed architecture leverages the DreamerV3
+framework, which incorporates a variational autoencoder
+(V AE) and a dynamics predictor for efficient handling of
+extensive sensor inputs and enhanced decision-making.
+The Vision model is a Multilayer perceptron Variational
+Autoencoder (MLP-V AE), it compresses observationso t,
+comprising LIDAR readings, relative target position, and
+previous actions, into a latent representationz t. Training
+involves random environmental interactions, with the
+encoder mapping inputs to latent vectors and the decoder
+reconstructing the original observations. Reconstruction
+error (mean squared error) guides training, as depicted in
+Fig. 4.
+The Memory model employs an LSTM to capture
+temporal dynamics. It predicts subsequent latent vectors,
+rewards, and environment flags using the current latent
+vectorz t, actiona t, and its internal hidden stateh t. The
+prediction error between the generated predictions and actual
+outcomes trains this model, illustrated in Fig. 5.
+The Actor-Critic network determines actions based on
+the latent statez t and hidden stateh t. The critic evaluates
+action valuesQ(s, a)to guide actor optimization. Targets for
+critic error calculations utilize future states predicted by the
+memory model. Training involves simulated rollouts from
+the vision and memory models, shown in Fig. 6.
+Hyperparameters
+We implemented SAC, DDPG, and TD3 following their
+original designs 15–17. Networks consisted of two fully
+connected layers (400 and 300 units) with ReLU activation.
+All models were fine-tuned.
+The DreamerV3 model 21 utilized a slightly reduced
+architecture compared to its original version to enhance
+computational efficiency and training stability. Specifically,
+we adopted an MLP-based encoder-decoder due to the
+absence of visual input, and reduced network layer sizes by
+half. The specific hyperparameters for our architecture can
+be found in the Supplementary Material, since there is an
+extensive set of hyperparameters, and most of them equal the
+original implementation 21.
+Hyperparameters for each model-free algorithm, summa-
+rized in Table 1, were chosen based on standard practices
+and fine-tuning. Table 2 reports the number of trainable
+parameters.
+Table 1.Hyperparameters used for each model-free algorithm.
+Hyperparameter SAC DDPG TD3
+Learning Rate (Actor, Critic) 0.0003, 0.0003 0.0001, 0.001 0.001, 0.001
+Discount Factor (γ) 0.99 0.99 0.99
+Soft Update Coefficient (τ) 0.001 0.001 0.005
+Replay Buffer Size 100,000 100,000 100,000
+Batch Size 128 128 128
+Actor/Critic Layer Sizes [400, 300] [400, 300] [400, 300]
+Reward Scale 2 — —
+Noise (TD3 Only) — — 0.1
+Update Actor Interval (TD3) — — 2
+Table 2.Total number of trainable parameters given the
+number of distance readings.
+Algorithm 10 Readings 360 Readings
+DreamerV3 21 4,163,089 4,521,839
+SAC 15 635,508 1,335,508
+DDPG 16 514,406 1,074,406
+TD3 17 763,408 1,603,408
+Given the modifications (ROS2 upgrade and controlled
+step rates) and the use of full sensor arrays previously
+untested in the literature, all algorithms were retrained
+from scratch to ensure fairness and validity in comparative
+evaluation; no previous results were considered.
+Figure 6.Controller learning process diagram.
+Prepared usingsagej.cls
+Steinmetz et al. 7
+Algorithm 1TurtleBot3 Navigation: Reinforcement Learning Formulation
+1:Observation Space:o t = [d1, . . . , dN , δt, αt, vlin
+t−1, vang
+t−1]whered i ∈[0, dmax]are LIDAR readings,δ t ∈R + is distance
+to goal,α t ∈[−π, π]is angle to goal, andN∈ {10,360}
+2:Action Space:a t = [vlin, vang]∈[0,1]×[−1,1](normalized)
+3:Reward Function:r(o t) =
+
+
+
+rsuccess ifδ t < dgoal (success)
+rfail ifmin(d 1, . . . , dN )< dcollision ort≥T max (collision/timeout)
+0otherwise
+4:Parameters:d max = 3.5m,d goal = 0.4m,d collision = 0.2m,r success = +100,r fail =−10,T max = 300or500,∆t=
+0.15s
+5:Initialize:EnvironmentE, policy networkπ θ, replay bufferD
+6:forepisode= 1toN episodes do
+7:(x goal, ygoal)←sample random goal position
+8:(x 0, y0, θ0)←reset robot to initial pose
+9:o 0 ←GETOBSERVATION()▷Initial LIDAR, position, velocity
+10:t←0, done←False
+11:whilenot donedo
+12:a t ←π θ(ot)▷Policy selects action
+13:// Environment interaction
+14:Send velocity commands(v lin, vang)to robot actuators
+15:// Perception
+16:Read LIDAR:{d 1, . . . , dN }from laser scanner
+17:Read odometry:(x t+1, yt+1, θt+1)from wheel encoders
+18:// Observation construction
+19:Compute distance:δ t+1 ←
+p
+(xgoal −x t+1)2 + (ygoal −y t+1)2
+20:Compute angle:α t+1 ←atan2(y goal −y t+1, xgoal −x t+1)−θ t+1
+21:Build next observation:o t+1 ←[d 1, . . . , dN , δt+1, αt+1, vlin, vang]
+22:// Reward computation and termination
+23:ifδ t+1 < dgoal then
+24:r t ←r success, done←True▷Goal reached
+25:else ifmin(d 1, . . . , dN )< dcollision ort≥T max then
+26:r t ←r fail, done←True▷Collision or timeout
+27:else
+28:r t ←0, done←False▷Continue navigation
+29:end if
+30:Store transition(o t, at, rt, ot+1,done)inD
+31:Updateπ θ
+32:o t ←o t+1
+33:t←t+ 1
+34:Wait for∆t ▷Maintain control rate
+35:end while
+36:end for
+Results
+In this section, we present and discuss the results obtained
+from training and evaluating the algorithms across different
+navigation stages. Each algorithm was trained for 5000
+episodes per stage and evaluated over 100 episodes. For the
+initial four stages, training began from scratch. However,
+for the more challenging stages 5 and 6, characterized by
+larger environments and reduced success probability under
+random policies, we utilized pre-trained models to facilitate
+learning. Specifically, models were pre-trained on stage 4
+before initiating stage 5 training, and subsequently, models
+trained on stages 4 and 5 were used as a starting point for
+training stage 6.
+We conducted experiments under two distinct sensor
+input configurations: a reduced set of 10 LIDAR readings,
+common in prior studies 12, and the complete 360-readings
+sensor data. The 360-reading configuration, though more
+computationally demanding, provides a richer spatial
+context, enhancing decision-making and environmental
+awareness.
+Thesuccess rate, detailed in Tables 3 and 4, denotes
+the proportion of evaluation episodes in which the robot
+successfully navigated to the target location without collision
+or exceeding the step limit.
+Performance with Reduced Sensor Input (10
+Readings)
+Fig. 7 illustrates the learning curves for the reduced sensor
+configuration. All evaluated algorithms achieved successful
+learning, with DreamerV3 notably displaying a more stable
+and consistent improvement in rewards throughout training.
+Testing results summarized in Table 3 demonstrate that
+DreamerV3 outperformed baseline methods in stages 2, 4,
+Prepared usingsagej.cls
+8Journal of Intelligent & Fuzzy Systems XX(X)
+and 6, achieving the highest mean and median success rates
+across all environments.
+Performance with Full Sensor Input (360
+Readings)
+Fig. 8 shows learning curves for the complete LIDAR data
+input. DreamerV3 successfully adapted to this increased
+input dimensionality, demonstrating rapid and stable learn-
+ing. Conversely, the baseline algorithms encountered sig-
+nificant difficulties. SAC exhibited unstable and suboptimal
+convergence, DDPG showed limited learning capabilities
+restricted mostly to simpler environments (stages 1 and 3),
+and TD3 consistently failed to learn effective policies.
+These observations are reinforced by test results reported
+in Table 4, where DreamerV3 achieved a perfect 100%
+success rate across all stages, markedly outperforming
+other methods, which struggled significantly under the 360-
+reading configuration. This clearly highlights DreamerV3’s
+robustness and scalability, effectively exploiting the rich
+spatial data provided by complete sensor coverage to
+enhance obstacle avoidance and route planning.
+Analysis and Discussion
+DreamerV3 consistently demonstrated superior perfor-
+mance, particularly in challenging scenarios involving long-
+distance navigation (stage 6) and densely cluttered envi-
+ronments (stage 4). The improved outcomes from using
+360-degree sensor data underscore the advantages of richer
+environmental perception, directly benefiting path planning
+and obstacle avoidance.
+It is important to emphasize that the performance
+deterioration observed in baseline algorithms (DDPG, SAC,
+and TD3) with full 360-degree sensor input aligns with
+findings from previous studies. Such model-free algorithms,
+initially designed for reduced sensor inputs, lack the
+scalability to efficiently process and learn from high-
+dimensional observations. The limitations in their simpler
+network architectures lead to inefficient feature extraction
+and unstable learning under increased sensory complexity.
+These results reinforce the importance of adopting scalable,
+model-based architectures, such as DreamerV3, which
+can effectively handle extensive sensor inputs without
+compromising performance.
+Table 3.Success rate (%) across six stages (10 distance
+sensor readings). Algorithm references: DDPG 16, SAC15,
+TD3 17, DreamerV3 21.
+Stage DDPG SAC TD3 DreamerV3
+1100.0099.00100.00 100.00
+2 77.00 89.00 85.0099.00
+3 99.00 96.00100.0099.00
+4 89.00 95.00 94.0096.00
+5 90.00 84.0093.0087.00
+6 71.00 56.00 75.0080.00
+Mean87.67 86.50 91.1793.50
+Median89.50 92.00 93.5097.50
+Table 4.Success rate (%) across six stages (360 distance
+sensor readings). Algorithm references: DDPG 16, SAC15,
+TD3 17, DreamerV3 21.
+Stage DDPG SAC TD3 DreamerV3
+1 96.00100.0018.00100.00
+2 12.00 80.00 17.00100.00
+3100.00 100.007.00100.00
+4 10.00 54.00 19.00100.00
+5 4.00 79.00 4.00100.00
+6 0.00 92.00 1.00100.00
+Mean37.00 84.17 11.00100.00
+Median11.00 86.00 12.00100.00
+Figure 7.Learning curves for agents trained with 10 sensor
+readings.
+Figure 8.Learning curves for agents trained with 360 sensor
+readings.
+Limitations
+While the results presented demonstrate the effectiveness and
+scalability of the proposed architecture, limitations should be
+acknowledged.
+First, the DreamerV3 architecture, due to its model-based
+nature and use of larger networks, involves a significantly
+larger number of hyperparameters and network components
+compared to conventional model-free algorithms such
+as DDPG, SAC, or TD3. This increased complexity
+can lead to higher computational demands during both
+training and inference. However, it is important to note
+that modern embedded platforms, such as the NVIDIA
+Jetson Nano 43 and Xavier 44, are well-suited for running
+such architectures efficiently in real-time, making practical
+deployment feasible.
+Prepared usingsagej.cls
+Steinmetz et al. 9
+Second, although the proposed method achieves strong
+performance in simulation across both low and high-
+dimensional sensor inputs, it has not yet been validated
+in real-world robotic platforms. This remains an essential
+step toward verifying robustness under realistic uncertainties,
+hardware limitations, and sensor noise. We plan to address
+this in future research by implementing and testing the
+architecture on a physical TurtleBot3 Burger platform.
+Moreover, due to hardware constraints associated with
+the available computational resources, we were unable
+to perform multiple runs with different random seeds
+to provide a statistically robust analysis of the results.
+Consequently, the reported performance metrics should be
+interpreted as representative rather than exhaustive indicators
+of the algorithm’s behavior. We encourage future studies to
+replicate these experiments under varying initialization seeds
+to assess variance and further validate the consistency of the
+observed performance.
+Finally, while our current setup includes static obstacle
+scenarios (as shown in Fig. 3), we have not yet incorporated
+dynamic or unknown moving obstacles such as other
+agents or pedestrians. These scenarios are common in real-
+world environments and present additional challenges for
+perception and planning. As part of future research, we
+intend to extend the simulation environments to include such
+dynamics and evaluate the adaptability of our architecture
+under these more complex conditions.
+Conclusion
+This study introduced a model-based deep reinforcement
+learning framework for autonomous robot navigation
+from LIDAR observations. Built upon the DreamerV3
+algorithm, the proposed approach integrates a Multi-
+Layer Perceptron Variational Autoencoder to encode high-
+dimensional sensor data into compact latent representations,
+enabling efficient world-model learning and imagination-
+based policy optimization.
+The experimental results demonstrate that our method sig-
+nificantly outperforms model-free baselines from previous
+works, namely, SAC12, DDPG 13, and TD3 14 across a range
+of simulated TurtleBot3 navigation environments. In particu-
+lar, the proposed architecture successfully handled full 360-
+readings LIDAR inputs, achieving a 100% success rate in
+all test scenarios, while model-free methods failed to scale
+effectively under this conditions. These findings highlight the
+potential of model-based DRL and unsupervised observation
+processing in this context.
+Future work will focus on extending the proposed
+framework to more complex and realistic conditions.
+Specifically, we plan to:
+• Conduct real-world experiments on physical robotic
+platforms to validate performance under real-world
+noise and uncertainty.
+• Incorporate dynamic and unpredictable obstacles to
+test adaptability in non-static environments.
+• Explore multimodal sensory integration, including
+visual and proprioceptive inputs, to enhance environ-
+mental understanding.
+• Generalize the approach to other robotic domains
+such as aerial and underwater systems, broadening
+its applicability to diverse control and perception
+challenges.
+Overall, this research demonstrates the potential of
+predictive world models for high-dimensional perception
+and robust decision-making, advancing the capabilities
+of autonomous robots operating in complex real-world
+environments.
+References
+1. Seeni A, Schäfer B and Hirzinger G. Robot mobility
+systems for planetary surface exploration–state-of-the-art and
+future outlook: a literature survey.Aerospace Technologies
+Advancements2010; 492: 189–208.
+2. Martinez CJM, Salguero RC, Palomares R et al. Mechatronics
+development of terrestrial mobile robot for exploring and
+monitoring environmental parameters at mine analogue sites
+using iot platform. In2020 IEEE XXVII International
+Conference on Electronics, Electrical Engineering and
+Computing (INTERCON). IEEE, pp. 1–4.
+3. Grassi R, Rea P, Ottaviano E et al. Application of an inspection
+robot composed by collaborative terrestrial and aerial modules
+for an operation in agriculture. InAdvances in Service and
+Industrial Robotics: Proceedings of the 26th International
+Conference on Robotics in Alpe-Adria-Danube Region, RAAD
+2017. Springer, pp. 539–546.
+4. Fiorini P and Prassler E. Cleaning and household robots: A
+technology survey.Autonomous robots2000; 9(3): 227–235.
+5. Keith R and La HM. Review of autonomous mobile robots for
+the warehouse environment.arXiv preprint arXiv:240608333
+2024; .
+6. Sutton RS and Barto AG.Reinforcement learning: An
+introduction. MIT press, 2018.
+7. Zhu K and Zhang T. Deep reinforcement learning based mobile
+robot navigation: A review.Tsinghua Science and Technology
+2021; 26(5): 674–691.
+8. ROBOTIS. TurtleBot3.https://www.robotis.us/
+turtlebot-3/, 2017. Accessed: 2025-07-28.
+9. Escobar-Naranjo J, Caiza G, Ayala P et al. Autonomous
+navigation of robots: optimization with dqn.Applied Sciences
+2023; 13(12): 7202.
+10. de Moraes LD, Kich V A, Kolling AH et al. Double
+deep reinforcement learning techniques for low dimensional
+sensing mapless navigation of terrestrial mobile robots. In
+International Conference on Intelligent Systems Design and
+Applications. Springer, pp. 156–165.
+11. Anas H, Ong WH and Malik OA. Comparison of deep q-
+learning, q-learning and sarsa reinforced learning for robot
+local navigation. InInternational Conference on Robot
+Intelligence Technology and Applications. Springer, pp. 443–
+454.
+12. de Jesus JC, Kich V A, Kolling AH et al. Soft actor-critic for
+navigation of mobile robots.Journal of Intelligent & Robotic
+Systems2021; 102(2): 1–11.
+13. Grando RB, de Jesus JC, Kich V A et al. Deterministic
+and stochastic analysis of deep reinforcement learning for
+low dimensional sensing-based navigation of mobile robots.
+In2022 Latin American Robotics Symposium (LARS), 2022
+Brazilian Symposium on Robotics (SBR), and 2022 Workshop
+on Robotics in Education (WRE). IEEE, pp. 193–198.
+Prepared usingsagej.cls
+10Journal of Intelligent & Fuzzy Systems XX(X)
+14. Li P, Wang Y and Gao Z. Path planning of mobile robot
+based on improved td3 algorithm. In2022 IEEE International
+Conference on Mechatronics and Automation (ICMA). IEEE,
+pp. 715–720.
+15. Haarnoja T, Zhou A, Abbeel P et al. Soft actor-critic: Off-
+policy maximum entropy deep reinforcement learning with
+a stochastic actor. InInternational conference on machine
+learning. PMLR, pp. 1861–1870.
+16. Lillicrap T P, Hunt J J, Pritzel A, Heess N, Erez T,
+Tassa Y , Silver D and Wierstra D. Continuous control
+with deep reinforcement learning. InProceedings of the
+International Conference on Learning Representations (ICLR),
+2016. PMLR.
+17. Fujimoto S, Hoof H and Meger D. Addressing function
+approximation error in actor-critic methods. InInternational
+conference on machine learning. PMLR, pp. 1587–1596.
+18. Moerland TM, Broekens J, Plaat A et al. Model-based
+reinforcement learning: A survey.Foundations and Trends®
+in Machine Learning2023; 16(1): 1–118.
+19. Janner M, Fu J, Zhang M et al. When to trust your
+model: Model-based policy optimization.Advances in neural
+information processing systems2019; 32.
+20. Zheng R, Wang X, Sun Y et al. Taco: Temporal latent
+action-driven contrastive loss for visual reinforcement learning.
+Advances in Neural Information Processing Systems2024; 36.
+21. Hafner D, Pasukonis J, Ba J et al. Mastering diverse domains
+through world models.arXiv preprint arXiv:2301041042023;
+.
+22. Hansen N, Su H and Wang X. Td-mpc2: Scalable,
+robust world models for continuous control.arXiv preprint
+arXiv:2310168282023; .
+23. Ahmad M, Yoganathan G, Rashid MM et al. Improved
+smoothed functional algorithms-optimized pid controller for
+efficient speed regulation of wind turbines.IEEE Transactions
+on Industry Applications2025; .
+24. Yonezawa H, Yonezawa A and Kajiwara I. Experimental
+verification of active oscillation controller for vehicle drivetrain
+with backlash nonlinearity based on norm-limited spsa.
+Proceedings of the Institution of Mechanical Engineers, Part
+K: Journal of Multi-body Dynamics2024; 238(1): 134–149.
+25. Dubbioso S, Jalalvand A, Wai J et al. Model-free stabilization
+via extremum seeking using a cost neural estimator.Expert
+Systems with Applications2024; 258: 125204.
+26. Nataraj D and Subramanian M. Design and optimal tuning
+of fractional order pid controller for paper machine headbox
+using jellyfish search optimizer algorithm.Scientific Reports
+2025; 15(1): 1631.
+27. Al-Jodah A, Abbas SJ, Hasan AF et al. Pso-based optimized
+neural network pid control approach for a four wheeled
+omnidirectional mobile robot.International Review of Applied
+Sciences and Engineering2023; 14(1): 58–67.
+28. Kadhim RA, Kadhim MQ, Al-Khazraji H et al. Bee algorithm
+based control design for two-links robot arm systems.IIUM
+Engineering Journal2024; 25(2): 367–380.
+29. Khaleel RZ, Khaleel HZ, Abdullah Al-Hareeri AA et al.
+Improved trajectory planning of mobile robot based on pelican
+optimization algorithm.Journal Européen des Systèmes
+Automatisés2024; 57(4).
+30. Kingma DP and Welling M. Auto-encoding variational bayes.
+arXiv preprint arXiv:131261142013; .
+31. Zhang A, McAllister R, Calandra R et al. Learning
+invariant representations for reinforcement learning without
+reconstruction.arXiv preprint arXiv:2006107422020; .
+32. Stooke A, Lee K, Abbeel P et al. Decoupling representation
+learning from reinforcement learning. InInternational
+conference on machine learning. PMLR, pp. 9870–9879.
+33. Prakash B, Horton M, Waytowich NR et al. On the use of deep
+autoencoders for efficient embedded reinforcement learning. In
+Proceedings of the 2019 on Great Lakes Symposium on VLSI.
+pp. 507–512.
+34. Berkenkamp F, Turchetta M, Schoellig A et al. Safe
+model-based reinforcement learning with stability guarantees.
+Advances in neural information processing systems2017; 30.
+35. Kaiser L, Babaeizadeh M, Milos P et al. Model-
+based reinforcement learning for atari.arXiv preprint
+arXiv:1903003742019; .
+36. Thuruthel TG, Falotico E, Renda F et al. Model-based
+reinforcement learning for closed-loop dynamic control of soft
+robotic manipulators.IEEE Transactions on Robotics2018;
+35(1): 124–134.
+37. Li X, Shang W and Cong S. Model-based reinforcement learn-
+ing for robot control. In2020 5th International Conference
+on Advanced Robotics and Mechatronics (ICARM). IEEE, pp.
+300–305.
+38. Ha D and Schmidhuber J. World models.arXiv preprint
+arXiv:1803101222018; .
+39. Hafner D, Lillicrap T, Ba J et al. Dream to control:
+Learning behaviors by latent imagination.arXiv preprint
+arXiv:1912016032019; .
+40. Hafner D, Lillicrap T, Norouzi M et al. Mastering atari with
+discrete world models.arXiv preprint arXiv:2010021932020;
+.
+41. Wu P, Escontrela A, Hafner D et al. Daydreamer: World models
+for physical robot learning. InConference on robot learning.
+PMLR, pp. 2226–2240.
+42. Thomas D. Changes between ros 1 and ros 2.https://
+design.ros2.org/articles/changes.html, 2024.
+Accessed: 2024-07-14.
+43. NVIDIA Corporation. Nvidia jetson nano developer kit, 2025.
+URLhttps://developer.nvidia.com/embedded/
+jetson-nano. Accessed: 2025-10-13.
+44. NVIDIA Corporation. Nvidia jetson agx xavier,
+2025. URLhttps://www.nvidia.com/en-us/
+autonomous-machines/embedded-systems/
+jetson-agx-xavier/. Accessed: 2025-10-13.
+Prepared usingsagej.cls

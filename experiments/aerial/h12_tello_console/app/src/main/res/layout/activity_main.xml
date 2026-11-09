@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <ImageView
+        android:id="@+id/cam"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter"
+        android:contentDescription="@string/app_name" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:background="#99000000"
+        android:orientation="vertical"
+        android:padding="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/tvLink"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Tello→Mac —"
+                    android:textColor="#FFD54F"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:fontFamily="monospace" />
+
+                <TextView
+                    android:id="@+id/tvStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="connecting…"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnGroundLock"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:minWidth="110dp"
+                android:paddingLeft="10dp"
+                android:paddingRight="10dp"
+                android:text="地面锁 ON"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="#CCB71C1C" />
+
+            <Button
+                android:id="@+id/btnPilotMode"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:minWidth="120dp"
+                android:paddingLeft="10dp"
+                android:paddingRight="10dp"
+                android:text="手动"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="#CC2E7D32" />
+
+            <Button
+                android:id="@+id/btnReconnect"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:minWidth="110dp"
+                android:paddingLeft="10dp"
+                android:paddingRight="10dp"
+                android:text="重启控制台"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="#CC1565C0" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnRecord"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minWidth="88dp"
+                android:text="录制"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="#CCB71C1C" />
+
+            <Button
+                android:id="@+id/btnStopRecord"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:minWidth="88dp"
+                android:text="停止"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="#CC546E7A" />
+
+            <TextView
+                android:id="@+id/tvRecord"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="10dp"
+                android:text="未录制"
+                android:textColor="#FFAB91"
+                android:textSize="13sp"
+                android:fontFamily="monospace" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/etOrinUrl"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:background="#33FFFFFF"
+                android:hint="Mac URL: http://127.0.0.1:8090"
+                android:imeOptions="actionDone"
+                android:inputType="textUri"
+                android:paddingLeft="8dp"
+                android:paddingRight="8dp"
+                android:singleLine="true"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#88FFFFFF"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnApplyUrl"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginStart="6dp"
+                android:minWidth="64dp"
+                android:text="应用"
+                android:textSize="12sp"
+                android:textColor="#FFFFFF"
+                android:background="#CC2E7D32" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvChannels"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="ch: —"
+            android:textColor="#B0FFB0"
+            android:textSize="12sp"
+            android:fontFamily="monospace" />
+
+        <TextView
+            android:id="@+id/tvRc"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="tello rc: 0 0 0 0"
+            android:textColor="#80C8FF"
+            android:textSize="12sp"
+            android:fontFamily="monospace" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="#99000000"
+        android:padding="8dp"
+        android:text="MODE2 | ch5急停 ch6起飞/降落 | 录制/停止保存图像+里程计+轨迹 | URL=127.0.0.1:8090 | 勿连TELLO"
+        android:textColor="#CCCCCC"
+        android:textSize="11sp" />
+</FrameLayout>

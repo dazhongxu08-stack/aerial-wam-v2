@@ -154,6 +154,49 @@ def cap_r_before_sharp_turn(
     return cap
 
 
+def hold_carrot_before_bend(
+    path: np.ndarray,
+    s_anchor: float,
+    r_lookahead: float,
+    *,
+    hold_m: float = 8.0,
+    release_m: float = 12.0,
+    min_turn_deg: float = 60.0,
+) -> float:
+    """Keep the carrot on the inbound leg until a sharp bend is close.
+
+    A 25 m lookahead otherwise sits on the exit leg while the vehicle is still
+    in the approach street, and the nose yaws into the side buildings.
+    """
+    pts = np.asarray(path, dtype=np.float64)
+    cum, total = compute_polyline_cum_lengths(pts)
+    s0 = float(np.clip(s_anchor, 0.0, total))
+    cap = float(r_lookahead)
+    window = max(float(r_lookahead), 25.0)
+    for i in range(len(pts) - 2):
+        s_vert = float(cum[i + 1])
+        if s_vert <= s0 + 1e-6:
+            continue
+        if s_vert > s0 + window + 1e-6:
+            break
+        v1 = pts[i + 1, :2] - pts[i, :2]
+        v2 = pts[i + 2, :2] - pts[i + 1, :2]
+        n1, n2 = float(np.linalg.norm(v1)), float(np.linalg.norm(v2))
+        if n1 < 1e-6 or n2 < 1e-6:
+            continue
+        turn = math.degrees(
+            math.acos(float(np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)))
+        )
+        if turn >= float(min_turn_deg):
+            dist = s_vert - s0
+            if dist > float(hold_m):
+                cap = min(cap, dist)
+            else:
+                cap = min(cap, dist + float(release_m))
+            break
+    return cap
+
+
 def sample_point_along_polyline(
     path_points: np.ndarray,
     segment_idx: int,
@@ -354,6 +397,11 @@ class AdaptiveSubgoalGenerator:
                 r_lookahead,
                 r_min=float(self.r_min),
             )
+        r_lookahead = hold_carrot_before_bend(
+            global_path,
+            s_anchor,
+            r_lookahead,
+        )
 
         terminal_pin = False
         segment_pin = False
