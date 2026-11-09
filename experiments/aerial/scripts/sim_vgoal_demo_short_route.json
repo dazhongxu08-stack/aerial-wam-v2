@@ -1,0 +1,28 @@
+{
+  "version": "sim_vgoal_demo_short_v1",
+  "description": "Short outdoor visual demo (~40m): first segment of long_route_01 toward city/cars",
+  "n_routes": 1,
+  "routes": [
+    {
+      "route_id": "demo_short_01",
+      "route_idx": 0,
+      "base_route_idx": 5,
+      "category": "demo_short",
+      "nominal_length_m": 40.0,
+      "start_pos": [-746.355, -250.738, 36.855],
+      "goal_pos": [-793.522, -225.238, 39.855],
+      "pos": [
+        [-746.355, -250.738, 36.855],
+        [-749.355, -250.738, 36.855],
+        [-749.355, -250.738, 39.855],
+        [-754.551, -247.738, 39.855],
+        [-762.345, -243.238, 39.855],
+        [-770.139, -238.738, 39.855],
+        [-777.933, -234.238, 39.855],
+        [-785.728, -229.738, 39.855],
+        [-793.522, -225.238, 39.855]
+      ],
+      "gpt_instruction": "Approach the car ahead using monocular visual navigation."
+    }
+  ]
+}

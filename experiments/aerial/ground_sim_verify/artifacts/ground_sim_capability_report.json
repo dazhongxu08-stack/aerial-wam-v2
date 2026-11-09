@@ -1,0 +1,74 @@
+{
+  "t0_connectivity": {
+    "host": "127.0.0.1",
+    "port": 2200,
+    "vehicle_bp": "vehicle.tesla.model3",
+    "connected": true,
+    "map": "HumenCorridor/Maps/HumenCorridor/HumenCorridor",
+    "vehicle_bp_found": true,
+    "pass": true
+  },
+  "t1_carla_ground": {
+    "host": "127.0.0.1",
+    "port": 2200,
+    "vehicle_bp": "vehicle.tesla.model3",
+    "w": 224,
+    "h": 224,
+    "n": 15,
+    "dt_s": 0.05,
+    "rgb": {
+      "pass": true,
+      "detail": {
+        "n_frames": 14,
+        "std": 50.73166632786212
+      },
+      "sanity": "std=50.73"
+    },
+    "depth": {
+      "pass": true,
+      "detail": {
+        "n_frames": 14
+      }
+    },
+    "odom": {
+      "pass": true,
+      "detail": {
+        "loc": [
+          -3470.16064453125,
+          2037.5909423828125,
+          12.343317985534668
+        ],
+        "yaw": -45.92237854003906,
+        "vel": [
+          2.5464863995239284e-08,
+          -2.6298236477373393e-08,
+          -7.839993953704834
+        ]
+      }
+    },
+    "collision": {
+      "pass": true,
+      "detail": {
+        "collided": false,
+        "sensor": "ok"
+      }
+    },
+    "physics": {
+      "pass": false,
+      "detail": {
+        "dist_m": 0.0,
+        "speed_mps": 3.660678270643142e-08
+      }
+    },
+    "continuous_rgb": {
+      "pass": true,
+      "detail": {
+        "fps": 18.365208634639608,
+        "monotonic": true,
+        "min_fps": 5.0
+      },
+      "sanity": "fps=18.37"
+    },
+    "pass": false
+  }
+}

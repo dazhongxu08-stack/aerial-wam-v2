@@ -1,0 +1,139 @@
+env:
+  backend: mock
+  host: 127.0.0.1
+  port: 41451
+  camera: front_custom
+  vehicle: drone_1
+  width: 224
+  height: 224
+  step_hz: 5.0
+  grab_depth: false
+  health_check: true
+  seed: 0
+buffer:
+  capacity_episodes: 1000
+  seed: 0
+reward:
+  w_progress: 1.0
+  w_collision: 10.0
+  w_maneuver: 0.01
+  success_bonus: 10.0
+  w_eff_strafe: 0.0
+  w_eff_heading: 0.0
+  w_eff_idle: 0.0
+  eff_strafe_thr: 0.5
+  eff_idle_ds_thr_m: 0.05
+  success_dist_m: 3.0
+  w_maneuver_final: 0.01
+  maneuver_curriculum_threshold: 0.0
+  maneuver_curriculum_ramp: 1.0
+dynamics:
+  kind: torch
+  latent_dim: 8
+  collide_radius_m: 2.0
+world_model:
+  recurrent_dim: 512
+  stoch_dim: 32
+  stoch_classes: 32
+  pred_transform: symlog
+  reward_head: two_hot
+  num_bins: 255
+  bin_lo: -20.0
+  bin_hi: 20.0
+  free_bits: 1.0
+  loss_scales:
+    pred: 1.0
+    dyn: 1.0
+    rep: 0.1
+    reward: 10.0
+    depth: 10.0
+  coll_pos_weight: 0.0
+  coll_near_depth_m: 5.0
+  coll_rank_hinge_weight: 0.0
+  coll_rank_hinge_margin: 0.15
+  coll_hinge_fwd_max_m: 4.0
+  coll_fwd_depth_aux_weight: 0.0
+  reward_dt: 0.2
+  decoder:
+    train_only: true
+  lr: 0.0001
+  train_steps_per_update: 1
+  grad_clip: 1000.0
+  device: cuda
+  checkpoint_dir: experiments/aerial/rl/artifacts/wm_ckpt_v1a_20260815
+  depth_head:
+    enable: true
+    n_frames: 4
+    base: 32
+    lr: 0.0001
+    grad_clip: 5.0
+    absrel_weight: 1.0
+    nll_weight: 0.1
+    delta_weight: 0.1
+    delta_min_gt_m: 0.5
+    delta_support_ratio: 0.6
+    approach_oversample: 4
+    max_depth_m: 200.0
+    scale_depth_min_m: 1.0
+    scale_depth_max_m: 40.0
+    near_overread_hinge_weight: 0.0
+    near_absrel_pinball_weight: 0.0
+    near_absrel_pinball_tau: 0.9
+    fwd_overread_hinge_weight: 0.0
+    near_absrel_p90_weight: 0.0
+    near_absrel_p90_tau: 0.9
+    center_frac: 0.5
+    trigger_m: 3.0
+    freeze_encoder: false
+    checkpoint_path: experiments/aerial/rl/artifacts/depth_ckpt_p45mid_s8j_20260825/depth_best_holdout_da3_ft_head.pt
+    checkpoint_dir: experiments/aerial/rl/artifacts/depth_ckpt_p45mid_s8j_20260825
+imagination:
+  batch: 64
+  horizon: 10
+safety:
+  kind: three_zone
+  l1_m: 8.0
+  l2_m: 5.0
+  l3_m: 1.5
+  v1_m_s: 2.0
+  v2_m_s: 1.0
+  v_stop_m_s: 0.2
+  v_cruise_m_s: 25.0
+  a_max_m_s2: 2.5
+  delay_s: 0.2
+  min_tau_s: 1.0
+  max_p_coll: 0.5
+  retreat_step_m: 3.0
+planner:
+  enable: false
+  horizon: 5
+tau_predictor:
+  enable: true
+  kind: foe_calibrated
+  use_gt_depth: false
+  center_frac: 0.5
+  min_closing_m_s: 0.05
+  max_tau_s: 60.0
+  dt_s: 0.1
+  ckpt: experiments/aerial/rl/artifacts/tau_ckpt_foe_r60_20260815/tau_foe_calibrator.pt
+  device: cpu
+corrector:
+  iterations: 10
+  episodes_per_iter: 1
+  max_steps: 200
+  enable_wm_update: true
+  enable_policy_update: false
+  strict_gates: false
+  wm_batch: 32
+  wm_window: 8
+  smoke: false
+v4:
+  lambda_gae: 0.95
+  gamma: 0.997
+  entropy_scale: 0.0003
+  actor_lr: 0.0001
+  critic_lr: 0.0001
+  action_scale: 1.0
+  device: cpu
+annotation: null
+max_episodes: 20
